@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import requests
+import traceback
 from dotenv import load_dotenv
 from websockets.asyncio.client import connect as ws_connect
 
@@ -242,7 +243,19 @@ class GitHubState:
                    "content": base64.b64encode(json.dumps(state, separators=(",", ":")).encode()).decode()}
         if self.sha: payload["sha"] = self.sha
         r = requests.put(url, headers=self._headers(), json=payload, timeout=25)
-        r.raise_for_status(); self.sha = (r.json().get("content") or {}).get("sha")
+        if r.status_code >= 400:
+            try: detail = (r.json() or {}).get("message", r.text[:500])
+            except Exception: detail = r.text[:500]
+            remaining = r.headers.get("X-RateLimit-Remaining", "?")
+            reset = r.headers.get("X-RateLimit-Reset", "?")
+            if r.status_code == 403 and remaining == "0":
+                hint = f"GitHub API rate limit habis (reset epoch {reset})."
+            elif r.status_code == 403:
+                hint = "GitHub menolak penulisan. Pastikan token memiliki Contents: Read and write, akses ke repo, dan branch tidak dilindungi aturan yang memblokir commit."
+            else:
+                hint = "GitHub Contents API gagal menyimpan state."
+            raise RuntimeError(f"{hint} HTTP {r.status_code}: {detail}")
+        self.sha = (r.json().get("content") or {}).get("sha")
 
 
 @dataclass
@@ -274,6 +287,18 @@ class VolumaticEngine:
         self.min_mode = False
         self.leverage = DEFAULT_LEVERAGE
         self.real_mode = False  # always OFF after process restart
+        self.scan_enabled = True
+        self.stats_notify = False
+        self.stats = {"scan_cycles": 0, "symbols_scanned": 0, "scan_errors": 0,
+                      "long_bubbles": 0, "short_bubbles": 0, "orders_created": 0,
+                      "filled_orders": 0, "closed_trades": 0, "wins": 0, "losses": 0,
+                      "net_pnl": "0", "gross_profit": "0", "gross_loss": "0",
+                      "realized_equity": "0", "equity_peak": "0", "max_drawdown": "0",
+                      "best_trade": "0", "worst_trade": "0"}
+        self.closed_trades: list[dict[str, Any]] = []
+        self._error_last_sent: dict[str, float] = {}
+        self._github_error_notified = False
+        self._github_retry_after = 0.0
         self.universe: list[str] = []
         self.filters: dict[str, dict[str, Any]] = {}
         self.last_processed: dict[str, int] = {}
@@ -304,10 +329,25 @@ class VolumaticEngine:
         try: await asyncio.to_thread(self.send_message, self.chat_id, str(text))
         except Exception: log.exception("Telegram send failed")
 
+    async def report_error(self, where: str, exc: BaseException, *, cooldown: float = 60.0):
+        """Log + forward unique errors to Telegram, with per-error throttling."""
+        key = f"{type(exc).__name__}|{str(exc)[:240]}"
+        now = time.monotonic()
+        if now - self._error_last_sent.get(key, 0.0) < cooldown:
+            return
+        self._error_last_sent[key] = now
+        detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        log.error("%s: %s\n%s", where, exc, detail[-5000:])
+        message = f"🚨 <b>BOT ERROR</b>\nLokasi: <code>{where}</code>\nTipe: <code>{type(exc).__name__}</code>\n<pre>{str(exc)[:1800]}</pre>"
+        await self.say(message)
+
     async def persist(self):
         data = {
-            "version": 2, "timeframe": self.timeframe, "max_slots": self.max_slots,
+            "version": 3, "timeframe": self.timeframe, "max_slots": self.max_slots,
             "margin": str(self.margin), "min_mode": self.min_mode, "leverage": self.leverage,
+            "scan_enabled": self.scan_enabled,
+            "stats_notify": self.stats_notify, "stats": self.stats,
+            "closed_trades": self.closed_trades[-500:],
             "last_processed": self.last_processed, "scan_baseline_ms": self.scan_baseline_ms,
             "pending": {s: asdict(p) for s, p in self.pending.items()},
             "positions": {s: {k:v for k,v in p.items() if k != "unRealizedProfit"} for s,p in self.positions.items()},
@@ -319,18 +359,31 @@ class VolumaticEngine:
         fingerprint = json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
         if fingerprint == self._last_state_fingerprint:
             return
+        if time.monotonic() < self._github_retry_after:
+            try: LOCAL_STATE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            except Exception as local_exc: await self.report_error("persist/local-fallback", local_exc)
+            return
         try:
             await asyncio.to_thread(self.github.save, data)
             self._last_state_fingerprint = fingerprint
-        except Exception:
-            log.exception("GitHub state persistence failed; writing local fallback")
-            try: LOCAL_STATE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-            except Exception: log.exception("Local state fallback failed")
+            self._github_error_notified = False
+            self._github_retry_after = 0.0
+        except Exception as exc:
+            self._github_retry_after = time.monotonic() + 300.0
+            log.warning("GitHub state persistence failed; using local fallback for 5 minutes: %s", exc)
+            try:
+                LOCAL_STATE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+            except Exception as local_exc:
+                await self.report_error("persist/local-fallback", local_exc)
+            if not self._github_error_notified:
+                self._github_error_notified = True
+                await self.report_error("persist/github", exc, cooldown=3600)
 
     async def restore(self):
         try: data = await asyncio.to_thread(self.github.load)
-        except Exception:
-            log.exception("Could not load GitHub state"); data = None
+        except Exception as exc:
+            await self.report_error("restore/github-state", exc, cooldown=3600)
+            data = None
         if not data and LOCAL_STATE.exists():
             try: data = json.loads(LOCAL_STATE.read_text(encoding="utf-8"))
             except Exception: data = None
@@ -341,6 +394,10 @@ class VolumaticEngine:
         self.margin = max(Decimal("0.01"), dec(data.get("margin"), DEFAULT_MARGIN))
         self.min_mode = bool(data.get("min_mode", False))
         self.leverage = max(1, min(125, int(data.get("leverage", DEFAULT_LEVERAGE))))
+        self.scan_enabled = bool(data.get("scan_enabled", True))
+        self.stats_notify = bool(data.get("stats_notify", False))
+        self.stats.update(data.get("stats") or {})
+        self.closed_trades = list(data.get("closed_trades") or [])[-500:]
         self.last_processed = {str(k): int(v) for k, v in (data.get("last_processed") or {}).items()}
         for sym, raw in (data.get("pending") or {}).items():
             try: self.pending[sym] = Pending(**raw)
@@ -361,7 +418,8 @@ class VolumaticEngine:
                 await self.binance.sync_time()
                 await self._refresh_universe(force=True)
                 await self._reconcile()
-            except Exception as exc: log.warning("Initial Binance sync: %s", exc)
+            except Exception as exc:
+                await self.report_error("startup/binance-sync", exc)
         self.stop_event.clear()
         self.scan_task = asyncio.create_task(self._scan_loop(), name="volumatic-scan")
         self.monitor_task = asyncio.create_task(self._monitor_loop(), name="volumatic-monitor")
@@ -404,66 +462,147 @@ class VolumaticEngine:
     async def _scan_loop(self):
         while not self.stop_event.is_set():
             try:
+                if not self.scan_enabled:
+                    self.scan_wakeup.clear()
+                    try:
+                        await asyncio.wait_for(self.scan_wakeup.wait(), timeout=60)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
                 await self._refresh_universe()
                 target = self._next_close_ms() + 5000
                 self.scan_wakeup.clear()
                 try:
                     await asyncio.wait_for(self.scan_wakeup.wait(), timeout=max(1.0, (target - utc_ms()) / 1000))
-                    continue  # timeframe changed; calculate the next boundary again
+                    continue
                 except asyncio.TimeoutError:
                     pass
-                if self.stop_event.is_set(): break
+                if self.stop_event.is_set() or not self.scan_enabled:
+                    continue
                 await self.scan_cycle()
-            except asyncio.CancelledError: raise
-            except BinanceRateLimit as exc:
-                await self.say(f"⚠️ Binance API limit saat scanning. Scanner menunggu cooldown {self.binance.cooldown:.0f} detik. Order LIMIT yang sudah berada di Binance tidak dibatalkan.")
-                await asyncio.sleep(max(5.0, self.binance.cooldown))
-            except Exception:
-                log.exception("Scan loop error")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self.report_error("scan-loop", exc)
                 await asyncio.sleep(30)
 
     async def scan_cycle(self, manual: bool = False):
+        """Scan all symbols; rate limits are handled here so task exceptions never leak."""
         async with self.scan_lock:
-            await self._refresh_universe()
-            tf = self.timeframe
-            interval = TF_MS[tf]
-            interval_name = "4h" if tf == "H4" else "1d"
-            symbols = list(self.universe)
-            if not symbols: return
-            log.info("Starting %s scan: %d symbols in batches of %d", tf, len(symbols), SCAN_BATCH_SIZE)
-            for start in range(0, len(symbols), SCAN_BATCH_SIZE):
-                batch = symbols[start:start + SCAN_BATCH_SIZE]
-                log.info("Scan batch %d-%d / %d (%s)", start + 1, start + len(batch), len(symbols), tf)
-                for symbol in batch:
-                    if self.stop_event.is_set(): return
-                    try:
-                        rows = await self.binance.klines(symbol, interval_name, SCAN_KLINE_LIMIT)
+            try:
+                await self._refresh_universe()
+                tf = self.timeframe
+                interval = TF_MS[tf]
+                interval_name = "4h" if tf == "H4" else "1d"
+                symbols = list(self.universe)
+                if not symbols:
+                    await self.say("⚠️ Scan dibatalkan: universe kosong.")
+                    return
+                total_batches = (len(symbols) + SCAN_BATCH_SIZE - 1) // SCAN_BATCH_SIZE
+                cycle_counts = {"scanned": 0, "valid": 0, "long": 0, "short": 0, "none": 0, "errors": 0}
+                log.info("Starting %s scan: %d symbols in batches of %d", tf, len(symbols), SCAN_BATCH_SIZE)
+                await self.say(f"🔎 <b>SCAN #{int(self.stats.get('scan_cycles', 0)) + 1} DIMULAI</b>\nTimeframe: {tf} | {len(symbols)} koin | {total_batches} batch")
+                for batch_index, start in enumerate(range(0, len(symbols), SCAN_BATCH_SIZE), start=1):
+                    if self.stop_event.is_set():
+                        break
+                    if not manual and not self.scan_enabled:
+                        log.info("Auto scan paused by /scan off")
+                        break
+                    batch = symbols[start:start + SCAN_BATCH_SIZE]
+                    b = {"scanned": 0, "valid": 0, "long": 0, "short": 0, "none": 0, "errors": 0}
+                    coin_lines: list[str] = []
+                    batch_rate_abort = False
+                    log.info("Scan batch %d/%d | symbols %d-%d / %d (%s)", batch_index, total_batches, start + 1, start + len(batch), len(symbols), tf)
+                    for symbol in batch:
+                        if self.stop_event.is_set():
+                            break
+                        attempts = 0
+                        while True:
+                            try:
+                                rows = await self.binance.klines(symbol, interval_name, SCAN_KLINE_LIMIT)
+                                break
+                            except BinanceRateLimit as exc:
+                                attempts += 1
+                                await self.report_error(f"scan/rate-limit/{symbol}", exc, cooldown=180)
+                                wait = max(5.0, self.binance.cooldown + 1.0)
+                                await self.say(f"⏸️ Binance 429 saat {symbol}. Menunggu {wait:.0f} detik lalu melanjutkan simbol yang sama; scan tidak crash dan order exchange tidak disentuh.")
+                                if attempts >= 3:
+                                    rows = None
+                                    break
+                                await asyncio.sleep(wait)
+                            except Exception as exc:
+                                rows = None
+                                b["errors"] += 1; cycle_counts["errors"] += 1
+                                self.stats["scan_errors"] = int(self.stats.get("scan_errors", 0)) + 1
+                                coin_lines.append(f"❌ {symbol}: ERROR {type(exc).__name__} — {str(exc)[:120]}")
+                                await self.report_error(f"scan/{symbol}", exc)
+                                break
+                        if rows is None:
+                            if attempts >= 3:
+                                b["errors"] += 1; cycle_counts["errors"] += 1
+                                self.stats["scan_errors"] = int(self.stats.get("scan_errors", 0)) + 1
+                                coin_lines.append(f"⚠️ {symbol}: ditunda setelah 3 kali rate-limit; dicoba lagi pada cycle berikutnya")
+                                batch_rate_abort = True
+                                await asyncio.sleep(SCAN_PAIR_DELAY)
+                                break
+                            await asyncio.sleep(SCAN_PAIR_DELAY)
+                            continue
+                        b["scanned"] += 1; cycle_counts["scanned"] += 1
                         closed = [r for r in rows if len(r) >= 7 and int(r[6]) < utc_ms()]
-                        if len(closed) < strategy.ATR_LENGTH + strategy.LENGTH + 5: continue
+                        if len(closed) < strategy.ATR_LENGTH + strategy.LENGTH + 5:
+                            b["errors"] += 1; cycle_counts["errors"] += 1
+                            self.stats["scan_errors"] = int(self.stats.get("scan_errors", 0)) + 1
+                            coin_lines.append(f"⚠️ {symbol}: data candle belum cukup")
+                            await asyncio.sleep(SCAN_PAIR_DELAY)
+                            continue
                         latest_open = int(closed[-1][0])
                         previous = self.last_processed.get(symbol)
                         if previous is not None and latest_open <= previous:
+                            b["valid"] += 1; cycle_counts["valid"] += 1
+                            b["none"] += 1; cycle_counts["none"] += 1
+                            coin_lines.append(f"· {symbol}: tidak ada candle baru sejak scan sebelumnya")
+                            await asyncio.sleep(SCAN_PAIR_DELAY)
                             continue
-                        candles = [
-                            {"open_time":int(r[0]),"open":float(r[1]),"high":float(r[2]),"low":float(r[3]),"close":float(r[4]),"volume":float(r[5])}
-                            for r in closed[-SCAN_KLINE_LIMIT:]
-                        ]
+                        candles = [{"open_time":int(r[0]),"open":float(r[1]),"high":float(r[2]),"low":float(r[3]),"close":float(r[4]),"volume":float(r[5])} for r in closed[-SCAN_KLINE_LIMIT:]]
                         signals = strategy.signals_since(symbol, tf, candles, interval,
                             after_open_time=previous,
                             after_close_time_ms=self.scan_baseline_ms if previous is None else None)
-                        # Advance the cursor only after the candle data and signal list are valid.
                         self.last_processed[symbol] = latest_open
-                        for sig in signals:
-                            await self._on_signal(sig.as_dict())
-                    except BinanceRateLimit:
-                        raise
-                    except Exception as exc:
-                        log.warning("Scan %s failed: %s", symbol, exc)
-                    await asyncio.sleep(SCAN_PAIR_DELAY)
+                        b["valid"] += 1; cycle_counts["valid"] += 1
+                        if signals:
+                            for sig in signals:
+                                direction = str(sig.get("direction", "")).upper()
+                                if direction == "LONG": b["long"] += 1; cycle_counts["long"] += 1
+                                elif direction == "SHORT": b["short"] += 1; cycle_counts["short"] += 1
+                                await self._on_signal(sig.as_dict())
+                            coin_lines.append(f"🫧 {symbol}: {', '.join(str(x.direction) for x in signals)} bubble terkonfirmasi")
+                        else:
+                            b["none"] += 1; cycle_counts["none"] += 1
+                            coin_lines.append(f"· {symbol}: tidak ada bubble baru")
+                        await asyncio.sleep(SCAN_PAIR_DELAY)
+                    self.stats["symbols_scanned"] = int(self.stats.get("symbols_scanned", 0)) + b["scanned"]
+                    self.stats["scan_errors"] = int(self.stats.get("scan_errors", 0))
+                    log.info("Batch %d/%d conclusion: scanned=%d valid=%d LONG=%d SHORT=%d no_signal=%d errors=%d", batch_index, total_batches, b["scanned"], b["valid"], b["long"], b["short"], b["none"], b["errors"])
+                    summary = (f"📦 <b>Batch {batch_index}/{total_batches} selesai</b> ({tf})\n"
+                               f"Koin: {b['scanned']}/{len(batch)} | LONG: {b['long']} | SHORT: {b['short']}\n"
+                               f"Tanpa bubble/baru: {b['none']} | Error/kurang data: {b['errors']}")
+                    if coin_lines:
+                        summary += "\n\n<b>Kesimpulan setiap koin:</b>\n" + "\n".join(coin_lines)
+                    await self.say(summary)
+                    await self.persist()
+                    if batch_rate_abort:
+                        await self.say("⏸️ Scan dijeda karena Binance masih mengembalikan 429 setelah 3 percobaan. Scanner akan melanjutkan pada jadwal candle berikutnya; tidak ada order yang dibatalkan.")
+                        break
+                self.stats["scan_cycles"] = int(self.stats.get("scan_cycles", 0)) + 1
                 await self.persist()
-            log.info("Scan completed: %d symbols | timeframe=%s", len(symbols), tf)
-            await self.persist()
-            if manual: await self.say(f"Scan manual selesai. {len(symbols)} pair diperiksa pada {tf}.")
+                log.info("Scan completed: %d symbols | timeframe=%s | LONG=%d SHORT=%d errors=%d", cycle_counts["scanned"], tf, cycle_counts["long"], cycle_counts["short"], cycle_counts["errors"])
+                await self.say(f"✅ <b>SCAN SELESAI</b>\n{tf} | {cycle_counts['scanned']}/{len(symbols)} koin\nLONG {cycle_counts['long']} | SHORT {cycle_counts['short']} | tanpa bubble {cycle_counts['none']} | error {cycle_counts['errors']}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self.report_error("scan-cycle", exc)
+                await self.say(f"❌ Scan dihentikan karena error: <code>{type(exc).__name__}: {str(exc)[:500]}</code>")
+                await self.persist()
 
     async def _on_signal(self, sig: dict[str, Any]):
         symbol, direction = sig["symbol"], sig["direction"]
@@ -475,6 +614,8 @@ class VolumaticEngine:
         expiry = next_open + interval
         price = dec(sig["signal_price"])
         log.info("BUBBLE %s %s %s at %s", symbol, sig["bubble"], direction, iso(candle_open))
+        key = "long_bubbles" if direction == "LONG" else "short_bubbles"
+        self.stats[key] = int(self.stats.get(key, 0)) + 1
         if symbol in self.pending:
             try:
                 await self._expire_pending(symbol, force_check=True)
@@ -506,6 +647,7 @@ class VolumaticEngine:
             await self.persist()
             await self.say(f"⏳ {symbol}: entry {direction} masuk antrean ({exc}). Entry hanya akan dibuat jika candle entry belum expired; clientOrderId tetap untuk mencegah duplikasi.")
         except Exception as exc:
+            await self.report_error(f"signal-entry/{symbol}", exc)
             await self.say(f"⚠️ {symbol}: sinyal {direction} tidak dapat dibuat menjadi order: {exc}")
 
     async def _create_entry(self, sig: dict[str, Any], next_open: int, expiry: int, price: Decimal, reversal: bool):
@@ -573,6 +715,7 @@ class VolumaticEngine:
             next_open, expiry, str(price), str(qty), client_id, int(order.get("orderId") or 0),
             str(order.get("status") or "NEW"), reversal)
         self.managed_symbols.add(symbol)
+        self.stats["orders_created"] = int(self.stats.get("orders_created", 0)) + 1
         self.deferred_reversals.pop(symbol, None)
         self.deferred_entries.pop(symbol, None)
         await self.persist()
@@ -592,6 +735,34 @@ class VolumaticEngine:
             await self._reconcile_symbol(symbol)
             if symbol not in self.positions:
                 self.close_requests.discard(symbol)
+                entry = dec(pos.get("entryPrice")); exit_price = dec(result.get("avgPrice"))
+                qty = abs(amt); direction = str(pos.get("side") or ("LONG" if amt > 0 else "SHORT"))
+                if entry > 0 and exit_price > 0 and qty > 0:
+                    pnl = (exit_price - entry) * qty if direction == "LONG" else (entry - exit_price) * qty
+                    trade = {"symbol": symbol, "side": direction, "entry": str(entry), "exit": str(exit_price),
+                             "qty": str(qty), "pnl": str(pnl), "closed_at": utc_ms()}
+                    self.closed_trades.append(trade); self.closed_trades = self.closed_trades[-500:]
+                    self.stats["closed_trades"] = int(self.stats.get("closed_trades", 0)) + 1
+                    self.stats["net_pnl"] = str(dec(self.stats.get("net_pnl")) + pnl)
+                    if pnl > 0:
+                        self.stats["wins"] = int(self.stats.get("wins", 0)) + 1
+                        self.stats["gross_profit"] = str(dec(self.stats.get("gross_profit")) + pnl)
+                    elif pnl < 0:
+                        self.stats["losses"] = int(self.stats.get("losses", 0)) + 1
+                        self.stats["gross_loss"] = str(dec(self.stats.get("gross_loss")) + abs(pnl))
+                    realized_equity = dec(self.stats.get("realized_equity")) + pnl
+                    equity_peak = max(dec(self.stats.get("equity_peak")), realized_equity, Decimal("0"))
+                    drawdown = equity_peak - realized_equity
+                    self.stats["realized_equity"] = str(realized_equity)
+                    self.stats["equity_peak"] = str(equity_peak)
+                    self.stats["max_drawdown"] = str(max(dec(self.stats.get("max_drawdown")), drawdown))
+                    old_best = dec(self.stats.get("best_trade"))
+                    old_worst = dec(self.stats.get("worst_trade"))
+                    self.stats["best_trade"] = str(max(old_best, pnl))
+                    self.stats["worst_trade"] = str(min(old_worst, pnl))
+                    if self.stats_notify:
+                        await self.say(f"📊 <b>TRADE CLOSED</b>\n{symbol} {direction}\nEntry {dstr(entry)} → Exit {dstr(exit_price)}\nGross PnL: <b>{dstr(pnl)} USDT</b> (belum termasuk fee/funding)")
+                    await self.persist()
                 await self._release_reversal(symbol)
             else:
                 self.positions[symbol]["closing"] = True
@@ -624,6 +795,7 @@ class VolumaticEngine:
             self.deferred_reversals.pop(symbol, None)
             if symbol not in self.positions and symbol not in self.pending: self.managed_symbols.discard(symbol)
             await self.persist()
+            await self.report_error(f"reversal-entry/{symbol}", exc)
             await self.say(f"⚠️ Reversal {symbol} tidak dapat dibuat: {exc}")
 
     async def _expire_pending(self, symbol: str, force_check: bool = False):
@@ -636,6 +808,7 @@ class VolumaticEngine:
             if st == "FILLED":
                 self.position_wait_until[symbol] = utc_ms() + 30_000
                 self.pending.pop(symbol, None)
+                self.stats["filled_orders"] = int(self.stats.get("filled_orders", 0)) + 1
                 await self._reconcile_symbol(symbol)
                 await self.persist(); return
             cancel_result = None
@@ -645,6 +818,7 @@ class VolumaticEngine:
                 if cancel_status == "FILLED":
                     self.position_wait_until[symbol] = utc_ms() + 30_000
                     self.pending.pop(symbol, None)
+                    self.stats["filled_orders"] = int(self.stats.get("filled_orders", 0)) + 1
                     await self._reconcile_symbol(symbol)
                     await self.persist()
                     return
@@ -658,7 +832,7 @@ class VolumaticEngine:
             # Keep it tracked; retry after cooldown. Exchange-resident LIMIT stays untouched.
             raise
         except Exception as exc:
-            log.warning("Expiry status check %s: %s", symbol, exc)
+            await self.report_error(f"pending-expiry/{symbol}", exc)
 
     async def _reconcile_symbol(self, symbol: str):
         rows = await self.binance.positions()
@@ -709,8 +883,8 @@ class VolumaticEngine:
                         elif utc_ms() >= p.expiry_time: self.pending.pop(sym, None)
                     except Exception: pass
             await self.persist()
-        except Exception:
-            log.exception("Startup reconciliation failed")
+        except Exception as exc:
+            await self.report_error("startup-reconciliation", exc)
 
     async def _monitor_loop(self):
         while not self.stop_event.is_set():
@@ -723,8 +897,9 @@ class VolumaticEngine:
             except asyncio.CancelledError: raise
             except BinanceRateLimit:
                 await asyncio.sleep(max(5.0, self.binance.cooldown))
-            except Exception:
-                log.exception("Monitor loop error"); await asyncio.sleep(MONITOR_SECONDS)
+            except Exception as exc:
+                await self.report_error("monitor-loop", exc)
+                await asyncio.sleep(MONITOR_SECONDS)
 
     async def _monitor_once(self):
         open_orders = await self.binance.open_orders()
@@ -750,11 +925,12 @@ class VolumaticEngine:
                     if status == "FILLED" or sym in actual:
                         if status == "FILLED": self.position_wait_until[sym] = utc_ms() + 30_000
                         self.pending.pop(sym, None)
+                        self.stats["filled_orders"] = int(self.stats.get("filled_orders", 0)) + 1
                         await self.say(f"✅ <b>LIMIT FILLED</b>\n{sym} {p.side} | Avg: {od.get('avgPrice','-')} | Qty: {od.get('executedQty','-')}\nPosisi sekarang dipantau sampai bubble berlawanan.")
                     elif status in {"CANCELED", "EXPIRED", "REJECTED"}:
                         self.pending.pop(sym, None)
                         await self.say(f"⌛ {sym}: pending order {status}.")
-                except Exception as exc: log.warning("Order reconcile %s: %s", sym, exc)
+                except Exception as exc: await self.report_error(f"order-reconcile/{sym}", exc)
             elif utc_ms() >= p.expiry_time:
                 await self._expire_pending(sym)
         # Re-evaluate a bubble that arrived while a previous pending order's
@@ -796,6 +972,7 @@ class VolumaticEngine:
             except Exception as exc:
                 self.deferred_entries.pop(sym, None)
                 await self.persist()
+                await self.report_error(f"deferred-entry/{sym}", exc)
                 await self.say(f"⚠️ Deferred entry {sym} dibuang: {exc}")
         await self._flush_command_queue()
         await self.persist()
@@ -819,7 +996,7 @@ class VolumaticEngine:
             if self.listen_key:
                 try: await self.binance.keepalive_listen_key()
                 except asyncio.CancelledError: raise
-                except Exception: log.exception("listenKey keepalive failed")
+                except Exception as exc: await self.report_error("listenKey-keepalive", exc)
 
     async def _private_ws_loop(self):
         while not self.stop_event.is_set() and self.listen_key:
@@ -839,17 +1016,20 @@ class VolumaticEngine:
                                 p.status = str(o.get("X") or p.status)
                                 await self.persist()
                                 if p.status == "FILLED":
+                                    self.stats["filled_orders"] = int(self.stats.get("filled_orders", 0)) + 1
                                     self.position_wait_until[sym] = utc_ms() + 30_000
                                     await self.say(f"✅ {sym} LIMIT terisi (WebSocket). Konfirmasi posisi sedang dilakukan.")
                                     try: await self._reconcile_symbol(sym); self.pending.pop(sym, None)
-                                    except Exception: pass
+                                    except Exception as exc: await self.report_error(f"ws-position-reconcile/{sym}", exc)
                                     await self.persist()
             except asyncio.CancelledError: raise
             except Exception as exc:
-                log.warning("Private WS reconnect: %s", exc)
+                await self.report_error("private-user-websocket", exc)
                 await asyncio.sleep(5)
                 try: self.listen_key = await self.binance.create_listen_key()
-                except Exception: await asyncio.sleep(20)
+                except Exception as reconnect_exc:
+                    await self.report_error("private-ws-reconnect", reconnect_exc)
+                    await asyncio.sleep(20)
 
     async def handle_update(self, update: dict[str, Any], context: dict[str, Any]):
         message = update.get("message") or update.get("edited_message") or {}
@@ -866,9 +1046,8 @@ class VolumaticEngine:
             elif cmd == "/margin": await self._margin(args)
             elif cmd == "/min": await self._min(args)
             elif cmd == "/leverage": await self._leverage(args)
-            elif cmd == "/scan":
-                if self.scan_lock.locked(): await self.say("Scan sedang berjalan.")
-                else: asyncio.create_task(self.scan_cycle(manual=True))
+            elif cmd == "/scan": await self._scan_command(args)
+            elif cmd == "/stats": await self._stats_command(args)
             elif cmd in {"/status", "/api"}: await self._status()
             elif cmd == "/trade": await self._trade()
             elif cmd == "/balance": await self._balance()
@@ -880,10 +1059,97 @@ class VolumaticEngine:
             if not (cmd == "/real" and args and args[0].lower() == "off") and cmd not in {"/timeframe", "/max", "/help", "/start"} and text not in self.command_queue:
                 if len(self.command_queue) < 100: self.command_queue.append(text)
         except Exception as exc:
-            log.exception("Command failed: %s", text); await self.say(f"❌ {exc}")
+            await self.report_error(f"telegram-command/{cmd}", exc)
+            await self.say(f"❌ Command {cmd} gagal: <code>{type(exc).__name__}: {str(exc)[:500]}</code>")
+
+    async def _scan_command(self, args: list[str]):
+        if not args:
+            if self.scan_lock.locked():
+                await self.say("Scan sedang berjalan.")
+            else:
+                asyncio.create_task(self.scan_cycle(manual=True), name="volumatic-manual-scan")
+                await self.say("🔎 Scan manual dimulai. Progress dan kesimpulan akan dikirim per batch.")
+            return
+        mode = args[0].lower()
+        if mode not in {"on", "off"}:
+            raise ValueError("Gunakan /scan, /scan on, atau /scan off")
+        self.scan_enabled = mode == "on"
+        if self.scan_enabled:
+            self.scan_wakeup.set()
+            await self.say("✅ Auto scanner ON. Scan terjadwal berjalan setiap candle H4/D1 yang confirmed.")
+        else:
+            self.scan_wakeup.set()
+            await self.say("⏸️ Auto scanner OFF. Siklus yang sedang berjalan akan berhenti setelah batch saat ini; order dan posisi tetap dipantau.")
+        await self.persist()
+
+    async def _stats_report(self, automatic: bool = False):
+        # Statistics derive from the retained closed-trade history (maximum 500).
+        trades = sorted(self.closed_trades, key=lambda t: int(t.get("closed_at", 0)))
+        pnls = [dec(t.get("pnl")) for t in trades]
+        wins_pnl = [p for p in pnls if p > 0]
+        losses_pnl = [p for p in pnls if p < 0]
+        total = int(self.stats.get("closed_trades", len(trades)))
+        wins = int(self.stats.get("wins", len(wins_pnl)))
+        losses = int(self.stats.get("losses", len(losses_pnl)))
+        decided = wins + losses
+        winrate = wins / decided * 100 if decided else 0.0
+        gross_profit = dec(self.stats.get("gross_profit"), sum(wins_pnl, Decimal("0")))
+        gross_loss_abs = dec(self.stats.get("gross_loss"), abs(sum(losses_pnl, Decimal("0"))))
+        net_pnl = dec(self.stats.get("net_pnl"), sum(pnls, Decimal("0")))
+        avg_win = gross_profit / wins if wins else Decimal("0")
+        avg_loss = -gross_loss_abs / losses if losses else Decimal("0")
+        expectancy = net_pnl / total if total else Decimal("0")
+        profit_factor = gross_profit / gross_loss_abs if gross_loss_abs else None
+        best = dec(self.stats.get("best_trade"), max(pnls) if pnls else Decimal("0"))
+        worst = dec(self.stats.get("worst_trade"), min(pnls) if pnls else Decimal("0"))
+        max_dd = dec(self.stats.get("max_drawdown"))
+        if not self.stats.get("max_drawdown"):
+            equity = Decimal("0"); peak = Decimal("0")
+            for pnl in pnls:
+                equity += pnl
+                peak = max(peak, equity)
+                max_dd = max(max_dd, peak - equity)
+        floating = sum((dec(pos.get("unRealizedProfit")) for pos in self.positions.values()), Decimal("0"))
+        combined = net_pnl + floating
+        pf_text = f"{profit_factor:.3f}" if profit_factor is not None else ("∞" if gross_profit > 0 else "—")
+        title = "STATISTIK OTOMATIS" if automatic else "STATISTIK CLOSED TRADES"
+        lines = [
+            f"<b>{title}</b>",
+            f"Total closed trades: <b>{total}</b> | Win: {wins} | Loss: {losses}",
+            f"Win rate: <b>{winrate:.2f}%</b> | Profit factor: <b>{pf_text}</b>",
+            f"Net realized PnL: <b>{net_pnl:.6f} USDT</b>",
+            f"Floating PnL posisi aktif: <b>{floating:.6f} USDT</b>",
+            f"Total PnL (realized + floating): <b>{combined:.6f} USDT</b>",
+            f"Average win: <b>{avg_win:.6f} USDT</b> | Average loss: <b>{avg_loss:.6f} USDT</b>",
+            f"Expectancy/trade: {expectancy:.6f} USDT",
+            f"Max drawdown: <b>{max_dd:.6f} USDT</b> (equity closed-trade)",
+            f"Best trade: {best:.6f} USDT | Worst trade: {worst:.6f} USDT",
+            f"Gross profit: {gross_profit:.6f} USDT | Gross loss: {-gross_loss_abs:.6f} USDT",
+            f"Posisi aktif: {len(self.positions)} | Pending LIMIT: {len(self.pending)}",
+            f"Order dibuat: {self.stats.get('orders_created', 0)} | Filled: {self.stats.get('filled_orders', 0)}",
+            f"Scan cycles: {self.stats.get('scan_cycles', 0)} | Scan errors: {self.stats.get('scan_errors', 0)}",
+            "Catatan: PnL estimasi gross dari entry dan average exit, belum dikurangi fee/funding. Max DD dihitung kumulatif sejak statistik bot mulai direkam; riwayat detail menampilkan maksimal 500 trade.",
+        ]
+        if trades:
+            lines.append("\n<b>10 closed trades terakhir:</b>")
+            for trade in trades[-10:][::-1]:
+                pnl = dec(trade.get("pnl")); mark = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+                lines.append(f"{mark} {trade.get('symbol')} {trade.get('side')} | {pnl:.6f} USDT | {iso(int(trade.get('closed_at', 0)))}")
+        await self.say("\n".join(lines))
+
+    async def _stats_command(self, args: list[str]):
+        if not args:
+            await self._stats_report()
+            return
+        mode = args[0].lower()
+        if mode not in {"on", "off"}:
+            raise ValueError("Gunakan /stats, /stats on, atau /stats off")
+        self.stats_notify = mode == "on"
+        await self.persist()
+        await self.say("✅ Notifikasi statistik otomatis ON saat trade ditutup." if self.stats_notify else "⏸️ Notifikasi statistik otomatis OFF. /stats tetap bisa dipanggil kapan saja.")
 
     async def _help(self):
-        await self.say("<b>VOLUMATIC TREND BOT</b>\n/timeframe — lihat timeframe\n/timeframe H4 atau D1 — ganti timeframe (hanya saat tidak ada posisi/pending)\n/max 10 — batas posisi + pending\n/real on|off — eksekusi live\n/margin 0.5 — margin tetap per posisi USDT\n/min on|off — gunakan margin minimum filter Binance\n/leverage 10 — leverage\n/scan — scan manual\n/status — status bot/API\n/trade — posisi dan pending\n/balance — saldo Futures\n/close SYMBOL — tutup posisi\n/close all — tutup semua posisi\n/cancel SYMBOL — batalkan pending LIMIT\n\nStrategi: blue=LONG, red=SHORT; limit pada open candle berikutnya; expiry satu candle; tanpa SL/TP.")
+        await self.say("<b>VOLUMATIC TREND BOT</b>\n/timeframe H4|D1 — timeframe aktif\n/max 10 — batas posisi + pending\n/real on|off — eksekusi live\n/margin 0.5 — margin tetap USDT\n/min on|off — margin minimum Binance\n/leverage 10 — leverage\n/scan — scan manual\n/scan on|off — hidup/matikan auto scanner\n/stats — statistik closed trades (PnL, DD, winrate, average win/loss, dll.)\n/stats on|off — notifikasi statistik otomatis\n/status — status bot/API\n/trade — posisi dan pending\n/balance — saldo Futures\n/close SYMBOL|all — tutup posisi\n/cancel SYMBOL — batalkan pending LIMIT\n\nStrategi: blue=LONG, red=SHORT; LIMIT satu candle; tanpa SL/TP.")
 
     async def _timeframe(self, args: list[str]):
         if not args:
