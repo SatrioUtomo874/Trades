@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from types import ModuleType
 from urllib.parse import quote
+from uuid import uuid4
 
 import requests
 from dotenv import load_dotenv
@@ -82,6 +83,7 @@ GITHUB_API = "https://api.github.com"
 
 MAIN_LOCK = asyncio.Lock()
 MAIN_MODULE: ModuleType | None = None
+STRATEGY_MODULE: ModuleType | None = None
 MAIN_RUNNING = False
 STOP_EVENT = asyncio.Event()
 
@@ -282,14 +284,43 @@ def validate_python_source(source: bytes, relative_path: str) -> None:
             )
 
     if normalized == Path(STRATEGY_FILE).name.lower():
-        # Volumatic memakai sinyal bubble yang dikonfirmasi pada candle close.
-        # API strategi ini adalah signals_since(), bukan generate_setup()
-        # milik Tactical versi lama.
-        if "signals_since" not in names:
+        # Kontrak Volumatic yang dipakai main.py dan launcher.
+        required = {
+            "signals_since", "detect_signals_since", "detect_latest_signal",
+            "calculate_indicators", "analyze", "reference_risk", "trade_result_r",
+        }
+        missing = sorted(required - names)
+        if missing:
             raise RuntimeError(
                 f"{relative_path} tidak kompatibel dengan Volumatic. "
-                "Wajib menyediakan function signals_since()."
+                f"Function wajib: {', '.join(missing)}."
             )
+        # Execute strategy validation inside a temporary registered module.
+        # dataclasses (and some libraries) resolve cls.__module__ through
+        # sys.modules during class creation; a plain dictionary namespace is
+        # insufficient and caused /try to fail before it could load main.py.
+        validation_name = f"_strategy_validation_{uuid4().hex}"
+        validation_module = ModuleType(validation_name)
+        validation_module.__file__ = relative_path
+        sys.modules[validation_name] = validation_module
+        try:
+            exec(compile(text, relative_path, "exec"), validation_module.__dict__)
+        finally:
+            sys.modules.pop(validation_name, None)
+        namespace = validation_module.__dict__
+        required_values = {
+            "TIMEFRAME_MS", "TIMEFRAME_INTERVALS", "STRATEGY_NAME", "STRATEGY_VERSION",
+            "TREND_LENGTH", "ATR_LENGTH", "REFERENCE_BUFFER_ATR",
+        }
+        missing_values = sorted(name for name in required_values if name not in namespace)
+        if missing_values:
+            raise RuntimeError(
+                f"{relative_path} tidak kompatibel dengan main.py. "
+                f"Konstanta wajib: {', '.join(missing_values)}."
+            )
+        tf_ms = namespace.get("TIMEFRAME_MS")
+        if not isinstance(tf_ms, dict) or set(tf_ms) != {"H4", "D1"}:
+            raise RuntimeError(f"{relative_path}: TIMEFRAME_MS harus memuat H4 dan D1.")
 
 
 # -----------------------------------------------------------------------------
@@ -430,24 +461,60 @@ def sync_runtime_files() -> list[str]:
 # MAIN LOADER
 # -----------------------------------------------------------------------------
 def load_main_module() -> ModuleType:
+    """Load strategy.py fresh before main.py to avoid stale sys.modules imports.
+
+    Reloading only main.py is insufficient: Python may otherwise retain an old
+    strategy module from a previous /try. That was the source of TIMEFRAME_MS
+    missing-at-runtime warnings even though the synced file already contained it.
+    """
+    global STRATEGY_MODULE
+    strategy_path = safe_runtime_path(STRATEGY_FILE)
+    if not strategy_path.exists():
+        raise FileNotFoundError(f"{STRATEGY_FILE} tidak ditemukan di {BASE_DIR}")
+    strategy_source = strategy_path.read_text(encoding="utf-8")
+    validate_python_source(strategy_source.encode("utf-8"), STRATEGY_FILE)
+    strategy_code = compile(strategy_source, str(strategy_path), "exec")
+
+    # The main engine imports `strategy` by module name. Replace that exact
+    # module before executing main.py; never reuse an in-memory older module.
+    sys.modules.pop("strategy", None)
+    importlib.invalidate_caches()
+    strategy_module = ModuleType("strategy")
+    strategy_module.__file__ = str(strategy_path)
+    strategy_module.__package__ = ""
+    sys.modules["strategy"] = strategy_module
+    try:
+        exec(strategy_code, strategy_module.__dict__)
+    except Exception:
+        sys.modules.pop("strategy", None)
+        STRATEGY_MODULE = None
+        raise
+
+    # Fail early with a clear compatibility error, not deep inside runtime settings.
+    if not isinstance(getattr(strategy_module, "TIMEFRAME_MS", None), dict):
+        raise RuntimeError("strategy.py tidak menyediakan TIMEFRAME_MS (H4/D1).")
+    if not callable(getattr(strategy_module, "signals_since", None)):
+        raise RuntimeError("strategy.py tidak menyediakan signals_since().")
+    if not callable(getattr(strategy_module, "detect_latest_signal", None)):
+        raise RuntimeError("strategy.py tidak menyediakan detect_latest_signal().")
+    STRATEGY_MODULE = strategy_module
+
     path = safe_runtime_path(MAIN_FILE)
     if not path.exists():
         raise FileNotFoundError(f"{MAIN_FILE} tidak ditemukan di {BASE_DIR}")
 
     source = path.read_text(encoding="utf-8")
     code = compile(source, str(path), "exec")
-
     module_name = "trading_main_runtime"
     sys.modules.pop(module_name, None)
-
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Tidak dapat membuat module spec untuk {MAIN_FILE}")
-
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
-
     exec(code, module.__dict__)
+    if getattr(module, "volumatic", None) is not strategy_module:
+        raise RuntimeError("main.py tidak menggunakan strategy.py yang baru disinkronkan.")
     return module
 
 
@@ -571,6 +638,7 @@ async def stop_main() -> bool:
                 log.exception("on_stop() gagal")
 
         sys.modules.pop("trading_main_runtime", None)
+        sys.modules.pop("strategy", None)
         GANTI_WAITING_SELECTION = False
         GANTI_TARGET = None
         return was_running

@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -59,6 +60,13 @@ except ImportError:
 
 import strategy as volumatic
 
+# Compatibility fallback for a stale deployment; try.py also force-reloads the
+# freshly synced strategy module before loading main.py.
+if not isinstance(getattr(volumatic, "TIMEFRAME_MS", None), dict):
+    volumatic.TIMEFRAME_MS = {"H4": 14_400_000, "D1": 86_400_000}
+if not isinstance(getattr(volumatic, "TIMEFRAME_INTERVALS", None), dict):
+    volumatic.TIMEFRAME_INTERVALS = {"H4": "4h", "D1": "1d"}
+
 # ---------------------------------------------------------------------------
 # Environment and runtime configuration
 # ---------------------------------------------------------------------------
@@ -81,6 +89,9 @@ TZ = ZoneInfo(TIMEZONE_NAME)
 BINANCE_REST_BASE = "https://fapi.binance.com"
 BINANCE_REAL_REST_BASE = "https://fapi.binance.com"
 BINANCE_WS_BASE = "wss://fstream.binance.com/market/stream"
+# Binance migrated USD-M streams to separated public/market/private routes in 2026.
+BINANCE_PRIVATE_WS_BASE = "wss://fstream.binance.com/private/ws"
+BINANCE_WS_API_BASE = "wss://ws-fapi.binance.com/ws-fapi/v1"
 BINANCE_TRADING_MODE = "live"
 REAL_EXECUTION_ENABLED = (os.getenv("REAL_EXECUTION_ENABLED", "1") or "1").strip().lower() not in {
     "0", "false", "off", "no", "disabled"
@@ -93,6 +104,12 @@ HISTORY_MARKDOWN_PATH = "data/trade_history.md"
 NOTES_PATH = "data/notes.json"
 SETUPS_PATH = "data/setups.json"
 RUNTIME_SETTINGS_PATH = "data/runtime_settings.json"
+DEFERRED_COMMANDS_PATH = "data/deferred_commands.json"
+BINANCE_COOLDOWN_PATH = "data/binance_cooldown_state.json"
+
+BINANCE_USER_STREAM_KEEPALIVE_SECONDS = 45 * 60
+BINANCE_USER_STREAM_RETRY_SECONDS = 30.0
+BINANCE_RECOVERY_NOTICE_INTERVAL_SECONDS = 60.0
 
 HTTP_REQUEST_SECONDS = 20
 GITHUB_REQUEST_SECONDS = 30
@@ -124,7 +141,9 @@ SCAN_MAX_PAIRS_PER_CYCLE = 50
 SCAN_PAIR_DELAY_SECONDS = float(os.getenv("SCAN_PAIR_DELAY_SECONDS", "0.02") or "0.02")
 SCAN_POLL_SECONDS = 2.0
 MAINTENANCE_POLL_SECONDS = 2.0
-KLINE_HISTORY = max(500, min(1500, int(os.getenv("VOLUMATIC_KLINE_HISTORY", "1200") or "1200")))
+# 499 candles use the lighter Binance kline weight tier while remaining ample
+# for EMA(40)/ATR(200) warm-up on both H4 and D1.
+KLINE_HISTORY = max(400, min(499, int(os.getenv("VOLUMATIC_KLINE_HISTORY", "499") or "499")))
 EXCLUDED_SYMBOLS = {
     x.strip().upper() for x in (os.getenv("EXCLUDED_SYMBOLS", "BTCUSDT,ETHUSDT") or "").split(",") if x.strip()
 }
@@ -519,6 +538,18 @@ class Trade:
     entry_client_order_id: str | None = None
     real_error: str | None = None
     last_real_check_monotonic: float = 0.0
+    last_real_order_status_check: float = 0.0
+    # Entry order may be partially filled while the remaining LIMIT is still open.
+    entry_executed_qty: Decimal | None = None
+    entry_order_status: str = "UNKNOWN"
+    entry_order_terminal: bool = False
+    pending_cancel_reason: str | None = None
+    last_ws_event_key: str | None = None
+    late_fill_during_api_cooldown: bool = False
+    # Preserve an already-submitted exchange GTC LIMIT if its candle deadline
+    # passed while Binance REST was IP-banned. It remains until fill, reversal,
+    # or explicit manual cancellation.
+    preserve_gtc_after_cooldown: bool = False
 
     @property
     def entry_side(self) -> str:
@@ -549,9 +580,19 @@ class Trade:
             "real_state": self.real_state, "position_side": self.position_side,
             "entry_order_id": self.entry_order_id, "entry_client_order_id": self.entry_client_order_id,
             "real_error": self.real_error,
+            "entry_executed_qty": decimal_to_str(self.entry_executed_qty),
+            "entry_order_status": self.entry_order_status,
+            "entry_order_terminal": self.entry_order_terminal,
+            "pending_cancel_reason": self.pending_cancel_reason,
+            "last_ws_event_key": self.last_ws_event_key,
+            "late_fill_during_api_cooldown": self.late_fill_during_api_cooldown,
+            "preserve_gtc_after_cooldown": self.preserve_gtc_after_cooldown,
             "strategy_name": volumatic.STRATEGY_NAME, "strategy_version": volumatic.STRATEGY_VERSION,
             "entry_reason": "Volumatic Trend confirmed signal candle CLOSE; one-candle LIMIT",
-            "price_exp_reason": "Order expires at close of the next candle",
+            "price_exp_reason": (
+                "Normal expiry at next candle close; exception: an already-submitted REAL GTC order "
+                "that crosses expiry during Binance REST cooldown is preserved until fill/reversal/manual cancel."
+            ),
         }
 
     @classmethod
@@ -597,6 +638,13 @@ class Trade:
             entry_order_id=int(row["entry_order_id"]) if row.get("entry_order_id") not in (None, "") else None,
             entry_client_order_id=row.get("entry_client_order_id"), real_error=row.get("real_error"),
             signal_close_price=dec("signal_close_price", dec("entry", Decimal("0"))),
+            entry_executed_qty=dec("entry_executed_qty"),
+            entry_order_status=str(row.get("entry_order_status") or "UNKNOWN").upper(),
+            entry_order_terminal=bool(row.get("entry_order_terminal", False)),
+            pending_cancel_reason=row.get("pending_cancel_reason"),
+            last_ws_event_key=row.get("last_ws_event_key"),
+            late_fill_during_api_cooldown=bool(row.get("late_fill_during_api_cooldown", False)),
+            preserve_gtc_after_cooldown=bool(row.get("preserve_gtc_after_cooldown", False)),
         )
 
 
@@ -642,6 +690,197 @@ def rate_limit_wait(response: Any, offset_ms: int = 0) -> tuple[float, bool]:
         return retry, True
     status = getattr(response, "status_code", 0)
     return float(BINANCE_BAN_FALLBACK_SECONDS if status == 418 else BINANCE_RATE_LIMIT_FALLBACK_SECONDS), False
+
+
+class BinanceCooldownGate:
+    """One IP-wide cooldown shared by public REST and signed Futures REST.
+
+    Keep the last ban interval on disk so an order that expired while the bot
+    was offline can still be recognized after the IP cooldown has elapsed.
+    """
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._until = 0.0
+        self._last_request = 0.0
+        self._reason = ""
+        self._started_epoch = 0.0
+        self._until_epoch = 0.0
+        # Preserve multiple recent ban windows. A bot may be offline across more
+        # than one rate-limit event; old trade expiries must remain attributable.
+        self._ban_intervals: list[list[float]] = []
+        self._state_path = BASE_DIR / "data" / "binance_cooldown_state.json"
+        self._restore_persisted_cooldown()
+
+    def _restore_persisted_cooldown(self) -> None:
+        """Restore a server IP ban and its historical time range."""
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+            now_epoch = time.time()
+            self._started_epoch = float(payload.get("started_epoch") or 0.0)
+            self._until_epoch = float(payload.get("until_epoch") or 0.0)
+            intervals = payload.get("ban_intervals")
+            if isinstance(intervals, list):
+                for item in intervals[-64:]:
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        start, end = float(item[0]), float(item[1])
+                        if start > 0 and end > start:
+                            self._ban_intervals.append([start, end])
+            if not self._ban_intervals and self._started_epoch > 0 and self._until_epoch > self._started_epoch:
+                self._ban_intervals.append([self._started_epoch, self._until_epoch])
+            remaining = max(0.0, self._until_epoch - now_epoch)
+            self._reason = str(payload.get("reason") or "Persisted Binance cooldown")[:500]
+            if remaining > 0:
+                self._until = time.monotonic() + remaining
+                log.warning("[BINANCE] restored persisted cooldown %.0fs (%s)", remaining, self._reason)
+            elif self._until_epoch and now_epoch - self._until_epoch > 14 * 86400:
+                self._state_path.unlink(missing_ok=True)
+                self._started_epoch = self._until_epoch = 0.0
+                self._ban_intervals = []
+                self._reason = ""
+        except FileNotFoundError:
+            return
+        except Exception:
+            log.warning("[BINANCE] cooldown marker invalid; ignoring it", exc_info=True)
+
+    def merge_persisted_payload(self, payload: dict[str, Any]) -> None:
+        """Merge a GitHub/local snapshot without shortening an active cooldown."""
+        if not isinstance(payload, dict):
+            return
+        try:
+            now_epoch = time.time()
+            remote_start = float(payload.get("started_epoch") or 0.0)
+            remote_until = float(payload.get("until_epoch") or 0.0)
+            remote_intervals: list[list[float]] = []
+            rows = payload.get("ban_intervals")
+            if isinstance(rows, list):
+                for item in rows[-64:]:
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        a, b = float(item[0]), float(item[1])
+                        if a > 0 and b > a:
+                            remote_intervals.append([a, b])
+            if not remote_intervals and remote_start > 0 and remote_until > remote_start:
+                remote_intervals.append([remote_start, remote_until])
+        except (TypeError, ValueError):
+            return
+
+        with self._lock:
+            combined = self._ban_intervals + remote_intervals
+            combined.sort(key=lambda item: item[0])
+            deduped: list[list[float]] = []
+            for start, end in combined:
+                if deduped and start <= deduped[-1][1] + 1.0:
+                    deduped[-1][1] = max(deduped[-1][1], end)
+                else:
+                    deduped.append([start, end])
+            self._ban_intervals = deduped[-64:]
+
+            local_until_epoch = self._until_epoch
+            if remote_until > local_until_epoch:
+                self._started_epoch = remote_start
+                self._until_epoch = remote_until
+                self._reason = str(payload.get("reason") or "Persisted Binance cooldown")[:500]
+            elif not self._reason and payload.get("reason"):
+                self._reason = str(payload.get("reason"))[:500]
+
+            remaining = max(0.0, self._until_epoch - now_epoch)
+            if remaining > 0:
+                self._until = max(self._until, time.monotonic() + remaining)
+            if self._until_epoch > 0:
+                self._persist_locked()
+
+    def _persist_locked(self) -> None:
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            now_epoch = time.time()
+            remaining = max(0.0, self._until - time.monotonic())
+            if self._until > 0:
+                self._until_epoch = max(self._until_epoch, now_epoch + remaining)
+            payload = {
+                "started_epoch": self._started_epoch,
+                "until_epoch": self._until_epoch,
+                "ban_intervals": self._ban_intervals[-64:],
+                "reason": self._reason,
+                "updated_epoch": now_epoch,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            temp = self._state_path.with_suffix(".tmp")
+            temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(temp, self._state_path)
+        except Exception:
+            log.warning("[BINANCE] gagal menyimpan cooldown marker lokal", exc_info=True)
+
+    def remaining(self) -> float:
+        with self._lock:
+            remaining = max(0.0, self._until - time.monotonic())
+            if remaining <= 0 and self._until > 0:
+                self._until = 0.0
+                self._reason = ""
+                # Retain started/until epochs to reconcile expiries after restart.
+                self._persist_locked()
+            return remaining
+
+    def reason(self) -> str:
+        with self._lock:
+            return self._reason
+
+    def covered_by_last_ban(self, epoch_seconds: float) -> bool:
+        """Return True when a timestamp fell inside the most recently recorded IP ban."""
+        try:
+            stamp = float(epoch_seconds)
+        except (TypeError, ValueError):
+            return False
+        with self._lock:
+            intervals = self._ban_intervals or (
+                [[self._started_epoch, self._until_epoch]]
+                if self._started_epoch > 0 and self._until_epoch > self._started_epoch else []
+            )
+            return any(start <= stamp <= end for start, end in intervals)
+
+    def extend(self, seconds: float, reason: str = "Binance rate limit") -> float:
+        seconds = max(0.0, float(seconds))
+        with self._lock:
+            now_mono = time.monotonic()
+            now_epoch = time.time()
+            if self._until <= now_mono:
+                self._started_epoch = now_epoch
+                self._until_epoch = now_epoch + seconds
+                self._ban_intervals.append([self._started_epoch, self._until_epoch])
+            else:
+                self._until_epoch = max(self._until_epoch, now_epoch + seconds)
+                if self._ban_intervals:
+                    self._ban_intervals[-1][1] = max(self._ban_intervals[-1][1], self._until_epoch)
+                else:
+                    self._ban_intervals.append([self._started_epoch or now_epoch, self._until_epoch])
+            self._ban_intervals = self._ban_intervals[-64:]
+            self._until = max(self._until, now_mono + seconds)
+            self._reason = str(reason or "Binance rate limit")[:500]
+            self._persist_locked()
+            return max(0.0, self._until - time.monotonic())
+
+    def wait_for_request_slot(self, spacing: float) -> float:
+        with self._lock:
+            return max(0.0, self._last_request + max(0.0, spacing) - time.monotonic())
+
+    def record_request(self) -> None:
+        with self._lock:
+            self._last_request = time.monotonic()
+
+
+BINANCE_COOLDOWN = BinanceCooldownGate()
+BINANCE_HTTP_LOCK = asyncio.Lock()
+
+
+def _local_rate_limit_error(endpoint: str) -> "BinanceRateLimitError":
+    remaining = max(1.0, BINANCE_COOLDOWN.remaining())
+    exc = BinanceRateLimitError(
+        f"Binance REST sedang cooldown global ({remaining:.0f}s); request ditahan tanpa dikirim.",
+        status_code=429, code=-1003, endpoint=endpoint,
+        server_cooldown_seconds=remaining,
+        bot_cooldown_seconds=remaining,
+        retry_after_known=False,
+    )
+    exc.internal = True
+    return exc
 
 
 def binance_limit_log(exc: Any, cooldown: float, where: str, impact: str) -> str:
@@ -780,56 +1019,70 @@ class BinanceREST:
         path: str,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        """Serialized public REST request with central cooldown and telemetry."""
+        """Public REST with a shared IP cooldown; never fires during a 418/429 ban."""
         params = params or {}
         async with self._request_lock:
-            wait = self._rest_cooldown_until - time.monotonic()
-            if wait > 0:
-                log.warning("[BINANCE REST] cooldown aktif %.1fs; request %s ditahan", wait, path)
-                await asyncio.sleep(wait)
-            spacing = self._last_request_monotonic + BINANCE_PUBLIC_REQUEST_SPACING_SECONDS - time.monotonic()
-            if spacing > 0:
-                await asyncio.sleep(spacing)
+            async with BINANCE_HTTP_LOCK:
+                cooldown = BINANCE_COOLDOWN.remaining()
+                if cooldown > 0:
+                    raise _local_rate_limit_error(path)
+                spacing = BINANCE_COOLDOWN.wait_for_request_slot(BINANCE_PUBLIC_REQUEST_SPACING_SECONDS)
+                if spacing > 0:
+                    await asyncio.sleep(spacing)
+                if BINANCE_COOLDOWN.remaining() > 0:
+                    raise _local_rate_limit_error(path)
 
-            def request() -> tuple[int, Any, dict[str, str], str]:
-                response = self._session.get(
-                    f"{self.base_url}{path}", params=params,
-                    timeout=HTTP_REQUEST_SECONDS,
-                )
+                def request() -> tuple[int, Any, dict[str, str], str]:
+                    response = self._session.get(
+                        f"{self.base_url}{path}", params=params,
+                        timeout=HTTP_REQUEST_SECONDS,
+                    )
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = None
+                    return response.status_code, payload, dict(response.headers), response.text[:700]
+
                 try:
-                    payload = response.json()
-                except ValueError:
-                    payload = None
-                return response.status_code, payload, dict(response.headers), response.text[:500]
+                    status, payload, headers, body_text = await asyncio.to_thread(request)
+                except requests.RequestException as exc:
+                    raise BinanceAPIError(
+                        f"Transport error Binance REST {path}: {exc}",
+                        status_code=None, code=None, endpoint=path,
+                    ) from exc
+                self._last_request_monotonic = time.monotonic()
+                BINANCE_COOLDOWN.record_request()
 
-            status, payload, headers, body_text = await asyncio.to_thread(request)
-            self._last_request_monotonic = time.monotonic()
-            used = headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m")
-            API_STATS.record(path, status, used)
-
-            code = payload.get("code") if isinstance(payload, dict) else None
-            message = payload.get("msg") if isinstance(payload, dict) else body_text
-            limited = status in {418, 429} or str(code) in {"-1003", "-1015"} or "too many requests" in str(message).lower()
-            if limited:
-                server_seconds, known = rate_limit_wait(type("ResponseLike", (), {
-                    "headers": headers, "status_code": status, "text": body_text,
-                })())
-                cooldown = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
-                self._rest_cooldown_until = max(self._rest_cooldown_until, time.monotonic() + cooldown)
-                raise BinanceRateLimitError(
-                    f"Binance REST {path}: HTTP {status}, code={code}, {message}",
-                    status_code=status or 429,
-                    code=int(code) if str(code).lstrip("-").isdigit() else None,
-                    endpoint=path,
-                    server_cooldown_seconds=server_seconds,
-                    bot_cooldown_seconds=cooldown,
-                    retry_after_known=known,
-                )
-            if status >= 400:
-                raise RuntimeError(f"Binance REST {path}: HTTP {status}: {message}")
-            if payload is None:
-                raise RuntimeError(f"Binance REST {path}: respons JSON tidak valid")
-            return payload
+        used = headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m")
+        API_STATS.record(path, status, used)
+        code = payload.get("code") if isinstance(payload, dict) else None
+        message = payload.get("msg") if isinstance(payload, dict) else body_text
+        limited = status in {418, 429} or str(code) in {"-1003", "-1015"} or "too many requests" in str(message).lower()
+        if limited:
+            server_seconds, known = rate_limit_wait(type("ResponseLike", (), {
+                "headers": headers, "status_code": status, "text": body_text,
+            })())
+            cooldown = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+            self._rest_cooldown_until = max(self._rest_cooldown_until, time.monotonic() + cooldown)
+            BINANCE_COOLDOWN.extend(cooldown, f"HTTP {status} {path}: {message}")
+            raise BinanceRateLimitError(
+                f"Binance REST {path}: HTTP {status}, code={code}, {message}",
+                status_code=status or 429,
+                code=int(code) if str(code).lstrip("-").isdigit() else None,
+                endpoint=path,
+                server_cooldown_seconds=server_seconds,
+                bot_cooldown_seconds=cooldown,
+                retry_after_known=known,
+            )
+        if status >= 400:
+            raise BinanceAPIError(
+                f"Binance REST {path}: HTTP {status}: {message}",
+                status_code=status, code=int(code) if str(code).lstrip("-").isdigit() else None,
+                endpoint=path,
+            )
+        if payload is None:
+            raise RuntimeError(f"Binance REST {path}: respons JSON tidak valid")
+        return payload
 
     @staticmethod
     def _interval_ms(interval: str) -> int:
@@ -1312,7 +1565,7 @@ class BinanceREST:
 
     async def get_symbol_filters(self, symbol: str) -> dict[str, Any]:
         """Return current Binance symbol filters used by REAL quantity validation."""
-        symbols = await self.get_exchange_info(force=True)
+        symbols = await self.get_exchange_info(force=False)
         meta = symbols.get(normalize_symbol(symbol))
         if meta is None:
             raise ValueError(f"{symbol} tidak ditemukan di Binance exchangeInfo.")
@@ -1534,10 +1787,10 @@ class BinanceRealClient:
                 endpoint=path,
             )
 
-        remaining = (
+        remaining = max(
+            BINANCE_COOLDOWN.remaining(),
             (self.early_cooldown_remaining if REAL_EARLY.get() else self.server_cooldown_remaining)
-            if REAL_PRIORITY.get()
-            else self.cooldown_remaining
+            if REAL_PRIORITY.get() else self.cooldown_remaining,
         )
         if remaining > 0:
             blocked = BinanceRateLimitError(
@@ -1578,32 +1831,47 @@ class BinanceRealClient:
             )
 
         async with self._request_lock:
-            try:
-                response = await asyncio.to_thread(request_once)
-            except requests.RequestException as exc:
-                raise BinanceAPIError(
-                    f"Transport error Binance: {exc}",
-                    endpoint=path,
-                ) from exc
-            except (OSError, TimeoutError) as exc:
-                raise BinanceAPIError(
-                    f"Transport error Binance: {exc}",
-                    endpoint=path,
-                ) from exc
+            async with BINANCE_HTTP_LOCK:
+                cooldown = BINANCE_COOLDOWN.remaining()
+                if cooldown > 0:
+                    raise _local_rate_limit_error(path)
+                spacing = BINANCE_COOLDOWN.wait_for_request_slot(BINANCE_PUBLIC_REQUEST_SPACING_SECONDS)
+                if spacing > 0:
+                    await asyncio.sleep(spacing)
+                if BINANCE_COOLDOWN.remaining() > 0:
+                    raise _local_rate_limit_error(path)
+                try:
+                    response = await asyncio.to_thread(request_once)
+                except requests.RequestException as exc:
+                    raise BinanceAPIError(
+                        f"Transport error Binance: {exc}", endpoint=path,
+                    ) from exc
+                except (OSError, TimeoutError) as exc:
+                    raise BinanceAPIError(
+                        f"Transport error Binance: {exc}", endpoint=path,
+                    ) from exc
+                BINANCE_COOLDOWN.record_request()
 
         API_STATS.record(
             path,
             response.status_code,
             response.headers.get("X-MBX-USED-WEIGHT-1M"),
         )
-        if response.status_code in {418, 429}:
+        code, msg = self._extract_binance_error(response)
+        is_rate_limited = (
+            response.status_code in {418, 429}
+            or code in {-1003, -1015}
+            or "too many requests" in str(msg).lower()
+            or "way too many requests" in str(msg).lower()
+        )
+        if is_rate_limited:
             server_seconds, retry_known = rate_limit_wait(response, self._time_offset_ms)
-            bot_seconds = server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS
+            bot_seconds = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
             self.apply_cooldown(server_seconds, bot_seconds)
-            code, msg = self._extract_binance_error(response)
+            BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {msg}")
             raise BinanceRateLimitError(
                 msg,
-                status_code=response.status_code,
+                status_code=response.status_code or 429,
                 code=code,
                 endpoint=path,
                 server_cooldown_seconds=server_seconds,
@@ -1659,6 +1927,78 @@ class BinanceRealClient:
             return int(body["serverTime"])
 
         return await asyncio.to_thread(request)
+
+    async def _user_stream_request(self, method: str, listen_key: str | None = None) -> dict[str, Any]:
+        """Create/renew USD-M listenKey; API-key header only, no HMAC signature."""
+        if not REAL_EXECUTION_ENABLED:
+            raise BinanceAPIError("REAL_EXECUTION_ENABLED=0; user stream REAL dinonaktifkan.", endpoint="/fapi/v1/listenKey")
+        if not self.configured:
+            raise BinanceAPIError("BINANCE_API_KEY / BINANCE_API_SECRET belum tersedia.", endpoint="/fapi/v1/listenKey")
+        path = "/fapi/v1/listenKey"
+        params = {"listenKey": listen_key} if method.upper() == "PUT" and listen_key else {}
+        async with self._request_lock:
+            async with BINANCE_HTTP_LOCK:
+                cooldown = BINANCE_COOLDOWN.remaining()
+                if cooldown > 0:
+                    raise _local_rate_limit_error(path)
+                spacing = BINANCE_COOLDOWN.wait_for_request_slot(BINANCE_PUBLIC_REQUEST_SPACING_SECONDS)
+                if spacing > 0:
+                    await asyncio.sleep(spacing)
+                if BINANCE_COOLDOWN.remaining() > 0:
+                    raise _local_rate_limit_error(path)
+
+                def request_once() -> requests.Response:
+                    return requests.request(
+                        method.upper(), f"{self.base_url}{path}",
+                        headers={"X-MBX-APIKEY": self.api_key, "Accept": "application/json"},
+                        params=params or None,
+                        timeout=HTTP_REQUEST_SECONDS,
+                    )
+
+                try:
+                    response = await asyncio.to_thread(request_once)
+                except requests.RequestException as exc:
+                    raise BinanceAPIError(f"User stream transport error: {exc}", endpoint=path) from exc
+                BINANCE_COOLDOWN.record_request()
+
+        API_STATS.record(path, response.status_code, response.headers.get("X-MBX-USED-WEIGHT-1M"))
+        code, message = self._extract_binance_error(response)
+        is_rate_limited = (
+            response.status_code in {418, 429}
+            or code in {-1003, -1015}
+            or "too many requests" in str(message).lower()
+        )
+        if is_rate_limited:
+            server_seconds, retry_known = rate_limit_wait(response, self._time_offset_ms)
+            bot_seconds = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+            self.apply_cooldown(server_seconds, bot_seconds)
+            BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {message}")
+            raise BinanceRateLimitError(
+                message, status_code=response.status_code or 429, code=code, endpoint=path,
+                server_cooldown_seconds=server_seconds, bot_cooldown_seconds=bot_seconds,
+                retry_after_known=retry_known,
+            )
+        if response.status_code >= 400:
+            code, message = self._extract_binance_error(response)
+            raise BinanceAPIError(message, status_code=response.status_code, code=code, endpoint=path)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise BinanceAPIError("User stream response bukan JSON valid.", endpoint=path) from exc
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("User stream response tidak valid.", endpoint=path)
+        return payload
+
+    async def create_user_stream(self) -> str:
+        payload = await self._user_stream_request("POST")
+        listen_key = str(payload.get("listenKey") or "").strip()
+        if not listen_key:
+            raise BinanceAPIError("Binance tidak mengembalikan listenKey.", endpoint="/fapi/v1/listenKey")
+        return listen_key
+
+    async def keepalive_user_stream(self, listen_key: str) -> str:
+        payload = await self._user_stream_request("PUT", listen_key)
+        return str(payload.get("listenKey") or listen_key)
 
     async def get_futures_balance(self) -> list[dict[str, Any]]:
         """Read USD-M Futures balance and refresh the local USDT cache."""
@@ -2394,6 +2734,252 @@ class BinanceWebSocket:
 # GITHUB STORE
 # ============================================================
 
+class BinanceUserDataWebSocket:
+    """Private USD-M user stream for authoritative order/fill notifications.
+
+    REST is used only to create/renew the listenKey. Once connected, order
+    updates continue over WebSocket during an HTTP 418/429 cooldown.
+    """
+    def __init__(self, real_client: BinanceRealClient, on_event) -> None:
+        self.real = real_client
+        self.on_event = on_event
+        self.listen_key: str | None = None
+        self.connected = False
+        self.last_message_at: datetime | None = None
+        self.last_keepalive_monotonic = 0.0
+        self.reconnect_count = 0
+        self._task: asyncio.Task | None = None
+        self._stop = asyncio.Event()
+        self._ws = None
+        self._start_lock = asyncio.Lock()
+        # listenKey is a short-lived bearer credential. Store only on the local
+        # runtime filesystem (never GitHub) so a process restart during an IP ban
+        # can reconnect while the existing key remains valid.
+        self._state_path = BASE_DIR / "data" / "private_user_stream_state.json"
+        self._load_local_state()
+
+    def _load_local_state(self) -> None:
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+            key = str(payload.get("listen_key") or "").strip()
+            expires_at = float(payload.get("expires_at") or 0)
+            if key and expires_at > time.time() + 30:
+                self.listen_key = key
+                # The persisted expiry is one hour after the last successful
+                # start/ping. Recover elapsed lifetime accurately so a /try
+                # reload does not accidentally let the key expire before the
+                # next 45-minute keepalive.
+                remaining_lifetime = max(0.0, min(3600.0, expires_at - time.time()))
+                elapsed_since_keepalive = max(0.0, 3600.0 - remaining_lifetime)
+                self.last_keepalive_monotonic = time.monotonic() - elapsed_since_keepalive
+        except Exception:
+            pass
+
+    def _save_local_state(self) -> None:
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self._state_path.with_suffix(".tmp")
+            temp.write_text(json.dumps({
+                "listen_key": self.listen_key or "",
+                "expires_at": time.time() + 3600 if self.listen_key else 0,
+                "updated_at": iso_utc(),
+            }), encoding="utf-8")
+            os.replace(temp, self._state_path)
+        except Exception:
+            log.debug("Tidak dapat menyimpan user-stream listenKey lokal", exc_info=True)
+
+    @property
+    def status(self) -> str:
+        if self.connected:
+            return "LIVE"
+        if self._task is not None and not self._task.done():
+            return "RECONNECTING" if self.reconnect_count else "CONNECTING"
+        return "OFFLINE"
+
+    async def start(self) -> None:
+        async with self._start_lock:
+            if self._task is not None and not self._task.done():
+                return
+            self._stop.clear()
+            if not self.listen_key and BINANCE_COOLDOWN.remaining() <= 0:
+                # Normal path: acquire a listenKey through REST before starting.
+                self.listen_key = await self.real.create_user_stream()
+                self.last_keepalive_monotonic = time.monotonic()
+                self._save_local_state()
+            # During an IP ban, deliberately start the task without a listenKey.
+            # _run() will try the low-frequency USD-M WebSocket API start method;
+            # if Binance blocks that too, it backs off and retries after recovery.
+            self._task = asyncio.create_task(self._run(), name="binance-private-user-stream")
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                log.debug("Private WebSocket close: %s", traceback.format_exc(limit=1))
+        task = self._task
+        if task is not None:
+            try:
+                await asyncio.wait_for(task, timeout=5)
+            except asyncio.TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("Private user stream shutdown error")
+        self._task = None
+        self._ws = None
+        self.connected = False
+
+    async def _user_stream_ws_api(self, method: str) -> str:
+        """Use the USD-M WebSocket API to start/ping a listenKey when REST is banned.
+
+        This is a low-frequency fallback (weight 1) and is not treated as a
+        guaranteed way around an IP ban. If Binance blocks it too, the existing
+        private stream is left running and REST reconciliation takes over later.
+        """
+        if not self.real.configured:
+            raise BinanceAPIError("API key REAL belum tersedia untuk user-stream WS API.")
+        request_id = uuid4().hex
+        payload = {
+            "id": request_id,
+            "method": method,
+            "params": {"apiKey": self.real.api_key},
+        }
+        async with ws_connect(
+            BINANCE_WS_API_BASE, ping_interval=None, ping_timeout=None,
+            close_timeout=3, max_queue=16,
+        ) as ws:
+            await ws.send(json.dumps(payload))
+            raw = await asyncio.wait_for(ws.recv(), timeout=12.0)
+        response = json.loads(raw)
+        if str(response.get("id") or "") != request_id:
+            raise RuntimeError("Respons userDataStream WS API memiliki request ID berbeda.")
+        if int(response.get("status") or 0) != 200:
+            error = response.get("error") or response
+            raise RuntimeError(f"userDataStream WS API {method} ditolak: {error}")
+        result = response.get("result") or {}
+        key = str(result.get("listenKey") or self.listen_key or "").strip()
+        if not key:
+            raise RuntimeError(f"userDataStream WS API {method} tidak mengembalikan listenKey.")
+        return key
+
+    async def _renew_key_if_due(self) -> None:
+        if not self.listen_key:
+            return
+        if time.monotonic() - self.last_keepalive_monotonic < BINANCE_USER_STREAM_KEEPALIVE_SECONDS:
+            return
+        if BINANCE_COOLDOWN.remaining() > 0:
+            # Prefer WebSocket API keepalive during an HTTP REST ban. It is
+            # attempted only on the 45-minute keepalive cadence, not per tick.
+            # A failure is backed off by five minutes; the current private
+            # socket remains active while Binance's listenKey is still valid.
+            try:
+                self.listen_key = await self._user_stream_ws_api("userDataStream.ping")
+                self.last_keepalive_monotonic = time.monotonic()
+                self._save_local_state()
+                log.info("[USER WS] listenKey renewed through WebSocket API during REST cooldown")
+            except Exception as exc:
+                self.last_keepalive_monotonic = time.monotonic() - BINANCE_USER_STREAM_KEEPALIVE_SECONDS + 300.0
+                log.warning("[USER WS] WS API keepalive gagal selama REST cooldown; retry 5 menit lagi: %s", exc)
+            return
+        self.listen_key = await self.real.keepalive_user_stream(self.listen_key)
+        self.last_keepalive_monotonic = time.monotonic()
+        self._save_local_state()
+        log.info("[USER WS] listenKey renewed")
+
+    async def _run(self) -> None:
+        backoff = WS_RECONNECT_MIN
+        while not self._stop.is_set():
+            try:
+                if not self.listen_key:
+                    if BINANCE_COOLDOWN.remaining() > 0:
+                        # If no persisted listenKey survived /try or restart,
+                        # attempt the native WS API start endpoint once per
+                        # cooldown retry interval. This may also be rate-limited;
+                        # failure is non-fatal and REST reconciliation remains.
+                        try:
+                            self.listen_key = await self._user_stream_ws_api("userDataStream.start")
+                            self.last_keepalive_monotonic = time.monotonic()
+                            self._save_local_state()
+                        except Exception as exc:
+                            log.warning("[USER WS] userDataStream.start via WS API belum tersedia: %s", exc)
+                            await asyncio.sleep(max(300.0, min(900.0, BINANCE_COOLDOWN.remaining() or 300.0)))
+                            continue
+                    else:
+                        self.listen_key = await self.real.create_user_stream()
+                        self.last_keepalive_monotonic = time.monotonic()
+                        self._save_local_state()
+
+                query = urlencode({"listenKey": self.listen_key, "events": "ORDER_TRADE_UPDATE/ACCOUNT_UPDATE"})
+                url = f"{BINANCE_PRIVATE_WS_BASE}?{query}"
+                log.info("[USER WS] connecting private order stream")
+                async with ws_connect(
+                    url, ping_interval=None, ping_timeout=None, close_timeout=3, max_queue=2048,
+                ) as ws:
+                    self._ws = ws
+                    self.connected = True
+                    self.last_message_at = now_utc()
+                    self.reconnect_count += 1
+                    backoff = WS_RECONNECT_MIN
+                    log.info("[USER WS] connected; reconnect=%s", self.reconnect_count)
+
+                    while not self._stop.is_set():
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=20.0)
+                        except asyncio.TimeoutError:
+                            await self._renew_key_if_due()
+                            continue
+                        if raw is None:
+                            raise ConnectionError("Private user stream closed by Binance")
+                        self.last_message_at = now_utc()
+                        try:
+                            payload = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+                            payload = payload["data"]
+                        if not isinstance(payload, dict):
+                            continue
+                        event_name = str(payload.get("e") or "")
+                        if event_name == "listenKeyExpired":
+                            log.warning("[USER WS] listenKey expired; create a new one after cooldown")
+                            self.listen_key = None
+                            self._save_local_state()
+                            break
+                        if event_name in {"ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE", "MARGIN_CALL"}:
+                            try:
+                                await self.on_event(payload)
+                            except Exception:
+                                log.exception("[USER WS] order/account event handler failed")
+                        await self._renew_key_if_due()
+
+            except asyncio.CancelledError:
+                break
+            except BinanceRateLimitError as exc:
+                log.warning("[USER WS] listenKey request tertahan cooldown %.0fs: %s", BINANCE_COOLDOWN.remaining(), exc)
+            except (ConnectionClosed, asyncio.TimeoutError, ConnectionError, OSError) as exc:
+                if not self._stop.is_set():
+                    log.warning("[USER WS] disconnected: %s", exc)
+            except Exception as exc:
+                if not self._stop.is_set():
+                    log.exception("[USER WS] unexpected error: %s", exc)
+            finally:
+                self.connected = False
+                self._ws = None
+
+            if self._stop.is_set():
+                break
+            wait = BINANCE_COOLDOWN.remaining()
+            await asyncio.sleep(max(wait, backoff))
+            backoff = min(backoff * 2, WS_RECONNECT_MAX)
+
+
 class GitHubStore:
     def __init__(self) -> None:
         self.token = GITHUB_TOKEN
@@ -2741,6 +3327,7 @@ class TradingEngine:
         self.real = BinanceRealClient()
         self.github = GitHubStore()
         self.ws = BinanceWebSocket(self._on_price)
+        self.user_ws = BinanceUserDataWebSocket(self.real, self._on_user_data_event)
 
         self.real_mode = False  # New REAL entries always require explicit /real on.
         self.margin_usdt = DEFAULT_MARGIN_USDT
@@ -2760,6 +3347,14 @@ class TradingEngine:
         self.last_processed_candles: dict[str, int] = {}
         self.last_position_candles: dict[str, int] = {}
         self._signal_retries: dict[str, dict[str, Any]] = {}
+        self.deferred_commands: list[dict[str, Any]] = []
+        self._deferred_commands_lock = asyncio.Lock()
+        self._last_api_recovery_notice = 0.0
+        self._last_cooldown_github_update = 0.0
+        self._last_exchange_info_retry = 0.0
+        self._was_in_binance_cooldown = self._binance_cooldown_remaining() > 0
+        self._scan_interrupted_by_cooldown = False
+        self._last_user_stream_start_attempt = 0.0
 
         self._running = False
         self._scan_task: asyncio.Task | None = None
@@ -2803,17 +3398,38 @@ class TradingEngine:
         return path
 
     async def _remote_or_local(self, remote_path: str) -> bytes | None:
-        try:
-            data, _ = await self.github.get_file(remote_path)
-            if data is not None:
-                return data
-        except Exception as exc:
-            log.warning("GitHub GET %s gagal; mencoba fallback lokal: %s", remote_path, exc)
         local = self._local_path(remote_path)
+        local_data: bytes | None = None
         try:
-            return local.read_bytes() if local.exists() else None
+            local_data = local.read_bytes() if local.exists() else None
         except OSError:
-            return None
+            local_data = None
+
+        remote_data: bytes | None = None
+        try:
+            remote_data, _ = await self.github.get_file(remote_path)
+        except Exception as exc:
+            log.warning("GitHub GET %s gagal; fallback lokal dipakai bila tersedia: %s", remote_path, exc)
+
+        # Critical JSON snapshots are written locally before GitHub. If a GitHub
+        # PUT failed, blindly preferring a still-readable older remote version
+        # would resurrect stale active trades/settings/commands on restart.
+        if local_data and remote_data and remote_path in {SETUPS_PATH, RUNTIME_SETTINGS_PATH, DEFERRED_COMMANDS_PATH, BINANCE_COOLDOWN_PATH}:
+            def updated_at(blob: bytes) -> float:
+                try:
+                    obj = json.loads(blob.decode("utf-8"))
+                    stamp = parse_iso(obj.get("updated_at")) if isinstance(obj, dict) else None
+                    return stamp.timestamp() if stamp else 0.0
+                except Exception:
+                    return 0.0
+            local_stamp = updated_at(local_data)
+            remote_stamp = updated_at(remote_data)
+            if local_stamp >= remote_stamp:
+                return local_data
+            return remote_data
+        if remote_data is not None:
+            return remote_data
+        return local_data
 
     async def _persist_bytes(self, remote_path: str, content: bytes, message: str) -> None:
         local = self._local_path(remote_path)
@@ -2866,6 +3482,172 @@ class TradingEngine:
                 "updated_at": iso_utc(),
             }
             await self._persist_bytes(RUNTIME_SETTINGS_PATH, json.dumps(payload, indent=2).encode(), "volumatic: runtime settings")
+
+    @staticmethod
+    def _deferred_command_allowed(command_text: str) -> bool:
+        parts = str(command_text or "").strip().split(maxsplit=1)
+        if not parts:
+            return False
+        command = parts[0].split("@", 1)[0].lower()
+        argument = parts[1].strip().lower() if len(parts) > 1 else ""
+        if command == "/real":
+            return argument == "on"  # /real off is local and must always execute immediately.
+        return command in {"/close", "/del", "/balance"}
+
+    async def _save_deferred_commands(self) -> None:
+        payload = {
+            "strategy": volumatic.STRATEGY_NAME,
+            "commands": self.deferred_commands[-500:],
+            "updated_at": iso_utc(),
+        }
+        content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        # _persist_bytes writes the local fallback first, then attempts GitHub.
+        await self._persist_bytes(DEFERRED_COMMANDS_PATH, content, "volumatic: deferred command queue")
+
+    async def _load_deferred_commands(self) -> None:
+        raw = await self._remote_or_local(DEFERRED_COMMANDS_PATH)
+        if not raw:
+            self.deferred_commands = []
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+            rows = payload.get("commands", []) if isinstance(payload, dict) else []
+            restored: list[dict[str, Any]] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                command_text = str(row.get("command") or "").strip()
+                if not self._deferred_command_allowed(command_text):
+                    continue
+                restored.append({
+                    "command_id": str(row.get("command_id") or uuid4().hex),
+                    "command": command_text,
+                    "queued_at": str(row.get("queued_at") or iso_utc()),
+                    "attempts": max(0, int(row.get("attempts") or 0)),
+                    "next_retry_at": str(row.get("next_retry_at") or ""),
+                    "last_error": str(row.get("last_error") or "")[:500],
+                })
+            self.deferred_commands = restored[-500:]
+        except Exception as exc:
+            log.warning("Deferred command queue tidak valid; queue lokal dimulai kosong: %s", exc)
+            self.deferred_commands = []
+
+    async def _enqueue_deferred_command(self, command_text: str, reason: str) -> None:
+        command_text = str(command_text or "").strip()
+        if not self._deferred_command_allowed(command_text):
+            raise ValueError("Command ini tidak diizinkan masuk antrean Binance.")
+        async with self._deferred_commands_lock:
+            existing = next((x for x in self.deferred_commands if x.get("command") == command_text), None)
+            if existing is None:
+                if len(self.deferred_commands) >= 500:
+                    raise RuntimeError("Antrean perintah penuh (500). Selesaikan antrean lebih dahulu.")
+                self.deferred_commands.append({
+                    "command_id": uuid4().hex,
+                    "command": command_text,
+                    "queued_at": iso_utc(),
+                    "attempts": 0,
+                    "next_retry_at": "",
+                    "last_error": str(reason)[:500],
+                })
+            else:
+                existing["last_error"] = str(reason)[:500]
+            await self._save_deferred_commands()
+
+    async def _remove_deferred_command(self, command_id: str) -> None:
+        async with self._deferred_commands_lock:
+            self.deferred_commands = [x for x in self.deferred_commands if x.get("command_id") != command_id]
+            await self._save_deferred_commands()
+
+    async def _cancel_queued_real_on(self) -> None:
+        async with self._deferred_commands_lock:
+            before = len(self.deferred_commands)
+            def is_queued_real_on(item: dict[str, Any]) -> bool:
+                parts = str(item.get("command") or "").strip().split(maxsplit=1)
+                return bool(parts) and parts[0].split("@", 1)[0].lower() == "/real" and len(parts) > 1 and parts[1].strip().lower() == "on"
+            self.deferred_commands = [x for x in self.deferred_commands if not is_queued_real_on(x)]
+            if len(self.deferred_commands) != before:
+                await self._save_deferred_commands()
+
+    async def _process_deferred_commands(self) -> None:
+        if not self.deferred_commands or self._binance_cooldown_remaining() > 0:
+            return
+        # FIFO, one API-dependent command per maintenance pass. The item is
+        # retained until the handler completes; repeated execution is designed
+        # to be idempotent (e.g. /close only sees trades still active).
+        item = self.deferred_commands[0]
+        command_text = str(item.get("command") or "")
+        retry_at = parse_iso(item.get("next_retry_at")) if item.get("next_retry_at") else None
+        if retry_at is not None and now_utc() < retry_at:
+            return
+
+        async def defer_retry(error: Exception) -> None:
+            attempts = int(item.get("attempts") or 0) + 1
+            item["attempts"] = attempts
+            delay = min(300, max(5, 2 ** min(attempts, 8)))
+            item["next_retry_at"] = iso_utc(now_utc() + timedelta(seconds=delay))
+            item["last_error"] = str(error)[:500]
+            await self._save_deferred_commands()
+            log.warning("Deferred command %s ditahan untuk retry %ss: %s", command_text, delay, error)
+
+        try:
+            await self._dispatch_command(command_text)
+        except BinanceRateLimitError as exc:
+            await defer_retry(exc)
+            return
+        except BinanceAPIError as exc:
+            # Transport errors / 5xx are transient. Authentication/parameter
+            # errors are permanent and should be reported rather than retried forever.
+            if exc.status_code is None or exc.status_code >= 500:
+                await defer_retry(exc)
+                return
+            log.error("Deferred command %s ditolak Binance secara permanen: %s", command_text, exc)
+            await self.reply(f"❌ Perintah tertunda {command_text} ditolak Binance: {str(exc)[:700]}")
+        except (requests.RequestException, ConnectionError, TimeoutError, asyncio.TimeoutError) as exc:
+            await defer_retry(exc)
+            return
+        except Exception as exc:
+            log.exception("Deferred command %s gagal permanen", command_text)
+            await self.reply(f"❌ Perintah tertunda {command_text} gagal dan dikeluarkan dari antrean: {str(exc)[:700]}")
+        await self._remove_deferred_command(str(item.get("command_id") or ""))
+        await self.reply(f"✅ Perintah tertunda selesai diproses: {command_text}")
+
+    def _binance_cooldown_remaining(self) -> float:
+        return max(
+            BINANCE_COOLDOWN.remaining(),
+            self.rest._rest_cooldown_until - time.monotonic(),
+            self.real.cooldown_remaining,
+        )
+
+    async def _restore_cooldown_from_github(self) -> None:
+        """Restore a persisted IP ban before the first Binance REST request."""
+        raw = await self._remote_or_local(BINANCE_COOLDOWN_PATH)
+        if raw:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+                BINANCE_COOLDOWN.merge_persisted_payload(payload)
+                self._last_cooldown_github_update = float(payload.get("updated_epoch") or 0.0)
+            except Exception:
+                log.warning("Persisted Binance cooldown JSON invalid; keep local marker only.", exc_info=True)
+        self._was_in_binance_cooldown = self._binance_cooldown_remaining() > 0
+
+    async def _sync_cooldown_marker_to_github(self) -> None:
+        """Publish a changed cooldown marker once per ban transition, not per poll."""
+        path = BINANCE_COOLDOWN._state_path
+        try:
+            raw = path.read_bytes()
+            payload = json.loads(raw.decode("utf-8"))
+            updated = float(payload.get("updated_epoch") or 0.0)
+            if updated <= self._last_cooldown_github_update:
+                return
+            await self.github.replace_file(
+                BINANCE_COOLDOWN_PATH, raw, "volumatic: persist Binance IP cooldown"
+            )
+            self._last_cooldown_github_update = updated
+            log.info("[BINANCE] cooldown marker tersinkron ke GitHub untuk recovery lintas-restart.")
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            log.warning("[BINANCE] cooldown marker GitHub gagal disinkron; local fallback tetap aktif: %s", exc)
 
     async def _load_history(self) -> None:
         raw = await self._remote_or_local(HISTORY_TRADES_PATH)
@@ -2992,9 +3774,17 @@ class TradingEngine:
             await self.reply("Trade aktif sudah dimuat. Tidak akan menimpa state yang sedang berjalan.")
             return
         await self._load_active_state()
+        if self._binance_cooldown_remaining() > 0:
+            await self._sync_ws_symbols()
+            await self.reply(
+                f"✅ Snapshot lokal dimuat. Trade aktif: {len(self.active_trades)}. "
+                f"Binance REST cooldown masih {self._binance_cooldown_remaining():.0f}s; "
+                "rekonsiliasi exchange akan berjalan otomatis setelah API pulih."
+            )
+            return
         await self._reconcile_restored_trades()
         await self._sync_ws_symbols()
-        await self.reply(f"✅ Snapshot dimuat. Trade aktif: {len(self.active_trades)}.")
+        await self.reply(f"✅ Snapshot dimuat dan direkonsiliasi. Trade aktif: {len(self.active_trades)}.")
 
     # ----------------------------- Startup -------------------------------
     async def start(self) -> None:
@@ -3013,11 +3803,35 @@ class TradingEngine:
         await self._load_history()
         await self._load_notes()
         await self._load_active_state()
-        self.symbols = await self.rest.get_exchange_info()
-        self._last_universe_refresh = time.monotonic()
-        await self._reconcile_restored_trades()
+        await self._load_deferred_commands()
+        await self._restore_cooldown_from_github()
+        try:
+            self.symbols = await self.rest.get_exchange_info()
+            self._last_universe_refresh = time.monotonic()
+        except BinanceRateLimitError as exc:
+            # Telegram/health service must come online even during a long IP ban.
+            self.symbols = self.rest._exchange_info_cache or {}
+            self._last_universe_refresh = 0.0
+            log.warning("[START] Binance sedang cooldown; startup degraded tanpa menghentikan launcher: %s", exc)
+        except Exception as exc:
+            self.symbols = self.rest._exchange_info_cache or {}
+            self._last_universe_refresh = 0.0
+            log.exception("[START] exchangeInfo belum tersedia; pemulihan otomatis dijadwalkan: %s", exc)
+        if self._binance_cooldown_remaining() <= 0:
+            await self._reconcile_restored_trades()
+        else:
+            log.warning(
+                "[START] REST cooldown aktif; reconciliation REAL ditunda. User Data WS akan mengambil fill event jika listenKey lokal tersedia."
+            )
         await self.ws.start()
         await self._sync_ws_symbols()
+        if self.real_mode or any(t.real_enabled and t.status in {"PENDING", "FILLED"} for t in self.active_trades.values()):
+            try:
+                await self.user_ws.start()
+            except BinanceRateLimitError as exc:
+                log.warning("[START] private user stream menunggu Binance pulih: %s", exc)
+            except Exception as exc:
+                log.exception("[START] private user stream belum tersambung; REST reconciliation tetap aktif: %s", exc)
 
         self._maintenance_task = asyncio.create_task(self._maintenance_loop(), name="volumatic-maintenance")
         self._scan_task = asyncio.create_task(self._scan_loop(), name="volumatic-scanner")
@@ -3038,6 +3852,9 @@ class TradingEngine:
             f"Universe: {len(self.symbols)} USDT Perpetual\n"
             f"Batch scanner: {SCAN_MAX_PAIRS_PER_CYCLE} pair\n"
             f"Active restored: {len(self.active_trades)}\n"
+            f"Deferred commands: {len(self.deferred_commands)}\n"
+            f"Binance cooldown: {self._binance_cooldown_remaining():.0f}s\n"
+            f"Private User Data WS: {self.user_ws.status}\n"
             "REAL: OFF untuk entry baru\n"
             "Gunakan /scan on untuk memulai scanner dan /timeframe H4 atau D1 untuk memilih timeframe."
             + migration_warning
@@ -3059,6 +3876,7 @@ class TradingEngine:
         except Exception:
             log.exception("Persistence saat shutdown gagal.")
         await self.ws.stop()
+        await self.user_ws.stop()
         try: self.rest._session.close()
         except Exception: pass
         self.active_trades.clear()
@@ -3088,6 +3906,15 @@ class TradingEngine:
                 if not self.scan_enabled:
                     await asyncio.sleep(SCAN_POLL_SECONDS)
                     continue
+                cooldown = self._binance_cooldown_remaining()
+                if cooldown > 0:
+                    self._scan_interrupted_by_cooldown = True
+                    await asyncio.sleep(min(10.0, max(2.0, cooldown)))
+                    continue
+                if self._scan_interrupted_by_cooldown:
+                    self._scan_interrupted_by_cooldown = False
+                    self._scan_trigger_now = True
+                    log.info("[SCAN] Binance pulih; jadwalkan ulang scan memakai candle closed terbaru.")
                 interval_ms = volumatic.TIMEFRAME_MS[self.timeframe]
                 boundary = (int(time.time() * 1000) // interval_ms) * interval_ms
                 due = self._scan_trigger_now or boundary > self._last_scan_boundary_ms
@@ -3098,6 +3925,11 @@ class TradingEngine:
                 await asyncio.sleep(SCAN_POLL_SECONDS)
             except asyncio.CancelledError:
                 break
+            except BinanceRateLimitError as exc:
+                self._scan_interrupted_by_cooldown = True
+                self._scan_trigger_now = True
+                log.warning("[SCAN] paused by shared Binance cooldown: %s", exc)
+                await asyncio.sleep(5.0)
             except Exception as exc:
                 log.exception("[SCAN] loop gagal: %s", exc)
                 await asyncio.sleep(5.0)
@@ -3123,6 +3955,10 @@ class TradingEngine:
                 for symbol in batch:
                     if self.timeframe != timeframe:
                         log.info("[SCAN] timeframe berubah saat cycle; hentikan batch lama.")
+                        break
+                    if self._binance_cooldown_remaining() > 0:
+                        self._scan_interrupted_by_cooldown = True
+                        self._scan_trigger_now = True
                         break
                     try:
                         api_interval = "4h" if timeframe == "H4" else "1d"
@@ -3163,17 +3999,27 @@ class TradingEngine:
                         else:
                             self.last_processed_candles[key] = close_ms
                         processed += 1
+                    except BinanceRateLimitError as exc:
+                        errors += 1
+                        self._scan_interrupted_by_cooldown = True
+                        self._scan_trigger_now = True
+                        log.warning("[SCAN] cooldown aktif pada %s; hentikan scan dan lanjut setelah API pulih: %s", symbol, exc)
+                        break
                     except Exception as exc:
                         errors += 1
                         log.exception("[SCAN] %s gagal: %s", symbol, exc)
                     if SCAN_PAIR_DELAY_SECONDS > 0:
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
                 release_memory()
+                if self._binance_cooldown_remaining() > 0 or self._scan_interrupted_by_cooldown:
+                    break
                 if offset + len(batch) < len(universe):
                     log.info("[SCAN] batch %s selesai; lanjut batch berikutnya.", batch_number)
             await self._save_runtime_settings()
             await self._save_active_state()
             await self._sync_ws_symbols()
+            if self._scan_interrupted_by_cooldown or self._binance_cooldown_remaining() > 0:
+                self._scan_trigger_now = True
             elapsed = time.monotonic() - started
             log.info("[SCAN] cycle selesai | TF=%s | processed=%s/%s | signals=%s | errors=%s | durasi=%.1fs", timeframe, processed, len(universe), signals, errors, elapsed)
 
@@ -3209,20 +4055,22 @@ class TradingEngine:
             if existing:
                 if existing.status == "PENDING":
                     await self._cancel_pending_trade(existing, "OPPOSITE_BUBBLE_CANCEL")
-                    if existing.trade_id in self.active_trades:
+                    if existing.status == "PENDING" and existing.trade_id in self.active_trades:
                         raise RuntimeError(
                             f"Order lama {pair} belum terkonfirmasi canceled/terminal; reversal ditahan."
                         )
-                elif existing.status == "FILLED":
+                if existing.status == "FILLED":
+                    # A partial entry can have filled exposure plus an open remainder.
+                    # Cancel only the remainder before market-closing the live position.
+                    if existing.real_enabled and not existing.entry_order_terminal:
+                        await self._cancel_real_entry_remainder(existing, "OPPOSITE_BUBBLE_CANCEL_REMAINDER")
                     signal_close_price = Decimal(str(signal.get("close_price") or signal.get("signal_close_price") or "0"))
-                    # Strategy exit is a MARKET close at the time the opposite
-                    # bubble is confirmed. PAPER uses the freshest available
-                    # market price; REAL sends a Binance MARKET reduce/close order
-                    # and uses this price only as a fallback if Binance omits avgPrice.
                     market_reference_price = self._current_price(pair)
                     if market_reference_price is None:
                         try:
                             market_reference_price = await self.rest.get_price(pair)
+                        except BinanceRateLimitError:
+                            raise
                         except Exception:
                             market_reference_price = None
                     if market_reference_price is None:
@@ -3230,6 +4078,8 @@ class TradingEngine:
                     if market_reference_price <= 0:
                         raise RuntimeError(f"Harga market untuk close {pair} tidak valid.")
                     await self._close_trade(existing, market_reference_price, "OPPOSITE_BUBBLE_MARKET")
+                elif existing.trade_id in self.active_trades:
+                    raise RuntimeError(f"Order lama {pair} belum selesai direkonsiliasi; reversal ditahan.")
             if int(time.time() * 1000) >= int(expiry_ms):
                 await self._record_event(
                     "SIGNAL_EXPIRED_DURING_REVERSAL", None, pair=pair,
@@ -3417,14 +4267,17 @@ class TradingEngine:
         trade.entry_order_id = int(response["orderId"]) if response.get("orderId") is not None else trade.entry_order_id
         status = str(response.get("status") or "UNKNOWN").upper()
         executed = Decimal(str(response.get("executedQty") or "0"))
-        if status == "FILLED":
-            if executed > 0:
-                trade.quantity = executed
+        trade.entry_order_status = status
+        trade.entry_executed_qty = executed
+        if status in {"FILLED", "PARTIALLY_FILLED"} and executed > 0:
+            trade.quantity = executed
             avg = Decimal(str(response.get("avgPrice") or trade.entry))
             trade.fill_price = avg if avg > 0 else trade.entry
-            trade.real_state = "REAL_FILLED"
+            trade.entry_order_terminal = status == "FILLED"
+            trade.real_state = "REAL_FILLED" if status == "FILLED" else "REAL_PARTIALLY_FILLED"
             trade.real_error = None
-        elif status in {"NEW", "PARTIALLY_FILLED"}:
+        elif status == "NEW":
+            trade.entry_order_terminal = False
             trade.real_state = "REAL_PENDING"
             trade.real_error = None
         elif status in {"CANCELED", "EXPIRED", "REJECTED"}:
@@ -3477,78 +4330,110 @@ class TradingEngine:
         await self._save_active_state()
         log.info("[TRADE] FILLED %s %s @ %s (%s)", trade.pair, trade.direction, trade.fill_price, source)
 
-    async def _cancel_pending_trade(self, trade: Trade, reason: str) -> None:
-        """Cancel a pending order; REAL state changes only after exchange confirmation."""
-        if trade.status != "PENDING":
+    async def _cancel_real_entry_remainder(self, trade: Trade, reason: str) -> None:
+        """Cancel only the unfilled remainder; never treat a rate-limit as cancellation.
+
+        A partial fill is an actual position. Its filled quantity stays FILLED while
+        the remaining GTC LIMIT is canceled/reconciled once REST is available.
+        """
+        if not trade.real_enabled or trade.entry_order_terminal:
             return
-        if trade.real_enabled:
-            if not (trade.entry_order_id or trade.entry_client_order_id):
-                trade.real_state = "REAL_CANCEL_UNKNOWN"
-                trade.real_error = "Order REAL belum memiliki ID untuk rekonsiliasi/cancel."
-                await self._save_active_state()
-                return
-            try:
-                try:
-                    order = await self.real.get_order(
-                        trade.pair, order_id=trade.entry_order_id,
-                        client_order_id=trade.entry_client_order_id,
-                    )
-                except Exception as lookup_exc:
-                    # A lookup timeout/404 does not prove that the order is gone.
-                    order = {}
-                    log.warning("[REAL] lookup sebelum cancel %s gagal; tetap mencoba DELETE: %s", trade.pair, lookup_exc)
+        if self._binance_cooldown_remaining() > 0:
+            trade.pending_cancel_reason = reason
+            trade.real_state = "REAL_EXPIRY_WAIT_API" if "EXPIRE" in reason else "REAL_CANCEL_WAIT_API"
+            trade.real_error = f"REST cooldown aktif; LIMIT tetap dibiarkan berjalan. {reason}"
+            await self._save_active_state()
+            # Bubble/maintenance expiry does not call this while cooling down.
+            # A manual /close or /del receives this signal and is durably queued.
+            raise _local_rate_limit_error("/fapi/v1/order")
+        if not (trade.entry_order_id or trade.entry_client_order_id):
+            trade.pending_cancel_reason = reason
+            trade.real_state = "REAL_CANCEL_UNKNOWN"
+            trade.real_error = "Order REAL belum memiliki ID untuk rekonsiliasi/cancel."
+            await self._save_active_state()
+            raise RuntimeError(trade.real_error)
+
+        try:
+            order = await self.real.get_order(
+                trade.pair, order_id=trade.entry_order_id,
+                client_order_id=trade.entry_client_order_id,
+            )
+            status = str(order.get("status") or "UNKNOWN").upper()
+            executed = Decimal(str(order.get("executedQty") or "0"))
+            if status in {"NEW", "PARTIALLY_FILLED", "UNKNOWN"}:
+                if status == "UNKNOWN":
+                    raise RuntimeError(f"Status order belum diketahui saat cancel: {status}")
+                await self.real.cancel_order(
+                    trade.pair, order_id=trade.entry_order_id,
+                    client_order_id=trade.entry_client_order_id,
+                )
+                # Confirm terminal state. A cancel response alone is not enough.
+                order = await self.real.get_order(
+                    trade.pair, order_id=trade.entry_order_id,
+                    client_order_id=trade.entry_client_order_id,
+                )
                 status = str(order.get("status") or "UNKNOWN").upper()
                 executed = Decimal(str(order.get("executedQty") or "0"))
 
-                if status in {"NEW", "PARTIALLY_FILLED", "UNKNOWN"}:
-                    try:
-                        await self.real.cancel_order(
-                            trade.pair, order_id=trade.entry_order_id,
-                            client_order_id=trade.entry_client_order_id,
-                        )
-                    except Exception as cancel_exc:
-                        log.warning(
-                            "[REAL] cancel request %s belum terkonfirmasi; cek status lagi: %s",
-                            trade.pair, cancel_exc,
-                        )
-                    order = await self.real.get_order(
-                        trade.pair, order_id=trade.entry_order_id,
-                        client_order_id=trade.entry_client_order_id,
-                    )
-                    status = str(order.get("status") or "UNKNOWN").upper()
-                    executed = Decimal(str(order.get("executedQty") or "0"))
-
-                if status == "FILLED":
-                    trade.quantity = executed if executed > 0 else trade.quantity
-                    await self._mark_filled(
-                        trade, self._order_fill_price(order, trade.entry),
-                        "BINANCE_CANCEL_RACE_FILL",
-                    )
+            trade.entry_order_status = status
+            trade.entry_executed_qty = executed
+            if order.get("orderId") is not None:
+                trade.entry_order_id = int(order["orderId"])
+            if status in {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}:
+                trade.entry_order_terminal = True
+                trade.pending_cancel_reason = None
+                if executed > 0:
+                    trade.quantity = executed
+                    avg = self._order_fill_price(order, trade.fill_price or trade.entry)
+                    if trade.status == "PENDING":
+                        await self._mark_filled(trade, avg, "BINANCE_CANCEL_RECONCILED_FILL")
+                    else:
+                        trade.fill_price = avg
+                        trade.actual_notional = executed * avg
+                        trade.margin_usdt = trade.actual_notional / Decimal(max(1, trade.leverage))
+                        trade.real_state = "REAL_PARTIAL_TERMINAL" if status != "FILLED" else "REAL_FILLED"
+                        await self._record_event("ENTRY_REMAINDER_TERMINAL", trade, order_status=status, executed_qty=decimal_to_str(executed), reason=reason)
+                        await self._save_active_state()
                     return
-
-                if status in {"CANCELED", "EXPIRED", "REJECTED"}:
-                    if executed > 0:
-                        trade.quantity = executed
-                        await self._mark_filled(
-                            trade, self._order_fill_price(order, trade.entry),
-                            "BINANCE_PARTIAL_FILL_REMAINDER_CANCELED",
-                        )
-                        return
+                if trade.status == "PENDING":
                     result = "EXPIRED" if status == "EXPIRED" or "EXPIRE" in reason else "CANCELED"
                     await self._finalize_trade(trade, result, None, f"{reason}; BINANCE_{status}")
-                    return
+                else:
+                    trade.real_state = "REAL_FILLED"
+                    await self._save_active_state()
+                return
 
-                trade.real_state = "REAL_CANCEL_UNKNOWN"
-                trade.real_error = f"Cancel belum terkonfirmasi; status Binance={status}."
-                await self._save_active_state()
-                log.error("[REAL] %s tetap aktif karena status cancel belum final: %s", trade.pair, status)
-                return
-            except Exception as exc:
-                trade.real_state = "REAL_CANCEL_UNKNOWN"
-                trade.real_error = str(exc)[:500]
-                log.exception("[REAL] cancel pending %s gagal; order tetap aktif untuk retry", trade.pair)
-                await self._save_active_state()
-                return
+            trade.pending_cancel_reason = reason
+            trade.real_state = "REAL_CANCEL_UNKNOWN"
+            trade.real_error = f"Cancel belum terkonfirmasi; status Binance={status}."
+            await self._save_active_state()
+            raise RuntimeError(trade.real_error)
+        except BinanceRateLimitError:
+            trade.pending_cancel_reason = reason
+            trade.real_state = "REAL_CANCEL_WAIT_API"
+            trade.real_error = "Cancel ditunda sampai Binance REST kembali tersedia; order tidak dibatalkan saat cooldown."
+            await self._save_active_state()
+            raise
+        except Exception as exc:
+            trade.pending_cancel_reason = reason
+            trade.real_state = "REAL_CANCEL_UNKNOWN"
+            trade.real_error = str(exc)[:500]
+            await self._save_active_state()
+            log.exception("[REAL] cancel/reconcile remainder %s gagal; order tetap ditahan", trade.pair)
+            raise
+
+    async def _cancel_pending_trade(self, trade: Trade, reason: str) -> None:
+        """Cancel a pending order only after exchange confirmation.
+
+        When Binance is rate-limited, the real LIMIT remains on Binance. The
+        user-data stream can still turn it into FILLED while REST is unavailable.
+        """
+        if trade.status != "PENDING":
+            return
+        if trade.real_enabled:
+            trade.pending_cancel_reason = reason
+            await self._cancel_real_entry_remainder(trade, reason)
+            return
         await self._finalize_trade(
             trade, "EXPIRED" if "EXPIRE" in reason else "CANCELED", None, reason
         )
@@ -3559,6 +4444,13 @@ class TradingEngine:
         exit_price = reference_price
         if trade.real_enabled:
             try:
+                # A partially-filled GTC entry may still have an unfilled
+                # remainder. Cancel and confirm that remainder before MARKET
+                # close so it cannot fill later and unexpectedly reopen exposure.
+                if not trade.entry_order_terminal:
+                    await self._cancel_real_entry_remainder(
+                        trade, "CLOSE_POSITION_CANCEL_ENTRY_REMAINDER"
+                    )
                 position = await self.real.get_position(trade.pair, trade.entry_side)
                 if position is not None:
                     response = await self.real.place_market_close(
@@ -3637,11 +4529,78 @@ class TradingEngine:
     async def _expire_due_pending(self) -> None:
         now = now_utc()
         for trade in list(self.active_trades.values()):
+            if trade.real_enabled and trade.preserve_gtc_after_cooldown:
+                # Already-submitted REAL GTC orders preserved during a ban are
+                # intentionally not auto-canceled after REST becomes available.
+                continue
+
             if trade.status == "PENDING" and now >= trade.expires_at:
+                if trade.real_enabled:
+                    cooldown_active = self._binance_cooldown_remaining() > 0
+                    # A PREPARED order has never been submitted to Binance. Never
+                    # turn an expired local intent into a late exchange order.
+                    if trade.real_state == "REAL_PREPARED" or not trade.entry_client_order_id:
+                        if cooldown_active:
+                            continue
+                        await self._finalize_trade(
+                            trade, "EXPIRED", None, "REAL_ORDER_NEVER_SUBMITTED_BEFORE_CANDLE_EXPIRY"
+                        )
+                        continue
+                    expired_inside_ban = BINANCE_COOLDOWN.covered_by_last_ban(trade.expires_at.timestamp())
+                    order_may_exist = bool(trade.entry_client_order_id)
+                    if order_may_exist and (cooldown_active or expired_inside_ban):
+                        trade.preserve_gtc_after_cooldown = True
+                        trade.pending_cancel_reason = None
+                        trade.real_state = "REAL_GTC_PRESERVED_AFTER_COOLDOWN"
+                        trade.real_error = (
+                            "Order GTC dipertahankan: candle expiry terjadi selama Binance REST cooldown. "
+                            "Order tetap aktif sampai fill, opposite bubble, atau pembatalan manual."
+                        )
+                        await self._record_event(
+                            "ORDER_GTC_PRESERVED_AFTER_API_COOLDOWN", trade,
+                            order_status=trade.entry_order_status,
+                            expires_at=iso_utc(trade.expires_at),
+                            ban_until_epoch=BINANCE_COOLDOWN._until_epoch,
+                        )
+                        await self._save_active_state()
+                        log.warning("[REAL] %s LIMIT GTC dipertahankan setelah cooldown; auto-expiry dinonaktifkan untuk order ini.", trade.pair)
+                        continue
                 await self._cancel_pending_trade(trade, "ORDER_EXPIRED_ONE_CANDLE")
+
+            elif trade.status == "FILLED" and trade.real_enabled and not trade.entry_order_terminal and now >= trade.expires_at:
+                cooldown_active = self._binance_cooldown_remaining() > 0
+                expired_inside_ban = BINANCE_COOLDOWN.covered_by_last_ban(trade.expires_at.timestamp())
+                if cooldown_active or expired_inside_ban:
+                    trade.preserve_gtc_after_cooldown = True
+                    trade.pending_cancel_reason = None
+                    trade.real_state = "REAL_PARTIAL_GTC_PRESERVED_AFTER_COOLDOWN"
+                    trade.real_error = (
+                        "Sisa quantity LIMIT GTC dipertahankan setelah partial fill karena candle expiry "
+                        "terjadi selama Binance REST cooldown."
+                    )
+                    await self._record_event(
+                        "PARTIAL_ENTRY_REMAINDER_GTC_PRESERVED_AFTER_API_COOLDOWN", trade,
+                        order_status=trade.entry_order_status,
+                        executed_qty=decimal_to_str(trade.entry_executed_qty),
+                    )
+                    await self._save_active_state()
+                else:
+                    await self._cancel_real_entry_remainder(trade, "ORDER_EXPIRED_ONE_CANDLE")
 
     async def _reconcile_pending_real(self, trade: Trade) -> None:
         if not trade.real_enabled or trade.status != "PENDING":
+            return
+        if self._binance_cooldown_remaining() > 0:
+            return  # open Binance LIMIT remains untouched; private WS still reports fills.
+        if trade.real_state == "REAL_PREPARED":
+            # Startup was allowed to finish during a ban; now resume the one
+            # already-persisted submission with its original clientOrderId.
+            if now_utc() >= trade.expires_at:
+                await self._finalize_trade(trade, "EXPIRED", None, "PREPARED_ORDER_WINDOW_EXPIRED_DURING_COOLDOWN")
+                return
+            await self._submit_real_limit(trade)
+            if trade.status == "PENDING" and trade.real_state == "REAL_FILLED":
+                await self._mark_filled(trade, trade.fill_price or trade.entry, "DEFERRED_PREPARED_SUBMISSION")
             return
         if time.monotonic() - trade.last_real_check_monotonic < REAL_PENDING_POLL_SECONDS:
             return
@@ -3656,16 +4615,26 @@ class TradingEngine:
                 trade.pair, order_id=trade.entry_order_id,
                 client_order_id=trade.entry_client_order_id,
             )
+        except BinanceRateLimitError:
+            # A shared IP cooldown is not an order failure. Leave the Binance
+            # LIMIT untouched and let the user-data stream keep reporting fills.
+            raise
         except BinanceAPIError as exc:
             # Crash recovery for the narrow window after REAL_SUBMITTING was
             # persisted but before the POST reached Binance. -2013 means the
             # stable clientOrderId is not present. Reuse that same ID (never mint
             # a second one); if a first POST actually exists, Binance duplicate
             # detection plus the subsequent lookup prevents a second exposure.
-            if exc.code == -2013 and trade.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN"}:
+            if exc.code == -2013 and (
+                trade.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN"}
+                or trade.preserve_gtc_after_cooldown
+            ):
                 if now_utc() >= trade.expires_at:
                     await self._finalize_trade(
-                        trade, "EXPIRED", None, "REAL_SUBMISSION_NOT_FOUND_AFTER_CANDLE_EXPIRY"
+                        trade, "EXPIRED", None,
+                        "PRESERVED_GTC_NOT_FOUND_ON_BINANCE_AFTER_COOLDOWN"
+                        if trade.preserve_gtc_after_cooldown
+                        else "REAL_SUBMISSION_NOT_FOUND_AFTER_CANDLE_EXPIRY",
                     )
                 else:
                     await self._submit_real_limit(trade)
@@ -3674,29 +4643,41 @@ class TradingEngine:
                             trade, trade.fill_price or trade.entry, "REAL_SUBMISSION_RECOVERED"
                         )
                 return
-            if now_utc() >= trade.expires_at or trade.real_state == "REAL_CANCEL_UNKNOWN":
+            if (now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown) or trade.real_state == "REAL_CANCEL_UNKNOWN":
                 reason = "ORDER_EXPIRED_ONE_CANDLE" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
                 await self._cancel_pending_trade(trade, reason)
                 return
             raise
         except Exception:
-            if now_utc() >= trade.expires_at or trade.real_state == "REAL_CANCEL_UNKNOWN":
+            if (now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown) or trade.real_state == "REAL_CANCEL_UNKNOWN":
                 reason = "ORDER_EXPIRED_ONE_CANDLE" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
                 await self._cancel_pending_trade(trade, reason)
                 return
             raise
         status = str(order.get("status") or "UNKNOWN").upper()
+        trade.entry_order_status = status
+        executed = Decimal(str(order.get("executedQty") or "0"))
+        trade.entry_executed_qty = executed
         if status == "FILLED":
-            executed = Decimal(str(order.get("executedQty") or "0"))
+            trade.entry_order_terminal = True
             if executed > 0:
                 trade.quantity = executed
             await self._mark_filled(trade, self._order_fill_price(order, trade.entry), "BINANCE_POLL")
+            trade.real_state = "REAL_FILLED"
+            await self._save_active_state()
         elif status == "PARTIALLY_FILLED":
-            # A partial fill is a real exposure. Cancel the remaining quantity
-            # and adopt only after Binance confirms the order is terminal.
-            await self._cancel_pending_trade(trade, "PARTIAL_FILL_REMAINDER_CANCEL")
+            # The filled amount is live exposure. Normally cancel the remaining
+            # LIMIT at one-candle expiry/reversal; if that expiry occurred during
+            # a REST IP ban, preserve the GTC remainder until fill/reversal/manual cancel.
+            trade.entry_order_terminal = False
+            if executed > 0:
+                trade.quantity = executed
+                await self._mark_filled(trade, self._order_fill_price(order, trade.entry), "BINANCE_POLL_PARTIAL")
+            trade.real_state = "REAL_PARTIALLY_FILLED"
+            await self._save_active_state()
         elif status in {"NEW", "UNKNOWN"} and (
-            now_utc() >= trade.expires_at or trade.real_state == "REAL_CANCEL_UNKNOWN"
+            (now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown)
+            or trade.real_state == "REAL_CANCEL_UNKNOWN"
         ):
             # Retry a failed manual/expiry cancellation until Binance confirms
             # a terminal order state. An ambiguous order keeps its capacity slot.
@@ -3712,17 +4693,124 @@ class TradingEngine:
                     trade, "EXPIRED" if status == "EXPIRED" else "CANCELED",
                     None, f"BINANCE_{status}",
                 )
-        elif now_utc() >= trade.expires_at:
+        elif now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown:
             await self._cancel_pending_trade(trade, "ORDER_EXPIRED_ONE_CANDLE")
+
+    async def _sync_real_entry_remainder(self, trade: Trade) -> None:
+        """Refresh cumulative fill/status for a still-open entry LIMIT.
+
+        This is important when User Data WS disconnected during an IP ban: after
+        REST recovers, reconciliation can discover additional fills or that the
+        remaining GTC order became terminal without inventing/canceling exposure.
+        """
+        if trade.entry_order_terminal or not (trade.entry_order_id or trade.entry_client_order_id):
+            return
+        try:
+            order = await self.real.get_order(
+                trade.pair, order_id=trade.entry_order_id,
+                client_order_id=trade.entry_client_order_id,
+            )
+        except BinanceAPIError as exc:
+            if exc.code == -2013 and trade.preserve_gtc_after_cooldown:
+                trade.entry_order_terminal = True
+                trade.preserve_gtc_after_cooldown = False
+                trade.real_error = "GTC yang dipertahankan tidak ditemukan lagi di Binance; lanjut verifikasi posisi."
+                await self._record_event("PRESERVED_GTC_ORDER_NOT_FOUND", trade, error=str(exc)[:300])
+                await self._save_active_state()
+                return
+            raise
+
+        status = str(order.get("status") or "UNKNOWN").upper()
+        executed = Decimal(str(order.get("executedQty") or "0"))
+        previous_executed = trade.entry_executed_qty or Decimal("0")
+        trade.entry_order_status = status
+        trade.entry_executed_qty = executed
+        if order.get("orderId") is not None:
+            trade.entry_order_id = int(order["orderId"])
+        terminal = status in {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}
+        trade.entry_order_terminal = terminal
+
+        if executed > 0:
+            avg = self._order_fill_price(order, trade.fill_price or trade.entry)
+            trade.quantity = executed
+            trade.fill_price = avg
+            trade.actual_notional = executed * avg
+            trade.margin_usdt = trade.actual_notional / Decimal(max(1, trade.leverage))
+            if trade.reference_sl is not None:
+                risk = volumatic.reference_risk(
+                    trade.direction, float(avg), float(trade.reference_sl)
+                )
+                trade.initial_risk = Decimal(str(risk)) if risk is not None else None
+            if executed != previous_executed or status != "PARTIALLY_FILLED":
+                await self._record_event(
+                    "ENTRY_REMAINDER_RECONCILED", trade,
+                    order_status=status,
+                    previous_executed_qty=decimal_to_str(previous_executed),
+                    executed_qty=decimal_to_str(executed),
+                    average_price=decimal_to_str(avg),
+                )
+        elif terminal and trade.status == "PENDING":
+            await self._finalize_trade(
+                trade, "EXPIRED" if status in {"EXPIRED", "EXPIRED_IN_MATCH"} else "CANCELED",
+                None, f"BINANCE_ENTRY_{status}_WITHOUT_FILL",
+            )
+            return
+
+        if terminal:
+            trade.pending_cancel_reason = None
+            if status == "FILLED":
+                trade.real_state = "REAL_FILLED"
+            else:
+                trade.real_state = "REAL_PARTIAL_TERMINAL" if executed > 0 else f"REAL_{status}"
+        else:
+            trade.real_state = "REAL_PARTIALLY_FILLED" if executed > 0 else "REAL_PENDING"
+        await self._save_active_state()
 
     async def _reconcile_filled_real(self, trade: Trade) -> None:
         if not trade.real_enabled or trade.status != "FILLED":
             return
+        if self._binance_cooldown_remaining() > 0:
+            return
+        if (not trade.entry_order_terminal and trade.expires_at <= now_utc()
+                and not trade.preserve_gtc_after_cooldown):
+            await self._cancel_real_entry_remainder(trade, trade.pending_cancel_reason or "ORDER_EXPIRED_ONE_CANDLE")
+            if trade.status != "FILLED":
+                return
         if time.monotonic() - trade.last_real_check_monotonic < REAL_RECONCILE_INTERVAL_SECONDS:
             return
         trade.last_real_check_monotonic = time.monotonic()
+
+        # A late/partial GTC that was deliberately preserved during an API ban
+        # remains live until fill, reversal, or manual cancel. Poll its exchange
+        # status after REST recovers, but never auto-cancel it merely because the
+        # original one-candle deadline has passed.
+        if trade.preserve_gtc_after_cooldown and not trade.entry_order_terminal:
+            if time.monotonic() - trade.last_real_order_status_check >= REAL_PENDING_POLL_SECONDS:
+                trade.last_real_order_status_check = time.monotonic()
+                await self._sync_real_entry_remainder(trade)
+                if trade.status != "FILLED":
+                    return
+                if not trade.entry_order_terminal and trade.entry_order_status in {"NEW", "PARTIALLY_FILLED", "UNKNOWN"}:
+                    # It is intentionally still a live GTC. A missing position
+                    # snapshot must not cause a cancel that violates preservation.
+                    position = await self.real.get_position(trade.pair, trade.entry_side)
+                    if position is None:
+                        return
+
         position = await self.real.get_position(trade.pair, trade.entry_side)
         if position is None:
+            # Give the exchange a brief settlement window after a WS fill before
+            # treating a temporarily invisible position as externally closed.
+            if trade.filled_at and (now_utc() - trade.filled_at).total_seconds() < REAL_POSITION_SETTLE_SECONDS:
+                return
+            if not trade.entry_order_terminal:
+                if trade.preserve_gtc_after_cooldown:
+                    # A preserved live GTC is still allowed to fill; do not
+                    # remove it only because the position endpoint is momentarily flat.
+                    return
+                await self._cancel_real_entry_remainder(
+                    trade, "EXTERNAL_POSITION_MISSING_CANCEL_ENTRY_REMAINDER"
+                )
             remaining = await self.real.get_positions(trade.pair)
             if not remaining:
                 price = self._current_price(trade.pair) or trade.fill_price or trade.entry
@@ -3730,6 +4818,9 @@ class TradingEngine:
                 await self._finalize_trade(trade, "CLOSED", price, "EXTERNAL_CLOSE_RECONCILED")
 
     async def _reconcile_restored_trades(self) -> None:
+        if self._binance_cooldown_remaining() > 0:
+            log.info("[RECOVERY] REST reconciliation ditunda selama Binance cooldown; local state dan User WS tetap aktif.")
+            return
         for trade in list(self.active_trades.values()):
             if trade.real_enabled:
                 try:
@@ -3745,11 +4836,16 @@ class TradingEngine:
                                 client_order_id=trade.entry_client_order_id,
                             )
                         except BinanceAPIError as exc:
-                            if exc.code == -2013 and trade.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN"}:
+                            if exc.code == -2013 and (
+                                trade.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN"}
+                                or trade.preserve_gtc_after_cooldown
+                            ):
                                 if now_utc() >= trade.expires_at:
                                     await self._finalize_trade(
                                         trade, "EXPIRED", None,
-                                        "STARTUP_REAL_SUBMISSION_NOT_FOUND_AFTER_EXPIRY",
+                                        "STARTUP_PRESERVED_GTC_NOT_FOUND_AFTER_COOLDOWN"
+                                        if trade.preserve_gtc_after_cooldown
+                                        else "STARTUP_REAL_SUBMISSION_NOT_FOUND_AFTER_EXPIRY",
                                     )
                                 else:
                                     await self._submit_real_limit(trade)
@@ -3772,27 +4868,108 @@ class TradingEngine:
                             if not remaining:
                                 trade.real_error = "Posisi ledger tidak ditemukan di Binance; cek manual sebelum trading pair ini."
                                 log.error("[RECOVERY] %s: %s", trade.pair, trade.real_error)
+                except BinanceRateLimitError as exc:
+                    trade.real_error = str(exc)[:500]
+                    log.warning("[RECOVERY] Binance cooldown saat reconcile %s; hentikan batch recovery: %s", trade.pair, exc)
+                    break
                 except Exception as exc:
                     trade.real_error = str(exc)[:500]
                     log.exception("[RECOVERY] reconcile %s gagal.", trade.pair)
         await self._save_active_state()
 
     async def _maintenance_loop(self) -> None:
+        """Serialized recovery loop: never poll REST during an IP cooldown."""
         while self._running:
             try:
+                cooldown = self._binance_cooldown_remaining()
+                if cooldown > 0:
+                    self._was_in_binance_cooldown = True
+                    await self._sync_cooldown_marker_to_github()
+                    # Local PAPER expiration still happens. REAL orders are left
+                    # untouched on Binance; WS events continue updating the ledger.
+                    await self._expire_due_pending()
+                    await asyncio.sleep(min(10.0, max(2.0, cooldown)))
+                    continue
+
+                if self._was_in_binance_cooldown:
+                    self._was_in_binance_cooldown = False
+                    await self._sync_cooldown_marker_to_github()
+                    self._last_universe_refresh = 0.0
+                    if self.scan_enabled:
+                        self._scan_trigger_now = True
+                    now_mono = time.monotonic()
+                    if now_mono - self._last_api_recovery_notice >= BINANCE_RECOVERY_NOTICE_INTERVAL_SECONDS:
+                        self._last_api_recovery_notice = now_mono
+                        await self.reply(
+                            "🟢 Binance REST cooldown selesai. Bot melanjutkan rekonsiliasi order/posisi, "
+                            "antrean command, dan scanner dari candle closed terbaru."
+                        )
+                    log.info("[BINANCE] REST cooldown selesai; recovery queue dimulai.")
+
+                # Reconnect private stream after cooldown if it was unable to
+                # obtain a listenKey at startup. If an existing listenKey is
+                # valid, this starts/reuses the socket without another REST call.
+                needs_private_stream = self.real_mode or any(
+                    t.real_enabled and t.status in {"PENDING", "FILLED"}
+                    for t in self.active_trades.values()
+                )
+                if needs_private_stream and self.user_ws.status == "OFFLINE":
+                    if time.monotonic() - self._last_user_stream_start_attempt >= 15.0:
+                        self._last_user_stream_start_attempt = time.monotonic()
+                        try:
+                            await self.user_ws.start()
+                        except BinanceRateLimitError:
+                            await asyncio.sleep(2.0)
+                            continue
+                        except Exception:
+                            log.exception("[USER WS] start/reconnect ditunda")
+
+                # Commands are FIFO and only one is executed per pass. /real off
+                # remains immediate and can cancel a queued /real on.
+                await self._process_deferred_commands()
+
+                # Refresh universe only when scanner needs it. ExchangeInfo is
+                # cached for 15 minutes; no forced repeat on every recovery pass.
+                if self.scan_enabled and (not self.symbols or time.monotonic() - self._last_universe_refresh > 900):
+                    if time.monotonic() - self._last_exchange_info_retry >= 30.0:
+                        self._last_exchange_info_retry = time.monotonic()
+                        try:
+                            await self._universe()
+                        except BinanceRateLimitError:
+                            await asyncio.sleep(2.0)
+                            continue
+                        except Exception as exc:
+                            log.warning("[UNIVERSE] refresh belum berhasil; retry bertahap: %s", exc)
+
                 await self._expire_due_pending()
                 for trade in list(self.active_trades.values()):
+                    if self._binance_cooldown_remaining() > 0:
+                        break
                     if trade.real_enabled and trade.status == "PENDING":
-                        try: await self._reconcile_pending_real(trade)
-                        except Exception as exc: log.warning("[REAL] pending sync %s gagal: %s", trade.pair, exc)
+                        try:
+                            await self._reconcile_pending_real(trade)
+                        except BinanceRateLimitError:
+                            break
+                        except Exception as exc:
+                            log.warning("[REAL] pending sync %s gagal: %s", trade.pair, exc)
                     elif trade.real_enabled and trade.status == "FILLED":
-                        try: await self._reconcile_filled_real(trade)
-                        except Exception as exc: log.warning("[REAL] position sync %s gagal: %s", trade.pair, exc)
-                await self._retry_signals()
-                await self._monitor_active_positions()
+                        try:
+                            await self._reconcile_filled_real(trade)
+                        except BinanceRateLimitError:
+                            break
+                        except Exception as exc:
+                            log.warning("[REAL] position sync %s gagal: %s", trade.pair, exc)
+
+                if self._binance_cooldown_remaining() <= 0:
+                    await self._retry_signals()
+                    await self._monitor_active_positions()
                 await asyncio.sleep(MAINTENANCE_POLL_SECONDS)
             except asyncio.CancelledError:
                 break
+            except BinanceRateLimitError as exc:
+                self._was_in_binance_cooldown = True
+                log.warning("[MAINTENANCE] paused by Binance cooldown: %s", exc)
+                await asyncio.sleep(3.0)
             except Exception:
                 log.exception("[MAINTENANCE] loop error")
                 await asyncio.sleep(3)
@@ -3918,6 +5095,88 @@ class TradingEngine:
             if touched:
                 await self._mark_filled(trade, trade.entry, "PAPER_WEBSOCKET_LIMIT_TOUCH")
 
+    async def _on_user_data_event(self, event: dict[str, Any]) -> None:
+        """Apply authoritative Binance ORDER_TRADE_UPDATE without REST calls."""
+        event_name = str(event.get("e") or "")
+        if event_name != "ORDER_TRADE_UPDATE":
+            if event_name == "MARGIN_CALL":
+                await self.reply("🚨 BINANCE MARGIN_CALL diterima. Periksa posisi dan risiko akun LIVE segera.")
+            return
+        order = event.get("o") if isinstance(event.get("o"), dict) else {}
+        symbol = normalize_symbol(str(order.get("s") or ""))
+        client_id = str(order.get("c") or "")
+        if not symbol or not client_id:
+            return
+        trade = next((t for t in self.active_trades.values() if t.real_enabled and t.pair == symbol and t.entry_client_order_id == client_id), None)
+        if trade is None:
+            return  # ignore orders outside this engine's ledger
+
+        status = str(order.get("X") or "UNKNOWN").upper()
+        execution = str(order.get("x") or "UNKNOWN").upper()
+        order_id = order.get("i")
+        try:
+            order_id = int(order_id) if order_id not in (None, "") else None
+        except (TypeError, ValueError):
+            order_id = None
+        try:
+            cumulative = Decimal(str(order.get("z") or "0"))
+        except (InvalidOperation, ValueError):
+            cumulative = Decimal("0")
+        average = Decimal(str(order.get("ap") or "0"))
+        last_price = Decimal(str(order.get("L") or "0"))
+        fill_price = average if average > 0 else (last_price if last_price > 0 else trade.fill_price or trade.entry)
+        event_key = f"{order_id}:{execution}:{status}:{cumulative}:{order.get('t', '')}"
+        if trade.last_ws_event_key == event_key:
+            return
+        trade.last_ws_event_key = event_key
+        trade.entry_order_status = status
+        if order_id is not None:
+            trade.entry_order_id = order_id
+
+        terminal = status in {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}
+        trade.entry_order_terminal = terminal
+        if cumulative > 0:
+            if trade.expires_at <= now_utc() and self._binance_cooldown_remaining() > 0 and not trade.late_fill_during_api_cooldown:
+                trade.late_fill_during_api_cooldown = True
+                await self._record_event(
+                    "LATE_FILL_DURING_API_COOLDOWN", trade,
+                    order_status=status, executed_qty=decimal_to_str(cumulative),
+                    note="GTC order dibiarkan berjalan ketika REST banned; fill diterima melalui User Data WS setelah expiry one-candle.",
+                )
+            trade.entry_executed_qty = cumulative
+            trade.quantity = cumulative
+            trade.fill_price = fill_price
+            trade.actual_notional = cumulative * fill_price
+            trade.margin_usdt = trade.actual_notional / Decimal(max(1, trade.leverage))
+            if trade.status == "PENDING":
+                await self._mark_filled(trade, fill_price, f"BINANCE_USER_WS_{status}")
+            else:
+                risk = volumatic.reference_risk(trade.direction, float(fill_price), float(trade.reference_sl)) if trade.reference_sl is not None else None
+                trade.initial_risk = Decimal(str(risk)) if risk is not None else None
+                await self._record_event(
+                    "ORDER_CUMULATIVE_FILL_UPDATE", trade,
+                    order_status=status, execution_type=execution,
+                    executed_qty=decimal_to_str(cumulative), average_price=decimal_to_str(fill_price),
+                )
+            trade.real_state = (
+                "REAL_FILLED" if status == "FILLED" else
+                "REAL_PARTIAL_TERMINAL" if terminal else "REAL_PARTIALLY_FILLED"
+            )
+            if terminal:
+                trade.pending_cancel_reason = None
+            elif trade.expires_at <= now_utc() and not trade.preserve_gtc_after_cooldown:
+                trade.pending_cancel_reason = trade.pending_cancel_reason or "ORDER_EXPIRED_ONE_CANDLE"
+            await self._save_active_state()
+            log.info("[USER WS] %s %s order=%s status=%s cumQty=%s avg=%s", symbol, trade.direction, order_id, status, cumulative, fill_price)
+            return
+
+        if terminal and trade.status == "PENDING":
+            trade.pending_cancel_reason = None
+            result = "EXPIRED" if status in {"EXPIRED", "EXPIRED_IN_MATCH"} else "CANCELED"
+            await self._finalize_trade(trade, result, None, f"BINANCE_USER_WS_{status}")
+        else:
+            await self._save_active_state()
+
     async def _sync_ws_symbols(self) -> None:
         desired = {t.pair for t in self.active_trades.values() if t.status in {"PENDING", "FILLED"}}
         current = set(self.ws.symbols())
@@ -3939,8 +5198,15 @@ class TradingEngine:
             await self.real.get_account_info()
             await self.real.get_account_config()
             await self.real.get_futures_balance()
+            # Connect the private ORDER_TRADE_UPDATE stream before allowing new
+            # real orders, so fills do not depend solely on REST polling.
+            await self.user_ws.start()
             self.real_mode = True
-            await self.reply("🟢 REAL ON. Order BARU akan dikirim ke Binance USD-M Futures LIVE. Posisi REAL yang sudah ada tetap dikelola walaupun /real off.")
+            await self.reply(
+                "🟢 REAL ON. Order baru akan dikirim ke Binance USD-M Futures LIVE.\n"
+                f"Private User Data WS: {self.user_ws.status}. Fill order dipantau lewat WebSocket; REST hanya untuk reconciliation/aksi yang memang memerlukannya.\n"
+                "Posisi REAL yang sudah ada tetap dikelola walaupun /real off."
+            )
         elif arg == "off":
             self.real_mode = False
             await self.reply("🟡 REAL OFF untuk entry baru. Pending/posisi REAL yang sudah ada tetap direkonsiliasi dan dikelola sampai selesai.")
@@ -4163,6 +5429,8 @@ class TradingEngine:
             f"Requests: {sum(calls.values())}\nEstimated weight: {weight}/{BINANCE_IP_WEIGHT_LIMIT}\n"
             f"Header weight: {API_STATS.used_weight if API_STATS.used_weight is not None else '-'}\n"
             f"Lifetime requests: {API_STATS.total}\nRate-limit hits: {API_STATS.limit_hits}\n"
+            f"Cooldown remaining: {BINANCE_COOLDOWN.remaining():.0f}s\n"
+            f"Cooldown reason: {BINANCE_COOLDOWN.reason() or '-'}\n"
         )
 
     async def show_trades(self) -> None:
@@ -4179,7 +5447,15 @@ class TradingEngine:
                     f"Signal: {t.signal} | Candle close: {fmt_price(t.signal_close_price or t.entry)} | Limit: {fmt_price(t.entry)}\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
-                    f"Expires: {format_wib(t.expires_at)} | Mode: {'REAL' if t.real_enabled else 'PAPER'}"
+                    + (
+                        "Validity: GTC dipertahankan sampai fill/reversal/manual cancel\n"
+                        if t.real_enabled and t.preserve_gtc_after_cooldown
+                        else f"Expires: {format_wib(t.expires_at)}\n"
+                    )
+                    + f"Mode: {'REAL' if t.real_enabled else 'PAPER'}"
+                    + (f"\nBinance: {t.entry_order_status} • {t.real_state}" if t.real_enabled else "")
+                    + (f"\nCancel/expiry ditunda: {t.pending_cancel_reason}" if t.pending_cancel_reason else "")
+                    + ("\n⚠️ Late fill saat Binance REST cooldown; segera direkonsiliasi." if t.late_fill_during_api_cooldown else "")
                 )
             else:
                 entry = t.fill_price or t.entry
@@ -4195,7 +5471,8 @@ class TradingEngine:
                     f"Floating: {fmt_num(pnl_pct, 2)}% | {fmt_num(pnl_usdt, 4)} USDT\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin est.: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
-                    f"Holding: {duration_text((now_utc() - (t.filled_at or t.created_at)).total_seconds())} | Mode: {'REAL' if t.real_enabled else 'PAPER'}"
+                    + ("Remaining entry LIMIT: GTC dipertahankan sampai fill/reversal/manual cancel\n" if t.real_enabled and t.preserve_gtc_after_cooldown and not t.entry_order_terminal else "")
+                    + f"Holding: {duration_text((now_utc() - (t.filled_at or t.created_at)).total_seconds())} | Mode: {'REAL' if t.real_enabled else 'PAPER'}"
                 )
         await self.reply("\n\n".join(lines) + "\n\nSL: NONE • TP: NONE • Exit: opposite bubble")
 
@@ -4273,8 +5550,9 @@ class TradingEngine:
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
             f"Timeframe: {self.timeframe}\nScanner: {'ON' if self.scan_enabled else 'OFF'}\n"
-            f"Universe: {len(self.symbols)} | WS: {self.ws.status} | Fresh prices: {fresh}\n"
+            f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending: {pending} | Filled: {filled} | Max: {self.max_active_trades}\n"
+            f"Binance REST cooldown: {self._binance_cooldown_remaining():.0f}s | Deferred commands: {len(self.deferred_commands)}\n"
             f"REAL entry: {'ON' if self.real_mode else 'OFF'} | Margin mode: {'MINIMUM AUTO' if self.min_margin_enabled else 'FIXED'} | Fixed margin: {self.margin_usdt} USDT | Leverage: {self.leverage}x\n"
             f"History: {len(self.history_records)} | Events: {len(self.history_events)} | Session: {self.session_id}"
         )
@@ -4305,6 +5583,45 @@ class TradingEngine:
             "Aturan: BLUE=LONG, RED=SHORT; LIMIT di CLOSE candle sinyal untuk satu candle berikutnya; bubble berlawanan menutup posisi via MARKET lalu membuat LIMIT arah baru; tanpa SL/TP/trailing."
         )
 
+    async def _dispatch_command(self, text: str) -> None:
+        """Execute a command. Shared by Telegram updates and deferred recovery."""
+        text = str(text or "").strip()
+        if not text:
+            return
+        command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+        if command in {"/try", "/end", "/ganti", "/healthz"}:
+            return
+        if command == "/timeframe": await self._handle_timeframe(text)
+        elif command == "/scan": await self._handle_scan(text)
+        elif command == "/max": await self._handle_max(text)
+        elif command == "/margin": await self._handle_margin(text)
+        elif command == "/min": await self._handle_min(text)
+        elif command == "/leverage": await self._handle_leverage(text)
+        elif command == "/real":
+            arg = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
+            if arg == "off":
+                await self._cancel_queued_real_on()
+            await self._set_real(text)
+        elif command == "/trade": await self.show_trades()
+        elif command == "/stats": await self.show_stats()
+        elif command == "/status": await self.show_status()
+        elif command in {"/help", "/start"}: await self.show_help()
+        elif command == "/setup": await self.save_setups()
+        elif command == "/open": await self.open_setups()
+        elif command == "/del": await self._handle_del(text)
+        elif command == "/close": await self._handle_close(text)
+        elif command == "/remove": await self._handle_remove(text)
+        elif command == "/resetstats": await self._handle_resetstats()
+        elif command == "/reset": await self._handle_reset(text)
+        elif command == "/balance": await self._show_balance()
+        elif command == "/api": await self.reply(await self._api_report())
+        elif command == "/catatan":
+            arg = text[len(text.split(maxsplit=1)[0]):].strip() if len(text.split(maxsplit=1)) > 1 else ""
+            if arg: await self.add_note(arg)
+            else: await self.show_notes()
+        else:
+            await self.reply("Command tidak dikenal. Gunakan /help.")
+
     async def handle_update(self, update: dict[str, Any], context: dict[str, Any]) -> None:
         message = update.get("message") or update.get("edited_message") or {}
         user_id = int((message.get("from") or {}).get("id") or 0)
@@ -4315,34 +5632,21 @@ class TradingEngine:
             return
         command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
         try:
-            if command in {"/try", "/end", "/ganti", "/healthz"}:
+            await self._dispatch_command(text)
+        except BinanceRateLimitError as exc:
+            if self._deferred_command_allowed(text):
+                await self._enqueue_deferred_command(text, str(exc))
+                await self.reply(
+                    f"⏳ {command} diterima dan masuk antrean. Binance REST sedang cooldown "
+                    f"({self._binance_cooldown_remaining():.0f}s). Perintah akan dijalankan otomatis setelah API pulih.\n"
+                    "Order LIMIT REAL yang sudah berada di Binance tidak dibatalkan hanya karena cooldown; fill tetap dipantau melalui User Data WebSocket bila stream tersambung."
+                )
                 return
-            if command == "/timeframe": await self._handle_timeframe(text)
-            elif command == "/scan": await self._handle_scan(text)
-            elif command == "/max": await self._handle_max(text)
-            elif command == "/margin": await self._handle_margin(text)
-            elif command == "/min": await self._handle_min(text)
-            elif command == "/leverage": await self._handle_leverage(text)
-            elif command == "/real": await self._set_real(text)
-            elif command == "/trade": await self.show_trades()
-            elif command == "/stats": await self.show_stats()
-            elif command == "/status": await self.show_status()
-            elif command in {"/help", "/start"}: await self.show_help()
-            elif command == "/setup": await self.save_setups()
-            elif command == "/open": await self.open_setups()
-            elif command == "/del": await self._handle_del(text)
-            elif command == "/close": await self._handle_close(text)
-            elif command == "/remove": await self._handle_remove(text)
-            elif command == "/resetstats": await self._handle_resetstats()
-            elif command == "/reset": await self._handle_reset(text)
-            elif command == "/balance": await self._show_balance()
-            elif command == "/api": await self.reply(await self._api_report())
-            elif command == "/catatan":
-                arg = text[len(text.split(maxsplit=1)[0]):].strip() if len(text.split(maxsplit=1)) > 1 else ""
-                if arg: await self.add_note(arg)
-                else: await self.show_notes()
-            else:
-                await self.reply("Command tidak dikenal. Gunakan /help.")
+            log.warning("Command %s membutuhkan Binance REST tetapi ditahan cooldown: %s", command, exc)
+            await self.reply(
+                f"⏳ {command} belum dijalankan karena Binance REST cooldown "
+                f"({self._binance_cooldown_remaining():.0f}s). Perintah ini bersifat lokal/read-only dan dapat diulang setelah API pulih."
+            )
         except Exception as exc:
             log.exception("Command %s gagal: %s", command, exc)
             await self.reply(f"❌ {command} gagal: {str(exc)[:1500]}")

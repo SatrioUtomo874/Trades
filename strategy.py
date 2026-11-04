@@ -21,11 +21,13 @@ from typing import Any, Mapping
 import numpy as np
 
 STRATEGY_NAME = "VOLUMATIC_TREND"
-STRATEGY_VERSION = "1.1.1"
+STRATEGY_VERSION = "1.2.0"
 TREND_LENGTH = 40
 ATR_LENGTH = 200
 REFERENCE_BUFFER_ATR = 0.30
 TIMEFRAME_MS = {"H4": 14_400_000, "D1": 86_400_000}
+TIMEFRAME_INTERVALS = {"H4": "4h", "D1": "1d"}
+SUPPORTED_TIMEFRAMES = tuple(TIMEFRAME_MS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,7 +454,7 @@ def trade_result_r(direction: str, entry_price: float, exit_price: float, initia
 
 __all__ = [
     "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "ATR_LENGTH",
-    "REFERENCE_BUFFER_ATR", "TIMEFRAME_MS", "VolumaticSignal",
+    "REFERENCE_BUFFER_ATR", "TIMEFRAME_MS", "TIMEFRAME_INTERVALS", "SUPPORTED_TIMEFRAMES", "VolumaticSignal",
     "calculate_indicators", "detect_latest_signal", "detect_signals_since", "signals_since", "analyze",
     "reference_risk", "trade_result_r",
 ]
