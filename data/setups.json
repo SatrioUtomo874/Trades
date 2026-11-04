@@ -1,7 +1,6 @@
 {
-  "version": 1,
-  "saved_at": "2026-11-04T04:29:49.682251+00:00",
-  "saved_at_wib": "04-11-2026, 11:29 WIB",
-  "count": 0,
-  "setups": []
+  "strategy": "VOLUMATIC_TREND",
+  "version": "1.2.0",
+  "updated_at": "2026-11-04T15:25:25.738525+00:00",
+  "active_trades": []
 }
