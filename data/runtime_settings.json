@@ -1,11 +1,12 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "timeframe": "H4",
+  "trend_length": 100,
   "ema_filter_length": 100,
-  "max_active_trades": 6,
+  "max_active_trades": 100,
   "margin_usdt": "0.5",
   "leverage": 10,
-  "min_margin_enabled": true,
+  "min_margin_enabled": false,
   "autostop_percent": "70",
   "autostop_peak_equity": "100",
   "autostop_last_equity": "100",
@@ -17,5 +18,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "H4",
-  "updated_at": "2026-11-05T03:26:15.546661+00:00"
+  "updated_at": "2026-11-05T05:10:35.802562+00:00"
 }
