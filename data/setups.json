@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
-  "version": "1.3.0",
-  "updated_at": "2026-11-04T23:26:17.182704+00:00",
+  "version": "1.3.2",
+  "updated_at": "2026-11-05T01:32:19.784277+00:00",
   "active_trades": [
     {
       "trade_id": "1000000MOGUSDT-20261105-000501-6FCD73",
@@ -44,6 +44,7 @@
       "entry_order_id": null,
       "entry_client_order_id": null,
       "real_error": null,
+      "real_submit_ambiguous": false,
       "entry_executed_qty": null,
       "entry_order_status": "UNKNOWN",
       "entry_order_terminal": false,
@@ -52,7 +53,7 @@
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "strategy_name": "VOLUMATIC_TREND",
-      "strategy_version": "1.3.0",
+      "strategy_version": "1.3.2",
       "entry_reason": "Volumatic Trend confirmed signal candle CLOSE; one-candle LIMIT",
       "price_exp_reason": "Normal expiry at next candle close; exception: an already-submitted REAL GTC order that crosses expiry during Binance REST cooldown is preserved until fill/reversal/manual cancel."
     },
@@ -96,7 +97,8 @@
       "position_side": "BOTH",
       "entry_order_id": 2263658623,
       "entry_client_order_id": "VT54356c18a4eb4e708089ff7601f0",
-      "real_error": null,
+      "real_error": "Posisi ledger tidak ditemukan di Binance; cek manual sebelum trading pair ini.",
+      "real_submit_ambiguous": false,
       "entry_executed_qty": "2864",
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
@@ -105,7 +107,7 @@
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "strategy_name": "VOLUMATIC_TREND",
-      "strategy_version": "1.3.0",
+      "strategy_version": "1.3.2",
       "entry_reason": "Volumatic Trend confirmed signal candle CLOSE; one-candle LIMIT",
       "price_exp_reason": "Normal expiry at next candle close; exception: an already-submitted REAL GTC order that crosses expiry during Binance REST cooldown is preserved until fill/reversal/manual cancel."
     }
