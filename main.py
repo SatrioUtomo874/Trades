@@ -60,12 +60,12 @@ except ImportError:
 
 import strategy as volumatic
 
-# Compatibility fallback for a stale deployment; try.py also force-reloads the
-# freshly synced strategy module before loading main.py.
-if not isinstance(getattr(volumatic, "TIMEFRAME_MS", None), dict):
-    volumatic.TIMEFRAME_MS = {"H4": 14_400_000, "D1": 86_400_000}
-if not isinstance(getattr(volumatic, "TIMEFRAME_INTERVALS", None), dict):
-    volumatic.TIMEFRAME_INTERVALS = {"H4": "4h", "D1": "1d"}
+# Fail fast on an incompatible/stale strategy module. try.py installs the exact
+# STRATEGY_FILE as sys.modules["strategy"] before executing this engine.
+if not isinstance(getattr(volumatic, "TIMEFRAME_MS", None), dict) or set(volumatic.TIMEFRAME_MS) != {"H4", "D1"}:
+    raise RuntimeError("strategy module mismatch: TIMEFRAME_MS H4/D1 tidak tersedia. Pastikan try.py dan STRATEGY_FILE satu versi.")
+if not isinstance(getattr(volumatic, "TIMEFRAME_INTERVALS", None), dict) or set(volumatic.TIMEFRAME_INTERVALS) != {"H4", "D1"}:
+    raise RuntimeError("strategy module mismatch: TIMEFRAME_INTERVALS H4/D1 tidak tersedia.")
 
 # ---------------------------------------------------------------------------
 # Environment and runtime configuration
@@ -80,7 +80,7 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0") or "0")
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
 REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
-MAIN_FILE = (os.getenv("MAIN_FILE") or "main_volumatic_ema_filter.py").strip()
+MAIN_FILE = (os.getenv("MAIN_FILE") or "main_volumatic_rate_guard_batch_telemetry_20261105.py").strip()
 BINANCE_API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
 BINANCE_API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
 
@@ -114,7 +114,9 @@ BINANCE_RECOVERY_NOTICE_INTERVAL_SECONDS = 60.0
 HTTP_REQUEST_SECONDS = 20
 GITHUB_REQUEST_SECONDS = 30
 BINANCE_RECV_WINDOW = 5000
-BINANCE_PUBLIC_REQUEST_SPACING_SECONDS = float(os.getenv("BINANCE_PUBLIC_REQUEST_SPACING_SECONDS", "0.18") or "0.18")
+# Conservative per-IP pacing. Dynamic throttling below increases this when the
+# exchange reports high X-MBX-USED-WEIGHT-1M. A Render egress IP can be shared.
+BINANCE_PUBLIC_REQUEST_SPACING_SECONDS = float(os.getenv("BINANCE_PUBLIC_REQUEST_SPACING_SECONDS", "0.75") or "0.75")
 BINANCE_RATE_LIMIT_FALLBACK_SECONDS = 60
 BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
 BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS = 60
@@ -142,7 +144,7 @@ REAL_FEE_BUFFER = Decimal("0.001")
 QTY_FILTER_CODES = (-1013, -1111, -4004, -4005, -4164)
 MAX_ACTIVE_TRADES = max(1, int(os.getenv("MAX_ACTIVE_TRADES", "100") or "100"))
 SCAN_MAX_PAIRS_PER_CYCLE = 50
-SCAN_PAIR_DELAY_SECONDS = float(os.getenv("SCAN_PAIR_DELAY_SECONDS", "0.02") or "0.02")
+SCAN_PAIR_DELAY_SECONDS = float(os.getenv("SCAN_PAIR_DELAY_SECONDS", "0.15") or "0.15")
 SCAN_POLL_SECONDS = 2.0
 MAINTENANCE_POLL_SECONDS = 2.0
 # 499 candles use the lighter Binance kline weight tier while remaining ample
@@ -544,6 +546,9 @@ class Trade:
     entry_order_id: int | None = None
     entry_client_order_id: str | None = None
     real_error: str | None = None
+    # True when a POST may have reached Binance but its result was not confirmed.
+    # Such an order is queried by clientOrderId and NEVER re-POSTed automatically.
+    real_submit_ambiguous: bool = False
     last_real_check_monotonic: float = 0.0
     last_real_order_status_check: float = 0.0
     # Entry order may be partially filled while the remaining LIMIT is still open.
@@ -590,6 +595,7 @@ class Trade:
             "real_state": self.real_state, "position_side": self.position_side,
             "entry_order_id": self.entry_order_id, "entry_client_order_id": self.entry_client_order_id,
             "real_error": self.real_error,
+            "real_submit_ambiguous": self.real_submit_ambiguous,
             "entry_executed_qty": decimal_to_str(self.entry_executed_qty),
             "entry_order_status": self.entry_order_status,
             "entry_order_terminal": self.entry_order_terminal,
@@ -647,6 +653,7 @@ class Trade:
             position_side=row.get("position_side"),
             entry_order_id=int(row["entry_order_id"]) if row.get("entry_order_id") not in (None, "") else None,
             entry_client_order_id=row.get("entry_client_order_id"), real_error=row.get("real_error"),
+            real_submit_ambiguous=bool(row.get("real_submit_ambiguous", False)),
             signal_close_price=dec("signal_close_price", dec("entry", Decimal("0"))),
             ema_filter_length=(int(row["ema_filter_length"]) if row.get("ema_filter_length") not in (None, "", 0, "0") else None),
             ema_filter_value=dec("ema_filter_value"),
@@ -673,7 +680,7 @@ ENDPOINT_WEIGHTS = {
     "/fapi/v3/balance": 5,
     "/fapi/v2/account": 5,
     "/fapi/v1/accountConfig": 5,
-    "/fapi/v1/klines": 5,  # konservatif untuk limit candle 500-1000
+    "/fapi/v1/klines": 2,  # limit 499 berada pada tier 100-499; header tetap sumber kebenaran
     "/fapi/v1/exchangeInfo": 1,
     "/fapi/v1/time": 1,
     "/fapi/v2/ticker/price": 1,
@@ -744,7 +751,7 @@ class BinanceCooldownGate:
             self._reason = str(payload.get("reason") or "Persisted Binance cooldown")[:500]
             if remaining > 0:
                 self._until = time.monotonic() + remaining
-                log.warning("[BINANCE] restored persisted cooldown %.0fs (%s)", remaining, self._reason)
+                log.info("[BINANCE] persisted cooldown restored | remaining=%.0fs | reason=%s", remaining, self._reason)
             elif self._until_epoch and now_epoch - self._until_epoch > 14 * 86400:
                 self._state_path.unlink(missing_ok=True)
                 self._started_epoch = self._until_epoch = 0.0
@@ -871,8 +878,15 @@ class BinanceCooldownGate:
             return max(0.0, self._until - time.monotonic())
 
     def wait_for_request_slot(self, spacing: float) -> float:
+        adaptive = max(0.0, float(spacing))
+        stats = globals().get("API_STATS")
+        if stats is not None:
+            try:
+                adaptive = max(adaptive, float(stats.adaptive_spacing()))
+            except Exception:
+                pass
         with self._lock:
-            return max(0.0, self._last_request + max(0.0, spacing) - time.monotonic())
+            return max(0.0, self._last_request + adaptive - time.monotonic())
 
     def record_request(self) -> None:
         with self._lock:
@@ -971,6 +985,27 @@ class ApiStats:
     @staticmethod
     def weight_of(counts: dict[str, int]) -> int:
         return sum(ENDPOINT_WEIGHTS.get(path, 1) * n for path, n in counts.items())
+
+    def adaptive_spacing(self) -> float:
+        """Back off before Binance reaches its shared IP request-weight ceiling."""
+        base = max(0.10, BINANCE_PUBLIC_REQUEST_SPACING_SECONDS)
+        if self.used_weight is None or self.used_weight_at is None:
+            return base
+        age = time.monotonic() - self.used_weight_at
+        if age > 60.0:
+            return base
+        ratio = max(0.0, float(self.used_weight) / float(BINANCE_IP_WEIGHT_LIMIT))
+        if ratio >= 0.92:
+            return max(base, 5.0)
+        if ratio >= 0.85:
+            return max(base, 3.0)
+        if ratio >= 0.75:
+            return max(base, 1.8)
+        if ratio >= 0.65:
+            return max(base, 1.1)
+        if ratio >= 0.50:
+            return max(base, 0.70)
+        return base
 
 
 API_STATS = ApiStats()
@@ -2899,7 +2934,7 @@ class BinanceUserDataWebSocket:
                 log.info("[USER WS] listenKey renewed through WebSocket API during REST cooldown")
             except Exception as exc:
                 self.last_keepalive_monotonic = time.monotonic() - BINANCE_USER_STREAM_KEEPALIVE_SECONDS + 300.0
-                log.warning("[USER WS] WS API keepalive gagal selama REST cooldown; retry 5 menit lagi: %s", exc)
+                log.info("[USER WS] keepalive tertunda selama REST cooldown; retry dalam 5 menit | %s", exc)
             return
         self.listen_key = await self.real.keepalive_user_stream(self.listen_key)
         self.last_keepalive_monotonic = time.monotonic()
@@ -2921,7 +2956,7 @@ class BinanceUserDataWebSocket:
                             self.last_keepalive_monotonic = time.monotonic()
                             self._save_local_state()
                         except Exception as exc:
-                            log.warning("[USER WS] userDataStream.start via WS API belum tersedia: %s", exc)
+                            log.info("[USER WS] userDataStream.start belum tersedia saat REST cooldown; retry terjadwal | %s", exc)
                             await asyncio.sleep(max(300.0, min(900.0, BINANCE_COOLDOWN.remaining() or 300.0)))
                             continue
                     else:
@@ -2975,7 +3010,7 @@ class BinanceUserDataWebSocket:
             except asyncio.CancelledError:
                 break
             except BinanceRateLimitError as exc:
-                log.warning("[USER WS] listenKey request tertahan cooldown %.0fs: %s", BINANCE_COOLDOWN.remaining(), exc)
+                log.info("[USER WS] listenKey operation ditahan rate governor | remaining=%.0fs | %s", BINANCE_COOLDOWN.remaining(), exc)
             except (ConnectionClosed, asyncio.TimeoutError, ConnectionError, OSError) as exc:
                 if not self._stop.is_set():
                     log.warning("[USER WS] disconnected: %s", exc)
@@ -3370,6 +3405,7 @@ class TradingEngine:
         self._autostop_last_persist = 0.0
         self._autostop_dirty = False
         self._autostop_missing_price_notice_at = 0.0
+        self._autostop_data_hold = bool(self.autostop_percent is not None)
         self._autostop_source: str | None = None
 
         self.symbols: dict[str, SymbolMeta] = {}
@@ -3386,6 +3422,12 @@ class TradingEngine:
         self._deferred_commands_lock = asyncio.Lock()
         self._last_api_recovery_notice = 0.0
         self._last_cooldown_github_update = 0.0
+        self._binance_notice_last_sent = 0.0
+        self._binance_notice_status: int | None = None
+        self._binance_notice_until_epoch = 0.0
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_resume_timeframe = self.timeframe
         self._last_exchange_info_retry = 0.0
         self._was_in_binance_cooldown = self._binance_cooldown_remaining() > 0
         self._scan_interrupted_by_cooldown = False
@@ -3529,6 +3571,8 @@ class TradingEngine:
             self._autostop_triggered = bool(payload.get("autostop_triggered", False))
             saved_source = str(payload.get("autostop_source") or "").upper()
             self._autostop_source = saved_source if saved_source in {"REAL", "PAPER"} else None
+            # Never scan between startup and the first fresh equity/mark snapshot.
+            self._autostop_data_hold = bool(self.autostop_percent is not None and not self._autostop_triggered)
             if self._autostop_triggered:
                 # A triggered guard must never resume scanning automatically after restart.
                 self.scan_enabled = False
@@ -3538,6 +3582,29 @@ class TradingEngine:
             position_processed = payload.get("last_position_candles") or {}
             if isinstance(position_processed, dict):
                 self.last_position_candles = {str(k): int(v) for k, v in position_processed.items() if str(v).isdigit()}
+            raw_retries = payload.get("signal_retries") or {}
+            if isinstance(raw_retries, dict):
+                restored_retries: dict[str, dict[str, Any]] = {}
+                for retry_key, retry_item in list(raw_retries.items())[-500:]:
+                    if not isinstance(retry_item, dict) or not isinstance(retry_item.get("signal"), dict):
+                        continue
+                    try:
+                        expiry = int(retry_item.get("expiry_ms") or 0)
+                        signal_row = dict(retry_item["signal"])
+                        if expiry > int(time.time() * 1000) and signal_row.get("symbol") and signal_row.get("direction"):
+                            restored_retries[str(retry_key)] = {
+                                "signal": signal_row, "expiry_ms": expiry, "key": str(retry_key),
+                                "attempts": max(0, int(retry_item.get("attempts") or 0)),
+                                "next_retry_at": retry_item.get("next_retry_at"),
+                                "last_error": str(retry_item.get("last_error") or "")[:500],
+                            }
+                    except (TypeError, ValueError):
+                        continue
+                self._signal_retries = restored_retries
+            self._scan_resume_cursor = max(0, int(payload.get("scan_resume_cursor") or 0))
+            self._scan_resume_boundary_ms = max(0, int(payload.get("scan_resume_boundary_ms") or 0))
+            saved_scan_tf = str(payload.get("scan_resume_timeframe") or self.timeframe).upper()
+            self._scan_resume_timeframe = saved_scan_tf if saved_scan_tf in volumatic.TIMEFRAME_MS else self.timeframe
         except Exception as exc:
             log.warning("Runtime settings tidak valid; gunakan default: %s", exc)
 
@@ -3559,6 +3626,19 @@ class TradingEngine:
                 "autostop_source": self._autostop_source,
                 "last_processed_candles": dict(list(self.last_processed_candles.items())[-3000:]),
                 "last_position_candles": dict(list(self.last_position_candles.items())[-3000:]),
+                "signal_retries": {
+                    k: {
+                        "signal": v.get("signal"),
+                        "expiry_ms": int(v.get("expiry_ms") or 0),
+                        "attempts": int(v.get("attempts") or 0),
+                        "next_retry_at": v.get("next_retry_at"),
+                        "last_error": str(v.get("last_error") or "")[:500],
+                    }
+                    for k, v in list(self._signal_retries.items())[-500:]
+                },
+                "scan_resume_cursor": int(self._scan_resume_cursor),
+                "scan_resume_boundary_ms": int(self._scan_resume_boundary_ms),
+                "scan_resume_timeframe": self._scan_resume_timeframe,
                 "updated_at": iso_utc(),
             }
             await self._persist_bytes(RUNTIME_SETTINGS_PATH, json.dumps(payload, indent=2).encode(), "volumatic: runtime settings")
@@ -3667,7 +3747,7 @@ class TradingEngine:
             item["next_retry_at"] = iso_utc(now_utc() + timedelta(seconds=delay))
             item["last_error"] = str(error)[:500]
             await self._save_deferred_commands()
-            log.warning("Deferred command %s ditahan untuk retry %ss: %s", command_text, delay, error)
+            log.info("[COMMAND QUEUE] deferred retry scheduled | command=%s | retry_in=%ss | reason=%s", command_text, delay, error)
 
         try:
             await self._dispatch_command(command_text)
@@ -3697,6 +3777,87 @@ class TradingEngine:
             self.rest._rest_cooldown_until - time.monotonic(),
             self.real.cooldown_remaining,
         )
+
+    @staticmethod
+    def _short_duration(seconds: float) -> str:
+        total = max(0, int(seconds))
+        hours, rem = divmod(total, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
+    async def _notify_binance_cooldown(
+        self, exc: Exception | None = None, *, source: str = "ENGINE", symbol: str | None = None
+    ) -> None:
+        """Send a single robot-style state notice per meaningful cooldown transition."""
+        if isinstance(exc, BinanceRateLimitError) and getattr(exc, "internal", False):
+            return  # locally-held requests are not new exchange events
+        remaining = self._binance_cooldown_remaining()
+        if remaining <= 0:
+            return
+        text_value = str(exc or BINANCE_COOLDOWN.reason())
+        match = re.search(r"HTTP\s+(418|429)", text_value)
+        status = int(getattr(exc, "status_code", 0) or (match.group(1) if match else 429))
+        endpoint = str(getattr(exc, "endpoint", "") or "")
+        if not endpoint:
+            endpoint_match = re.search(r"(/fapi/[^ :]+)", text_value)
+            endpoint = endpoint_match.group(1) if endpoint_match else "REST"
+        until_epoch = float(BINANCE_COOLDOWN._until_epoch or (time.time() + remaining))
+        now_mono = time.monotonic()
+        # Notify at first occurrence, status escalation 429->418, or materially
+        # extended server ban. Suppress repeated warnings from the same cooldown.
+        first = self._binance_notice_last_sent <= 0
+        escalated = self._binance_notice_status != status
+        extended = until_epoch > self._binance_notice_until_epoch + 120.0
+        heartbeat = now_mono - self._binance_notice_last_sent >= 900.0
+        if not (first or escalated or extended or heartbeat):
+            return
+        self._binance_notice_last_sent = now_mono
+        self._binance_notice_status = status
+        self._binance_notice_until_epoch = max(self._binance_notice_until_epoch, until_epoch)
+        local_until = datetime.fromtimestamp(until_epoch, timezone.utc).astimezone(TZ)
+        used = "—"
+        if API_STATS.used_weight is not None and API_STATS.used_weight_at is not None and time.monotonic() - API_STATS.used_weight_at <= 60:
+            used = f"{API_STATS.used_weight}/{BINANCE_IP_WEIGHT_LIMIT}"
+        active_real = sum(1 for t in self.active_trades.values() if t.real_enabled and t.status in {"PENDING", "FILLED"})
+        gtc_real = sum(1 for t in self.active_trades.values() if t.real_enabled and t.status in {"PENDING", "FILLED"} and (t.preserve_gtc_after_cooldown or t.real_submit_ambiguous))
+        mode = "IP BAN" if status == 418 else "RATE THROTTLE"
+        lines = [
+            "╔══ BINANCE / RATE GOVERNOR ══╗",
+            f"STATE     : {mode} · HTTP {status}",
+            f"SOURCE    : {source}" + (f" · {symbol}" if symbol else ""),
+            f"ENDPOINT  : {endpoint}",
+            f"IP WEIGHT : {used}",
+            f"COOLDOWN  : {self._short_duration(remaining)} remaining",
+            f"RESUME ETA: {local_until.strftime('%d-%m-%Y %H:%M:%S WIB')}",
+            "──────────────────────────────",
+            "REST      : PAUSED · no request burst",
+            f"ORDERS    : {active_real} REAL active · {gtc_real} preserved/uncertain",
+            f"USER WS   : {self.user_ws.status}",
+            f"CMD QUEUE : {len(self.deferred_commands)} waiting",
+            f"SCANNER   : {'PAUSED' if self.scan_enabled else 'OFF'} · cursor {self._scan_resume_cursor}",
+            "──────────────────────────────",
+            "Existing Binance LIMIT orders are not canceled by cooldown.",
+            "WebSocket events continue; REST reconciliation resumes automatically.",
+        ]
+        await self.reply("\n".join(lines))
+        log.info("[BINANCE] rate governor notified | status=%s endpoint=%s source=%s remaining=%.0fs", status, endpoint, source, remaining)
+
+    async def _notify_binance_recovered(self) -> None:
+        if not self._was_in_binance_cooldown:
+            return
+        await self.reply(
+            "╔══ BINANCE / LINK RESTORED ══╗\n"
+            "STATE     : NORMAL\n"
+            "REST      : AVAILABLE\n"
+            "NEXT      : reconcile orders → positions → deferred commands → scanner\n"
+            f"CMD QUEUE : {len(self.deferred_commands)} waiting\n"
+            "Existing LIMIT orders have been preserved during cooldown."
+        )
+        self._binance_notice_last_sent = 0.0
+        self._binance_notice_status = None
+        self._binance_notice_until_epoch = 0.0
 
     async def _restore_cooldown_from_github(self) -> None:
         """Restore a persisted IP ban before the first Binance REST request."""
@@ -3892,7 +4053,9 @@ class TradingEngine:
             # Telegram/health service must come online even during a long IP ban.
             self.symbols = self.rest._exchange_info_cache or {}
             self._last_universe_refresh = 0.0
-            log.warning("[START] Binance sedang cooldown; startup degraded tanpa menghentikan launcher: %s", exc)
+            self._was_in_binance_cooldown = True
+            await self._notify_binance_cooldown(exc, source="STARTUP / EXCHANGE INFO")
+            log.info("[START] Binance REST limited; launcher tetap online dalam mode degraded.")
         except Exception as exc:
             self.symbols = self.rest._exchange_info_cache or {}
             self._last_universe_refresh = 0.0
@@ -3900,18 +4063,35 @@ class TradingEngine:
         if self._binance_cooldown_remaining() <= 0:
             await self._reconcile_restored_trades()
         else:
-            log.warning(
-                "[START] REST cooldown aktif; reconciliation REAL ditunda. User Data WS akan mengambil fill event jika listenKey lokal tersedia."
-            )
+            log.info("[START] REST cooldown aktif; reconciliation REAL ditunda sementara User Data WS tetap berjalan bila tersedia.")
         await self.ws.start()
         await self._sync_ws_symbols()
         if self.real_mode or any(t.real_enabled and t.status in {"PENDING", "FILLED"} for t in self.active_trades.values()):
             try:
                 await self.user_ws.start()
             except BinanceRateLimitError as exc:
-                log.warning("[START] private user stream menunggu Binance pulih: %s", exc)
+                log.info("[START] private user stream menunggu REST pulih; launcher tetap aktif | %s", exc)
             except Exception as exc:
                 log.exception("[START] private user stream belum tersambung; REST reconciliation tetap aktif: %s", exc)
+
+        if self._binance_cooldown_remaining() > 0:
+            await self._notify_binance_cooldown(source="STARTUP RECOVERY")
+
+        # Prime the Autostop snapshot before the scanner starts. During a cooldown
+        # we do not call REST; the guard remains in DATA HOLD until ACCOUNT_UPDATE
+        # or a later successful balance/mark-price refresh completes the snapshot.
+        if self.autostop_percent is not None and not self._autostop_triggered:
+            if self._autostop_source_name() == "REAL" and self._binance_cooldown_remaining() <= 0:
+                balance = self.real.cached_usdt_balance()
+                if balance is None:
+                    try:
+                        await self.real.get_futures_balance()
+                    except BinanceRateLimitError as exc:
+                        self._was_in_binance_cooldown = True
+                        await self._notify_binance_cooldown(exc, source="STARTUP / AUTOSTOP BALANCE")
+                    except Exception as exc:
+                        log.info("[AUTOSTOP] startup balance snapshot ditunda; guard tetap DATA HOLD: %s", exc)
+            await self._autostop_check(force=True)
 
         self._maintenance_task = asyncio.create_task(self._maintenance_loop(), name="volumatic-maintenance")
         self._scan_task = asyncio.create_task(self._scan_loop(), name="volumatic-scanner")
@@ -3980,21 +4160,82 @@ class TradingEngine:
         ]
         return sorted(result)
 
+    async def _send_scan_batch_report(
+        self, *, timeframe: str, ema_length: int | None, batch_number: int,
+        batch_start: int, batch_end: int, universe_total: int,
+        stats: dict[str, Any], elapsed: float, interrupted: bool = False,
+        pass_start: int | None = None,
+    ) -> None:
+        """Telegram telemetry for every completed or interrupted logical batch."""
+        ema = f"EMA{ema_length}" if ema_length is not None else "OFF"
+        cooldown = self._binance_cooldown_remaining()
+        state = "REST COOLDOWN / PAUSED" if interrupted or cooldown > 0 else "BATCH COMPLETE"
+        processed = int(stats.get("processed", 0))
+        requested = int(stats.get("requested", 0))
+        pass_start = batch_start if pass_start is None else pass_start
+        pass_expected = max(0, batch_end - pass_start + 1)
+        blue = int(stats.get("blue", 0))
+        red = int(stats.get("red", 0))
+        no_signal = int(stats.get("no_signal", 0))
+        skipped = sum(int(stats.get(k, 0)) for k in ("already_seen", "warmup", "stale"))
+        filled = int(stats.get("filled", 0))
+        created = int(stats.get("orders", 0))
+        deferred = int(stats.get("deferred", 0))
+        unknown = int(stats.get("unknown", 0))
+        lines = [
+            "╔══ VOL / SCAN BATCH REPORT ══╗",
+            f"ENGINE    : VOLUMATIC TREND · {timeframe} · {ema}",
+            f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
+            f"UNIVERSE  : {universe_total} symbols",
+            f"STATE     : {state}",
+            "──────────────────────────────",
+            f"PASS      : {pass_start:04d}–{min(batch_end, pass_start + requested - 1):04d}  ({requested}/{pass_expected} requested)",
+            f"ANALYZED  : {processed}  ·  SKIPPED {skipped}",
+            f"BUBBLES   : BLUE {blue}  ·  RED {red}  ·  NONE {no_signal}",
+            f"EXECUTION : NEW {created}  ·  FILLED {filled}  ·  DEFERRED {deferred}  ·  UNKNOWN {unknown}",
+            f"FILTER    : EMA BLOCK {int(stats.get('ema_blocked', 0))}  ·  MAX BLOCK {int(stats.get('max_blocked', 0))}",
+            f"OTHER     : DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
+            f"DURATION  : {elapsed:.1f}s",
+        ]
+        details = stats.get("details") or []
+        if details:
+            lines.extend(["──────────────────────────────", "SIGNAL TRACE:"])
+            for detail in details[:16]:
+                lines.append(f"› {detail}")
+            if len(details) > 16:
+                lines.append(f"› +{len(details) - 16} signal lain; detail lengkap tersimpan di event history")
+        lines.append("──────────────────────────────")
+        if interrupted or cooldown > 0:
+            lines.append(f"GOVERNOR  : REST HOLD · {self._short_duration(cooldown)} remaining")
+            lines.append(f"RESUME    : coin #{self._scan_resume_cursor + 1:04d} setelah cooldown")
+            lines.append("ORDERS    : existing GTC tetap aktif · User Data WS tetap dipantau")
+        elif batch_end < universe_total:
+            next_start = batch_end + 1
+            next_end = min(universe_total, next_start + SCAN_MAX_PAIRS_PER_CYCLE - 1)
+            lines.append(f"NEXT      : BATCH {batch_number + 1:02d} · COIN #{next_start:04d}–#{next_end:04d}")
+        else:
+            lines.append("NEXT      : menunggu close candle timeframe berikutnya")
+        await self.reply("\n".join(lines))
+
     async def _scan_loop(self) -> None:
         while self._running:
             try:
                 if not self.scan_enabled:
                     await asyncio.sleep(SCAN_POLL_SECONDS)
                     continue
+                if self.autostop_percent is not None and self._autostop_data_hold:
+                    await asyncio.sleep(SCAN_POLL_SECONDS)
+                    continue
                 cooldown = self._binance_cooldown_remaining()
                 if cooldown > 0:
                     self._scan_interrupted_by_cooldown = True
+                    self._was_in_binance_cooldown = True
                     await asyncio.sleep(min(10.0, max(2.0, cooldown)))
                     continue
                 if self._scan_interrupted_by_cooldown:
                     self._scan_interrupted_by_cooldown = False
                     self._scan_trigger_now = True
-                    log.info("[SCAN] Binance pulih; jadwalkan ulang scan memakai candle closed terbaru.")
+                    log.info("[SCAN] REST pulih; lanjutkan scanner dari cursor tersimpan.")
                 interval_ms = volumatic.TIMEFRAME_MS[self.timeframe]
                 boundary = (int(time.time() * 1000) // interval_ms) * interval_ms
                 due = self._scan_trigger_now or boundary > self._last_scan_boundary_ms
@@ -4008,117 +4249,256 @@ class TradingEngine:
             except BinanceRateLimitError as exc:
                 self._scan_interrupted_by_cooldown = True
                 self._scan_trigger_now = True
-                log.warning("[SCAN] paused by shared Binance cooldown: %s", exc)
+                await self._notify_binance_cooldown(exc, source="SCANNER LOOP")
+                log.info("[SCAN] paused by shared Binance rate governor; cursor=%s", self._scan_resume_cursor)
                 await asyncio.sleep(5.0)
             except Exception as exc:
                 log.exception("[SCAN] loop gagal: %s", exc)
                 await asyncio.sleep(5.0)
 
     async def _run_scan_cycle(self, boundary_ms: int) -> None:
+        if self.autostop_percent is not None and self._autostop_data_hold:
+            log.info("[SCAN] held by AUTOSTOP data guard; equity snapshot belum fresh.")
+            return
         if self._scan_cycle_lock.locked():
-            log.warning("[SCAN] cycle sebelumnya masih aktif; trigger baru dilewati.")
+            log.info("[SCAN] cycle sebelumnya masih aktif; trigger ditahan.")
             return
         async with self._scan_cycle_lock:
             timeframe = self.timeframe
-            ema_filter_length = self.ema_filter_length  # one consistent EMA setting for the whole scan cycle
+            ema_filter_length = self.ema_filter_length
             interval_ms = volumatic.TIMEFRAME_MS[timeframe]
             universe = await self._universe()
             started = time.monotonic()
-            processed = signals = errors = 0
+            processed_total = 0
+            errors_total = 0
+            if (
+                self._scan_resume_boundary_ms != boundary_ms
+                or self._scan_resume_timeframe != timeframe
+                or self._scan_resume_cursor >= len(universe)
+            ):
+                self._scan_resume_boundary_ms = boundary_ms
+                self._scan_resume_timeframe = timeframe
+                self._scan_resume_cursor = 0
+            if not universe:
+                await self.reply(
+                    "╔══ VOL / SCANNER ══╗\n"
+                    "UNIVERSE : 0 symbols\n"
+                    "ACTION   : tidak ada pair USDT Perpetual yang memenuhi filter."
+                )
+                return
+
             log.info(
-                "[SCAN] Volumatic %s cycle mulai | EMA=%s | universe=%s | batch=%s",
+                "[SCAN] cycle start | tf=%s | ema=%s | universe=%s | batch_size=%s | cursor=%s",
                 timeframe, f"EMA{ema_filter_length}" if ema_filter_length is not None else "OFF",
-                len(universe), SCAN_MAX_PAIRS_PER_CYCLE,
+                len(universe), SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
             )
             await self._expire_due_pending()
-            for offset in range(0, len(universe), SCAN_MAX_PAIRS_PER_CYCLE):
+
+            # Logical batches remain fixed at [1..50], [51..100], etc., even
+            # when a cooldown resumes from a cursor in the middle of a batch.
+            offset = self._scan_resume_cursor
+            while offset < len(universe):
                 if not self._running or not self.scan_enabled:
                     break
-                batch = universe[offset:offset + SCAN_MAX_PAIRS_PER_CYCLE]
-                batch_number = offset // SCAN_MAX_PAIRS_PER_CYCLE + 1
-                log.info("[SCAN] batch %s | %s-%s dari %s", batch_number, offset + 1, offset + len(batch), len(universe))
-                for symbol in batch:
+                if self.timeframe != timeframe:
+                    log.info("[SCAN] timeframe changed mid-cycle; restart next cycle.")
+                    self._scan_resume_cursor = 0
+                    self._scan_resume_boundary_ms = 0
+                    break
+
+                logical_start = (offset // SCAN_MAX_PAIRS_PER_CYCLE) * SCAN_MAX_PAIRS_PER_CYCLE
+                logical_end = min(logical_start + SCAN_MAX_PAIRS_PER_CYCLE, len(universe))
+                batch = universe[offset:logical_end]
+                batch_number = logical_start // SCAN_MAX_PAIRS_PER_CYCLE + 1
+                batch_start = logical_start + 1
+                batch_end = logical_end
+                pass_start = offset + 1
+                batch_started = time.monotonic()
+                stats: dict[str, Any] = {
+                    "requested": 0, "processed": 0, "already_seen": 0, "warmup": 0,
+                    "stale": 0, "no_signal": 0, "blue": 0, "red": 0,
+                    "orders": 0, "filled": 0, "deferred": 0, "unknown": 0,
+                    "ema_blocked": 0, "max_blocked": 0, "duplicate": 0,
+                    "errors": 0, "details": [],
+                }
+                interrupted = False
+                log.info(
+                    "[SCAN] batch start | batch=%02d | logical_coins=%04d-%04d/%04d | pass_from=%04d | tf=%s | ema=%s",
+                    batch_number, batch_start, batch_end, len(universe), pass_start,
+                    timeframe, ema_filter_length or "OFF",
+                )
+
+                for local_index, symbol in enumerate(batch):
+                    absolute_index = offset + local_index
                     if self.timeframe != timeframe:
-                        log.info("[SCAN] timeframe berubah saat cycle; hentikan batch lama.")
                         break
                     if self._binance_cooldown_remaining() > 0:
                         self._scan_interrupted_by_cooldown = True
                         self._scan_trigger_now = True
+                        interrupted = True
+                        self._scan_resume_cursor = absolute_index
                         break
+
+                    stats["requested"] += 1
                     try:
-                        api_interval = "4h" if timeframe == "H4" else "1d"
+                        api_interval = volumatic.TIMEFRAME_INTERVALS[timeframe]
                         candles = await self.rest.get_klines(
                             symbol, api_interval, KLINE_HISTORY, interval_ms, force_refresh=True
                         )
                         if candles is None or len(candles) < max(volumatic.ATR_LENGTH + 10, volumatic.TREND_LENGTH + 10):
-                            log.debug("[SCAN] %s dilewati: history warm-up belum cukup.", symbol)
+                            stats["warmup"] += 1
+                            self._scan_resume_cursor = absolute_index + 1
                             continue
+
                         latest_open_ms = int(candles["t"][-1])
                         close_ms = latest_open_ms + interval_ms
                         key = f"{timeframe}:{symbol}"
                         previous_close = self.last_processed_candles.get(key)
                         if previous_close is not None and close_ms <= previous_close:
-                            processed += 1
+                            stats["already_seen"] += 1
+                            self._scan_resume_cursor = absolute_index + 1
                             continue
-                        # Only act during the immediately following candle. Signals
-                        # from an older candle are historical and must not be chased.
+
                         now_ms = int(time.time() * 1000)
                         expiry_ms = close_ms + interval_ms
                         if now_ms >= expiry_ms:
                             self.last_processed_candles[key] = close_ms
-                            processed += 1
+                            stats["stale"] += 1
+                            self._scan_resume_cursor = absolute_index + 1
                             continue
+
                         signal = volumatic.detect_latest_signal(
                             candles, symbol=symbol, timeframe=timeframe, interval_ms=interval_ms,
                             ema_filter_length=ema_filter_length,
                         )
-                        if signal:
-                            signals += 1
-                            try:
-                                await self._handle_signal(signal, expiry_ms)
-                                self.last_processed_candles[key] = close_ms
-                                self._signal_retries.pop(key, None)
-                            except Exception as exc:
-                                self._signal_retries[key] = {"signal": signal, "expiry_ms": expiry_ms, "key": key}
-                                errors += 1
-                                log.exception("[SIGNAL] %s %s gagal diproses; masuk retry: %s", symbol, signal.get("signal"), exc)
-                        else:
+                        if signal is None:
+                            stats["no_signal"] += 1
                             self.last_processed_candles[key] = close_ms
-                        processed += 1
+                        else:
+                            bubble = str(signal.get("signal") or "?").upper()
+                            direction = str(signal.get("direction") or "?").upper()
+                            if bubble == "BLUE":
+                                stats["blue"] += 1
+                            elif bubble == "RED":
+                                stats["red"] += 1
+                            try:
+                                outcome = await self._handle_signal(signal, expiry_ms)
+                            except BinanceRateLimitError:
+                                # Do not consume the signal or move the cursor. The
+                                # same coin is retried when the shared IP recovers.
+                                raise
+                            except Exception as signal_exc:
+                                self._signal_retries[key] = {
+                                    "signal": signal, "expiry_ms": expiry_ms, "key": key,
+                                }
+                                stats["errors"] += 1
+                                errors_total += 1
+                                outcome = "ERROR_RETRY"
+                                log.exception(
+                                    "[SIGNAL] %s %s failed; queued for safe retry: %s",
+                                    symbol, bubble, signal_exc,
+                                )
+
+                            if outcome == "ORDER_CREATED":
+                                stats["orders"] += 1
+                            if outcome == "ORDER_FILLED":
+                                stats["filled"] += 1
+                            elif outcome == "ORDER_DEFERRED":
+                                stats["deferred"] += 1
+                            elif outcome == "ORDER_UNKNOWN":
+                                stats["unknown"] += 1
+                            elif outcome == "EMA_BLOCKED":
+                                stats["ema_blocked"] += 1
+                            elif outcome == "MAX_BLOCKED":
+                                stats["max_blocked"] += 1
+                            elif outcome in {"DUPLICATE", "IGNORED_TIMEFRAME"}:
+                                stats["duplicate"] += 1
+
+                            close_price = signal.get("close_price") or signal.get("signal_close_price") or "-"
+                            ema_len = signal.get("ema_filter_length", ema_filter_length)
+                            ema_val = signal.get("ema_filter_value")
+                            ema_text = "EMA OFF" if ema_len is None else f"EMA{ema_len}={ema_val if ema_val is not None else 'N/A'}"
+                            closed_old = bool(signal.get("_closed_opposite"))
+                            close_note = f"CLOSE {signal.get('_closed_direction', 'OPPOSITE')} MARKET → " if closed_old else ""
+                            trace = f"#{absolute_index + 1:04d} {symbol} {bubble}/{direction} @ {close_price} · {ema_text} · {close_note}{outcome}"
+                            stats["details"].append(trace[:190])
+
+                            self.last_processed_candles[key] = close_ms
+                            if outcome != "ERROR_RETRY":
+                                self._signal_retries.pop(key, None)
+
+                        stats["processed"] += 1
+                        processed_total += 1
+                        self._scan_resume_cursor = absolute_index + 1
+
                     except BinanceRateLimitError as exc:
-                        errors += 1
+                        stats["errors"] += 1
+                        errors_total += 1
+                        interrupted = True
                         self._scan_interrupted_by_cooldown = True
                         self._scan_trigger_now = True
-                        log.warning("[SCAN] cooldown aktif pada %s; hentikan scan dan lanjut setelah API pulih: %s", symbol, exc)
+                        self._scan_resume_cursor = absolute_index
+                        await self._notify_binance_cooldown(exc, source="SCANNER / KLINES OR ORDER", symbol=symbol)
+                        log.info("[SCAN] paused at symbol=%s | resume_cursor=%s", symbol, self._scan_resume_cursor)
                         break
                     except Exception as exc:
-                        errors += 1
-                        log.exception("[SCAN] %s gagal: %s", symbol, exc)
+                        stats["errors"] += 1
+                        errors_total += 1
+                        self._scan_resume_cursor = absolute_index + 1
+                        log.exception("[SCAN] %s failed: %s", symbol, exc)
+
                     if SCAN_PAIR_DELAY_SECONDS > 0:
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
+
                 release_memory()
-                if self._binance_cooldown_remaining() > 0 or self._scan_interrupted_by_cooldown:
+                await self._send_scan_batch_report(
+                    timeframe=timeframe, ema_length=ema_filter_length,
+                    batch_number=batch_number, batch_start=batch_start, batch_end=batch_end,
+                    universe_total=len(universe), stats=stats,
+                    elapsed=time.monotonic() - batch_started, interrupted=interrupted,
+                    pass_start=pass_start,
+                )
+                await self._save_runtime_settings()
+                await self._save_active_state()
+
+                if interrupted or self._binance_cooldown_remaining() > 0 or self._scan_interrupted_by_cooldown:
+                    self._scan_trigger_now = True
                     break
-                if offset + len(batch) < len(universe):
-                    log.info("[SCAN] batch %s selesai; lanjut batch berikutnya.", batch_number)
+                if self._scan_resume_cursor >= logical_end:
+                    offset = logical_end
+                    log.info("[SCAN] batch complete | batch=%02d | range=%04d-%04d", batch_number, batch_start, batch_end)
+                else:
+                    break
+
+            completed = self._scan_resume_cursor >= len(universe)
+            if completed:
+                self._scan_resume_cursor = 0
+                self._scan_resume_boundary_ms = 0
+                self._scan_resume_timeframe = timeframe
             await self._save_runtime_settings()
             await self._save_active_state()
             await self._sync_ws_symbols()
             if self._scan_interrupted_by_cooldown or self._binance_cooldown_remaining() > 0:
                 self._scan_trigger_now = True
             elapsed = time.monotonic() - started
-            log.info("[SCAN] cycle selesai | TF=%s | processed=%s/%s | signals=%s | errors=%s | durasi=%.1fs", timeframe, processed, len(universe), signals, errors, elapsed)
+            log.info(
+                "[SCAN] cycle %s | tf=%s | processed=%s/%s | errors=%s | cursor=%s | duration=%.1fs",
+                "complete" if completed else "paused", timeframe,
+                processed_total, len(universe), errors_total, self._scan_resume_cursor, elapsed,
+            )
 
-    async def _handle_signal(self, signal: dict[str, Any], expiry_ms: int) -> None:
+    async def _handle_signal(self, signal: dict[str, Any], expiry_ms: int) -> str:
         pair = normalize_symbol(signal["symbol"])
         direction = str(signal["direction"]).upper()
         if direction not in {"LONG", "SHORT"}:
             raise ValueError(f"Arah sinyal tidak valid: {direction}")
         if int(time.time() * 1000) >= int(expiry_ms):
             await self._record_event("SIGNAL_EXPIRED_BEFORE_SUBMIT", None, pair=pair, direction=direction, timeframe=signal.get("timeframe"))
-            return
+            return "EXPIRED"
         async with self._trade_lock:
             existing = next((t for t in self.active_trades.values() if t.pair == pair and t.status in {"PENDING", "FILLED"}), None)
+            closed_opposite = False
+            closed_direction = existing.direction if existing and existing.direction != direction else None
             # A trade keeps the timeframe that created it. A newly selected
             # timeframe must not reverse or otherwise hijack that existing
             # position; only its own timeframe can manage its lifecycle.
@@ -4131,11 +4511,11 @@ class TradingEngine:
                     "SIGNAL_IGNORED_DIFFERENT_TIMEFRAME_ACTIVE", existing,
                     signal_direction=direction, signal_timeframe=signal.get("timeframe"),
                 )
-                return
+                return "IGNORED_TIMEFRAME"
             if existing and existing.direction == direction:
                 log.info("[SIGNAL] %s %s diabaikan: trade arah sama masih aktif.", pair, direction)
                 await self._record_event("DUPLICATE_SIGNAL_IGNORED", existing, signal=signal.get("signal"))
-                return
+                return "DUPLICATE"
             # Opposite confirmed bubble closes a filled position immediately.
             # A pending order is canceled before a new direction is submitted.
             if existing:
@@ -4145,6 +4525,7 @@ class TradingEngine:
                         raise RuntimeError(
                             f"Order lama {pair} belum terkonfirmasi canceled/terminal; reversal ditahan."
                         )
+                    closed_opposite = existing.trade_id not in self.active_trades
                 if existing.status == "FILLED":
                     # A partial entry can have filled exposure plus an open remainder.
                     # Cancel only the remainder before market-closing the live position.
@@ -4164,6 +4545,7 @@ class TradingEngine:
                     if market_reference_price <= 0:
                         raise RuntimeError(f"Harga market untuk close {pair} tidak valid.")
                     await self._close_trade(existing, market_reference_price, "OPPOSITE_BUBBLE_MARKET")
+                    closed_opposite = existing.trade_id not in self.active_trades
                 elif existing.trade_id in self.active_trades:
                     raise RuntimeError(f"Order lama {pair} belum selesai direkonsiliasi; reversal ditahan.")
             # EMA is a symmetric directional entry filter only. Opposite positions
@@ -4206,18 +4588,24 @@ class TradingEngine:
                     f"{decimal_to_str(filter_value) if filter_value is not None else 'WARMING UP'}\n"
                     "Posisi/order arah berlawanan sudah ditutup/dibatalkan; entry baru tidak dibuat."
                 )
-                return
+                signal["_closed_opposite"] = closed_opposite
+                signal["_closed_direction"] = closed_direction
+                return "EMA_BLOCKED"
             if int(time.time() * 1000) >= int(expiry_ms):
                 await self._record_event(
                     "SIGNAL_EXPIRED_DURING_REVERSAL", None, pair=pair,
                     direction=direction, timeframe=signal.get("timeframe"),
                 )
-                return
+                signal["_closed_opposite"] = closed_opposite
+                signal["_closed_direction"] = closed_direction
+                return "EXPIRED"
             active_count = sum(t.status in {"PENDING", "FILLED"} for t in self.active_trades.values())
             if active_count >= self.max_active_trades:
                 log.warning("[SIGNAL] %s %s dilewati: kapasitas /max penuh (%s/%s).", pair, direction, active_count, self.max_active_trades)
                 await self._record_event("SIGNAL_SKIPPED_MAX_CAPACITY", None, pair=pair, direction=direction, timeframe=signal.get("timeframe"), active_count=active_count)
-                return
+                signal["_closed_opposite"] = closed_opposite
+                signal["_closed_direction"] = closed_direction
+                return "MAX_BLOCKED"
 
             bubble_price = Decimal(str(signal["bubble_price"]))  # EMA1[t-1]: visual/reference only
             signal_close_price = Decimal(str(signal.get("limit_price") or signal.get("signal_close_price") or signal.get("close_price") or "0"))
@@ -4294,13 +4682,15 @@ class TradingEngine:
                 if trade.status == "PENDING" and trade.real_state == "REAL_FILLED":
                     await self._mark_filled(trade, trade.fill_price or trade.entry, source="BINANCE_ORDER_RESPONSE")
                 if trade.status not in {"PENDING", "FILLED"}:
-                    return
+                    return "NOT_ACTIVE"
             else:
                 observed = self._current_price(pair)
                 if observed is not None:
                     touched = observed <= trade.entry if trade.direction == "LONG" else observed >= trade.entry
                     if touched:
                         await self._mark_filled(trade, observed, "PAPER_MARKETABLE_AT_SUBMIT")
+            signal["_closed_opposite"] = closed_opposite
+            signal["_closed_direction"] = closed_direction
             await self.reply(
                 f"{'🟢' if direction == 'LONG' else '🔴'} VOLUMATIC {direction} • {pair}\n\n"
                 f"Timeframe: {trade.timeframe}\nSignal: {trade.signal} BUBBLE\n"
@@ -4315,6 +4705,11 @@ class TradingEngine:
                 f"Mode: {'REAL' if trade.real_enabled else 'PAPER'}\n"
                 "SL: NONE • TP: NONE"
             )
+            if trade.real_submit_ambiguous:
+                return "ORDER_UNKNOWN"
+            if trade.real_enabled and trade.real_state == "REAL_PREPARED":
+                return "ORDER_DEFERRED"
+            return "ORDER_CREATED" if trade.status == "PENDING" else "ORDER_FILLED"
 
     async def _prepare_real_limit(self, trade: Trade) -> None:
         """Run all deterministic account/pair checks without submitting an order."""
@@ -4365,11 +4760,16 @@ class TradingEngine:
         trade.real_error = None
 
     async def _submit_real_limit(self, trade: Trade) -> None:
-        """Submit one prepared LIMIT; preserve ambiguous submissions for reconciliation."""
+        """Submit once; ambiguous transport/5xx outcomes are lookup-only, never blind-reposted."""
         if not trade.real_enabled or not trade.entry_client_order_id:
             raise RuntimeError("REAL order belum melewati preflight atau clientOrderId tidak tersedia.")
         if now_utc() >= trade.expires_at:
             await self._finalize_trade(trade, "EXPIRED", None, "CANDLE_EXPIRED_BEFORE_REAL_SUBMIT")
+            return
+        if trade.real_submit_ambiguous or trade.real_state in {"REAL_SUBMIT_UNKNOWN", "REAL_SUBMITTING"}:
+            # This clientOrderId may already identify a live or completed exchange order.
+            # Never POST again until exchange state is positively resolved.
+            await self._save_active_state()
             return
 
         trade.real_state = "REAL_SUBMITTING"
@@ -4380,21 +4780,98 @@ class TradingEngine:
                 price=trade.entry, position_side=trade.position_side or "BOTH",
                 client_order_id=trade.entry_client_order_id,
             )
-        except Exception as exc:
-            # The POST may have reached Binance even when the response timed out.
-            # Query by the stable client order ID; never create a second ID here.
+        except BinanceRateLimitError as exc:
+            # An internally blocked request was never sent. A server 429/418 is a
+            # definite rate-limit rejection. Keep the durable intent PREPARED and
+            # let maintenance submit the same clientOrderId after cooldown.
+            if getattr(exc, "internal", False) or exc.status_code in {418, 429}:
+                trade.real_state = "REAL_PREPARED"
+                trade.real_error = f"Order belum diterima Binance karena rate limit: {str(exc)[:350]}"
+                trade.real_submit_ambiguous = False
+                await self._save_active_state()
+                await self._notify_binance_cooldown(exc, source="REAL ORDER SUBMIT", symbol=trade.pair)
+                log.info("[REAL] %s POST ditahan oleh rate governor; intent disimpan PREPARED, clientOrderId=%s", trade.pair, trade.entry_client_order_id)
+                return
+            raise
+        except BinanceAPIError as exc:
+            if exc.status_code is not None and 400 <= exc.status_code < 500 and exc.status_code not in {418, 429}:
+                trade.real_state = "REAL_REJECTED"
+                trade.real_error = str(exc)[:500]
+                await self._save_active_state()
+                await self._record_event("REAL_LIMIT_REJECTED", trade, error=str(exc)[:500])
+                await self._finalize_trade(trade, "CANCELED", None, f"BINANCE_REJECTED: {exc}")
+                return
+            # Binance explicitly documents 5xx/unknown execution results as ambiguous.
             trade.real_state = "REAL_SUBMIT_UNKNOWN"
+            trade.real_submit_ambiguous = True
             trade.real_error = str(exc)[:500]
-            log.exception("[REAL] submit %s ambiguous; reconcile by clientOrderId", trade.pair)
+            await self._save_active_state()
+            log.info("[REAL/RECON] %s acknowledgement uncertain; lookup-only by clientOrderId=%s; duplicate POST disabled | %s", trade.pair, trade.entry_client_order_id, exc)
+            await self.reply(
+                "╔══ VOL / REAL ORDER RECONCILIATION ══╗\n"
+                f"PAIR      : {trade.pair} · {trade.direction}\n"
+                f"CLIENT ID : {trade.entry_client_order_id}\n"
+                "STATE     : EXCHANGE ACK NOT CONFIRMED\n"
+                "NEXT      : QUERY EXISTING CLIENT ORDER ID\n"
+                "SAFETY    : POST REPEAT DISABLED · DUPLICATE ORDER BLOCKED\n"
+                "SLOT      : RESERVED UNTIL EXCHANGE STATE IS KNOWN"
+            )
+            # Resolve a lost POST acknowledgement immediately using GET only.
+            # If Binance still cannot find the clientOrderId, retain UNKNOWN and
+            # let the normal maintenance loop repeat lookup; never POST again.
             try:
                 response = await self.real.get_order(
                     trade.pair, client_order_id=trade.entry_client_order_id
                 )
+            except BinanceRateLimitError as query_exc:
+                await self._notify_binance_cooldown(query_exc, source="REAL ORDER VERIFY", symbol=trade.pair)
+                return
+            except BinanceAPIError as query_exc:
+                if query_exc.code == -2013:
+                    trade.real_error = "Lookup awal belum menemukan clientOrderId; status UNKNOWN dipertahankan, GET akan diulang berkala."
+                else:
+                    trade.real_error = (trade.real_error + " | lookup: " + str(query_exc))[:500]
+                await self._save_active_state()
+                return
             except Exception as query_exc:
-                trade.real_error = (str(exc) + " | reconcile: " + str(query_exc))[:500]
+                trade.real_error = (trade.real_error + " | lookup: " + str(query_exc))[:500]
+                await self._save_active_state()
+                return
+        except Exception as exc:
+            # Timeouts/resets can happen after Binance accepted the POST.
+            trade.real_state = "REAL_SUBMIT_UNKNOWN"
+            trade.real_submit_ambiguous = True
+            trade.real_error = str(exc)[:500]
+            await self._save_active_state()
+            log.info("[REAL/RECON] %s acknowledgement uncertain; lookup-only by clientOrderId=%s; duplicate POST disabled | %s", trade.pair, trade.entry_client_order_id, exc)
+            await self.reply(
+                "╔══ VOL / REAL ORDER RECONCILIATION ══╗\n"
+                f"PAIR      : {trade.pair} · {trade.direction}\n"
+                f"CLIENT ID : {trade.entry_client_order_id}\n"
+                "STATE     : EXCHANGE ACK NOT CONFIRMED\n"
+                "NEXT      : QUERY EXISTING CLIENT ORDER ID\n"
+                "SAFETY    : POST REPEAT DISABLED · DUPLICATE ORDER BLOCKED\n"
+                "SLOT      : RESERVED UNTIL EXCHANGE STATE IS KNOWN"
+            )
+            try:
+                response = await self.real.get_order(trade.pair, client_order_id=trade.entry_client_order_id)
+            except BinanceRateLimitError as query_exc:
+                await self._notify_binance_cooldown(query_exc, source="REAL ORDER VERIFY", symbol=trade.pair)
+                return
+            except BinanceAPIError as query_exc:
+                if query_exc.code == -2013:
+                    trade.real_error = "Order belum ditemukan pada lookup pertama; status tetap UNKNOWN dan akan dicek ulang."
+                    await self._save_active_state()
+                    return
+                trade.real_error = (trade.real_error + " | lookup: " + str(query_exc))[:500]
+                await self._save_active_state()
+                return
+            except Exception as query_exc:
+                trade.real_error = (trade.real_error + " | lookup: " + str(query_exc))[:500]
                 await self._save_active_state()
                 return
 
+        trade.real_submit_ambiguous = False
         trade.entry_order_id = int(response["orderId"]) if response.get("orderId") is not None else trade.entry_order_id
         status = str(response.get("status") or "UNKNOWN").upper()
         executed = Decimal(str(response.get("executedQty") or "0"))
@@ -4425,6 +4902,7 @@ class TradingEngine:
                 return
         else:
             trade.real_state = "REAL_SUBMIT_UNKNOWN"
+            trade.real_submit_ambiguous = True
             trade.real_error = f"Status submit Binance tidak dikenal: {status}"
         await self._save_active_state()
         log.info(
@@ -4694,7 +5172,7 @@ class TradingEngine:
                             ban_until_epoch=BINANCE_COOLDOWN._until_epoch,
                         )
                         await self._save_active_state()
-                        log.warning("[REAL] %s LIMIT GTC dipertahankan setelah cooldown; auto-expiry dinonaktifkan untuk order ini.", trade.pair)
+                        log.info("[REAL] GTC preserved | pair=%s | expiry during REST cooldown; order remains on Binance until fill/reversal/cancel", trade.pair)
                         continue
                 await self._cancel_pending_trade(trade, "ORDER_EXPIRED_ONE_CANDLE")
 
@@ -4756,23 +5234,27 @@ class TradingEngine:
             # stable clientOrderId is not present. Reuse that same ID (never mint
             # a second one); if a first POST actually exists, Binance duplicate
             # detection plus the subsequent lookup prevents a second exposure.
-            if exc.code == -2013 and (
-                trade.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN"}
-                or trade.preserve_gtc_after_cooldown
-            ):
-                if now_utc() >= trade.expires_at:
-                    await self._finalize_trade(
-                        trade, "EXPIRED", None,
-                        "PRESERVED_GTC_NOT_FOUND_ON_BINANCE_AFTER_COOLDOWN"
-                        if trade.preserve_gtc_after_cooldown
-                        else "REAL_SUBMISSION_NOT_FOUND_AFTER_CANDLE_EXPIRY",
-                    )
+            if exc.code == -2013 and trade.real_submit_ambiguous:
+                # A missing lookup immediately after a transport/5xx ambiguity is
+                # not proof that the POST never arrived. Keep the slot UNKNOWN and
+                # retry only the GET lookup on later maintenance passes.
+                trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                trade.real_error = "ACK submit belum ditemukan pada lookup ini; status UNKNOWN tetap ditahan dan POST tidak diulang."
+                await self._save_active_state()
+                log.info("[REAL/RECON] %s clientOrderId belum terlihat; lanjut lookup GET berkala tanpa POST ulang.", trade.pair)
+                return
+            if exc.code == -2013 and trade.preserve_gtc_after_cooldown:
+                # This path is for an order that was previously acknowledged by
+                # Binance. Do not create a new order after its preserved GTC vanishes.
+                trade.entry_order_terminal = True
+                trade.preserve_gtc_after_cooldown = False
+                trade.real_state = "REAL_ORDER_NOT_FOUND"
+                trade.real_error = "Order GTC yang sebelumnya dikenal tidak ditemukan; posisi akan diverifikasi terpisah."
+                await self._save_active_state()
+                if trade.status == "FILLED":
+                    await self._reconcile_filled_real(trade)
                 else:
-                    await self._submit_real_limit(trade)
-                    if trade.status == "PENDING" and trade.real_state == "REAL_FILLED":
-                        await self._mark_filled(
-                            trade, trade.fill_price or trade.entry, "REAL_SUBMISSION_RECOVERED"
-                        )
+                    await self._finalize_trade(trade, "EXPIRED", None, "PRESERVED_GTC_NOT_FOUND_AFTER_COOLDOWN")
                 return
             if (now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown) or trade.real_state == "REAL_CANCEL_UNKNOWN":
                 reason = "ORDER_EXPIRED_ONE_CANDLE" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
@@ -4842,6 +5324,11 @@ class TradingEngine:
                 client_order_id=trade.entry_client_order_id,
             )
         except BinanceAPIError as exc:
+            if exc.code == -2013 and trade.real_submit_ambiguous:
+                trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                trade.real_error = "Order submit ambigu belum ditemukan; tetap UNKNOWN dan tidak dibuat ulang."
+                await self._save_active_state()
+                return
             if exc.code == -2013 and trade.preserve_gtc_after_cooldown:
                 trade.entry_order_terminal = True
                 trade.preserve_gtc_after_cooldown = False
@@ -4956,6 +5443,11 @@ class TradingEngine:
             if trade.real_enabled:
                 try:
                     if trade.status == "PENDING":
+                        if trade.real_state == "REAL_SUBMITTING":
+                            trade.real_submit_ambiguous = True
+                            trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                            trade.real_error = "Proses berhenti saat submit; status dipulihkan sebagai UNKNOWN dan hanya lookup clientOrderId."
+                            await self._save_active_state()
                         if trade.real_state == "REAL_PREPARED":
                             await self._submit_real_limit(trade)
                             if trade.status == "PENDING" and trade.real_state == "REAL_FILLED":
@@ -4968,30 +5460,78 @@ class TradingEngine:
                             )
                         except BinanceAPIError as exc:
                             if exc.code == -2013 and (
-                                trade.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN"}
-                                or trade.preserve_gtc_after_cooldown
+                                trade.real_submit_ambiguous
+                                or trade.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN"}
                             ):
-                                if now_utc() >= trade.expires_at:
+                                # A process may have died between POST and response.
+                                # Never infer "not submitted" from one missing lookup;
+                                # never POST again with a possibly-live clientOrderId.
+                                trade.real_submit_ambiguous = True
+                                trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                                trade.real_error = (
+                                    "Startup lookup belum menemukan clientOrderId; POST tidak diulang. "
+                                    "Order harus direkonsiliasi berkala atau diverifikasi manual di Binance."
+                                )
+                                await self._save_active_state()
+                                log.info(
+                                    "[REAL] startup submit remains UNKNOWN | pair=%s | clientOrderId=%s | lookup-only",
+                                    trade.pair, trade.entry_client_order_id,
+                                )
+                                continue
+                            if exc.code == -2013 and trade.preserve_gtc_after_cooldown:
+                                if trade.status == "FILLED":
+                                    trade.entry_order_terminal = True
+                                    trade.preserve_gtc_after_cooldown = False
+                                    trade.real_state = "REAL_ORDER_NOT_FOUND"
+                                    trade.real_error = "GTC tidak ditemukan; posisi terisi akan diverifikasi terpisah."
+                                    await self._save_active_state()
+                                else:
                                     await self._finalize_trade(
                                         trade, "EXPIRED", None,
-                                        "STARTUP_PRESERVED_GTC_NOT_FOUND_AFTER_COOLDOWN"
-                                        if trade.preserve_gtc_after_cooldown
-                                        else "STARTUP_REAL_SUBMISSION_NOT_FOUND_AFTER_EXPIRY",
+                                        "STARTUP_PRESERVED_GTC_NOT_FOUND_AFTER_COOLDOWN",
                                     )
-                                else:
-                                    await self._submit_real_limit(trade)
-                                    if trade.status == "PENDING" and trade.real_state == "REAL_FILLED":
-                                        await self._mark_filled(
-                                            trade, trade.fill_price or trade.entry,
-                                            "STARTUP_SUBMISSION_RECOVERED",
-                                        )
                                 continue
                             raise
                         status = str(order.get("status") or "UNKNOWN").upper()
-                        if status == "FILLED":
-                            await self._mark_filled(trade, self._order_fill_price(order, trade.entry), "STARTUP_RECONCILIATION")
-                        elif status in {"CANCELED", "EXPIRED", "REJECTED"}:
-                            await self._finalize_trade(trade, "EXPIRED" if status == "EXPIRED" else "CANCELED", None, f"STARTUP_{status}")
+                        executed = Decimal(str(order.get("executedQty") or "0"))
+                        trade.entry_order_status = status
+                        trade.entry_executed_qty = executed
+                        if order.get("orderId") is not None:
+                            trade.entry_order_id = int(order["orderId"])
+                        if status in {"FILLED", "PARTIALLY_FILLED"} and executed > 0:
+                            trade.real_submit_ambiguous = False
+                            trade.entry_order_terminal = status == "FILLED"
+                            await self._mark_filled(
+                                trade, self._order_fill_price(order, trade.entry),
+                                "STARTUP_RECONCILIATION" if status == "FILLED" else "STARTUP_PARTIAL_FILL_RECONCILIATION",
+                            )
+                            trade.real_state = "REAL_FILLED" if status == "FILLED" else "REAL_PARTIALLY_FILLED"
+                            await self._save_active_state()
+                        elif status == "NEW":
+                            trade.real_submit_ambiguous = False
+                            trade.entry_order_terminal = False
+                            trade.real_state = "REAL_PENDING"
+                            trade.real_error = None
+                            await self._save_active_state()
+                        elif status in {"CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}:
+                            trade.real_submit_ambiguous = False
+                            if executed > 0:
+                                trade.entry_order_terminal = True
+                                await self._mark_filled(
+                                    trade, self._order_fill_price(order, trade.entry),
+                                    "STARTUP_TERMINAL_PARTIAL_FILL_RECONCILIATION",
+                                )
+                            else:
+                                await self._finalize_trade(
+                                    trade, "EXPIRED" if status.startswith("EXPIRED") else "CANCELED",
+                                    None, f"STARTUP_{status}",
+                                )
+                        else:
+                            # Unknown exchange state is retained; do not free max slot.
+                            trade.real_submit_ambiguous = True
+                            trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                            trade.real_error = f"Startup order status belum dikenal: {status}"
+                            await self._save_active_state()
                     elif trade.status == "FILLED":
                         position = await self.real.get_position(trade.pair, trade.entry_side)
                         if position is None:
@@ -5001,7 +5541,9 @@ class TradingEngine:
                                 log.error("[RECOVERY] %s: %s", trade.pair, trade.real_error)
                 except BinanceRateLimitError as exc:
                     trade.real_error = str(exc)[:500]
-                    log.warning("[RECOVERY] Binance cooldown saat reconcile %s; hentikan batch recovery: %s", trade.pair, exc)
+                    self._was_in_binance_cooldown = True
+                    await self._notify_binance_cooldown(exc, source="STARTUP RECONCILIATION", symbol=trade.pair)
+                    log.info("[RECOVERY] reconciliation dijeda oleh rate governor | pair=%s", trade.pair)
                     break
                 except Exception as exc:
                     trade.real_error = str(exc)[:500]
@@ -5025,7 +5567,6 @@ class TradingEngine:
                     continue
 
                 if self._was_in_binance_cooldown:
-                    self._was_in_binance_cooldown = False
                     await self._sync_cooldown_marker_to_github()
                     self._last_universe_refresh = 0.0
                     if self.scan_enabled:
@@ -5033,11 +5574,9 @@ class TradingEngine:
                     now_mono = time.monotonic()
                     if now_mono - self._last_api_recovery_notice >= BINANCE_RECOVERY_NOTICE_INTERVAL_SECONDS:
                         self._last_api_recovery_notice = now_mono
-                        await self.reply(
-                            "🟢 Binance REST cooldown selesai. Bot melanjutkan rekonsiliasi order/posisi, "
-                            "antrean command, dan scanner dari candle closed terbaru."
-                        )
-                    log.info("[BINANCE] REST cooldown selesai; recovery queue dimulai.")
+                        await self._notify_binance_recovered()
+                    self._was_in_binance_cooldown = False
+                    log.info("[BINANCE] REST restored; recovery queue started.")
 
                 # Reconnect private stream after cooldown if it was unable to
                 # obtain a listenKey at startup. If an existing listenKey is
@@ -5070,12 +5609,13 @@ class TradingEngine:
                 if has_real_exposure and balance_age >= AUTOSTOP_BALANCE_REFRESH_SECONDS:
                     try:
                         await self.real.get_futures_balance()
-                    except BinanceRateLimitError:
-                        # _request() records the cooldown; cached equity + WebSocket
-                        # prices continue to be used until REST becomes available.
-                        pass
+                        await self._autostop_check(force=True)
+                    except BinanceRateLimitError as exc:
+                        # Cached equity + WebSocket prices continue while REST is held.
+                        self._was_in_binance_cooldown = True
+                        await self._notify_binance_cooldown(exc, source="AUTOSTOP / BALANCE")
                     except Exception as exc:
-                        log.warning("[AUTOSTOP] balance snapshot refresh gagal: %s", exc)
+                        log.info("[AUTOSTOP] balance snapshot refresh ditunda; guard tetap armed: %s", exc)
 
                 # Commands are FIFO and only one API-dependent command per pass. /real off
                 # remains immediate and can cancel a queued /real on.
@@ -5088,7 +5628,9 @@ class TradingEngine:
                         self._last_exchange_info_retry = time.monotonic()
                         try:
                             await self._universe()
-                        except BinanceRateLimitError:
+                        except BinanceRateLimitError as exc:
+                            self._was_in_binance_cooldown = True
+                            await self._notify_binance_cooldown(exc, source="UNIVERSE REFRESH")
                             await asyncio.sleep(2.0)
                             continue
                         except Exception as exc:
@@ -5101,14 +5643,18 @@ class TradingEngine:
                     if trade.real_enabled and trade.status == "PENDING":
                         try:
                             await self._reconcile_pending_real(trade)
-                        except BinanceRateLimitError:
+                        except BinanceRateLimitError as exc:
+                            self._was_in_binance_cooldown = True
+                            await self._notify_binance_cooldown(exc, source="ORDER RECONCILIATION", symbol=trade.pair)
                             break
                         except Exception as exc:
                             log.warning("[REAL] pending sync %s gagal: %s", trade.pair, exc)
                     elif trade.real_enabled and trade.status == "FILLED":
                         try:
                             await self._reconcile_filled_real(trade)
-                        except BinanceRateLimitError:
+                        except BinanceRateLimitError as exc:
+                            self._was_in_binance_cooldown = True
+                            await self._notify_binance_cooldown(exc, source="POSITION RECONCILIATION", symbol=trade.pair)
                             break
                         except Exception as exc:
                             log.warning("[REAL] position sync %s gagal: %s", trade.pair, exc)
@@ -5121,7 +5667,8 @@ class TradingEngine:
                 break
             except BinanceRateLimitError as exc:
                 self._was_in_binance_cooldown = True
-                log.warning("[MAINTENANCE] paused by Binance cooldown: %s", exc)
+                await self._notify_binance_cooldown(exc, source="MAINTENANCE")
+                log.info("[MAINTENANCE] REST maintenance paused by shared rate governor.")
                 await asyncio.sleep(3.0)
             except Exception:
                 log.exception("[MAINTENANCE] loop error")
@@ -5212,21 +5759,48 @@ class TradingEngine:
                 )
 
     async def _retry_signals(self) -> None:
-        if not self._signal_retries:
+        if not self._signal_retries or self._binance_cooldown_remaining() > 0:
             return
+        now = now_utc()
         for key, item in list(self._signal_retries.items()):
             if int(time.time() * 1000) >= int(item["expiry_ms"]):
                 self._signal_retries.pop(key, None)
                 self.last_processed_candles[key] = int(item["signal"]["signal_close_time_ms"])
-                await self._record_event("SIGNAL_RETRY_EXPIRED", None, pair=item["signal"].get("symbol"), direction=item["signal"].get("direction"), timeframe=item["signal"].get("timeframe"))
+                await self._record_event(
+                    "SIGNAL_RETRY_EXPIRED", None,
+                    pair=item["signal"].get("symbol"),
+                    direction=item["signal"].get("direction"),
+                    timeframe=item["signal"].get("timeframe"),
+                    attempts=int(item.get("attempts") or 0),
+                )
+                continue
+            retry_at = parse_iso(item.get("next_retry_at")) if item.get("next_retry_at") else None
+            if retry_at is not None and now < retry_at:
                 continue
             try:
-                await self._handle_signal(item["signal"], int(item["expiry_ms"]))
+                outcome = await self._handle_signal(item["signal"], int(item["expiry_ms"]))
                 self.last_processed_candles[key] = int(item["signal"]["signal_close_time_ms"])
                 self._signal_retries.pop(key, None)
                 await self._save_runtime_settings()
+                log.info("[SIGNAL RETRY] %s selesai | outcome=%s", key, outcome)
+            except BinanceRateLimitError as exc:
+                self._was_in_binance_cooldown = True
+                await self._notify_binance_cooldown(exc, source="SIGNAL RETRY", symbol=item["signal"].get("symbol"))
+                break
             except Exception as exc:
-                log.warning("[SIGNAL] retry %s belum berhasil: %s", key, exc)
+                attempts = int(item.get("attempts") or 0) + 1
+                delay = min(120, max(5, 5 * (2 ** min(attempts - 1, 5))))
+                item["attempts"] = attempts
+                item["next_retry_at"] = iso_utc(now_utc() + timedelta(seconds=delay))
+                item["last_error"] = str(exc)[:500]
+                log.info("[SIGNAL RETRY] %s ditunda %ss | attempt=%s | %s", key, delay, attempts, exc)
+                await self._record_event(
+                    "SIGNAL_RETRY_DEFERRED", None,
+                    pair=item["signal"].get("symbol"),
+                    direction=item["signal"].get("direction"),
+                    timeframe=item["signal"].get("timeframe"),
+                    attempts=attempts, retry_in_seconds=delay, error=str(exc)[:300],
+                )
 
     # ----------------------------- WebSocket ------------------------------
     def _current_price(self, symbol: str) -> Decimal | None:
@@ -5681,9 +6255,13 @@ class TradingEngine:
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
                     + (
-                        "Validity: GTC dipertahankan sampai fill/reversal/manual cancel\n"
-                        if t.real_enabled and t.preserve_gtc_after_cooldown
-                        else f"Expires: {format_wib(t.expires_at)}\n"
+                        "EXCHANGE ACK UNKNOWN: verifikasi clientOrderId; POST tidak akan dikirim ulang\n"
+                        if t.real_enabled and t.real_submit_ambiguous
+                        else (
+                            "Validity: GTC dipertahankan sampai fill/reversal/manual cancel\n"
+                            if t.real_enabled and t.preserve_gtc_after_cooldown
+                            else f"Expires: {format_wib(t.expires_at)}\n"
+                        )
                     )
                     + f"Mode: {'REAL' if t.real_enabled else 'PAPER'}"
                     + (f"\nBinance: {t.entry_order_status} • {t.real_state}" if t.real_enabled else "")
@@ -5779,7 +6357,11 @@ class TradingEngine:
     def _autostop_status_text(self) -> str:
         source = self._autostop_source or self._autostop_source_name()
         floor = self._autostop_floor()
-        state = "TRIGGERED" if self._autostop_triggered else ("ARMED" if self.autostop_percent is not None else "OFF")
+        state = (
+            "TRIGGERED" if self._autostop_triggered else
+            ("ARMED · DATA HOLD" if self.autostop_percent is not None and self._autostop_data_hold else
+             ("ARMED" if self.autostop_percent is not None else "OFF"))
+        )
         lines = [
             "╔══ ACCOUNT GUARD / AUTOSTOP ══╗",
             f"STATE   : {state}",
@@ -5788,7 +6370,7 @@ class TradingEngine:
             f"PEAK    : {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '-'} USDT",
             f"EQUITY  : {fmt_num(self._equity_last, 4) if self._equity_last is not None else '-'} USDT",
             f"FLOOR   : {fmt_num(floor, 4) if floor is not None else '-'} USDT",
-            f"SCANNER : {'LOCKED OFF' if self._autostop_triggered else ('ON' if self.scan_enabled else 'OFF')}",
+            f"SCANNER : {'LOCKED OFF' if self._autostop_triggered else ('HOLD · EQUITY DATA' if self._autostop_data_hold and self.autostop_percent is not None else ('ON' if self.scan_enabled else 'OFF'))}",
             "ACTION  : pause new scans; keep existing orders/positions managed",
             "",
             "Commands: /autostop 10 | /autostop off | /autostop reset",
@@ -5804,10 +6386,40 @@ class TradingEngine:
         self._autostop_last_check = now_mono
         equity = self._autostop_equity()
         if equity is None or not equity.is_finite() or equity <= 0:
+            self._autostop_data_hold = True
             if now_mono - self._autostop_missing_price_notice_at >= 300.0:
                 self._autostop_missing_price_notice_at = now_mono
-                log.warning("[AUTOSTOP] equity snapshot belum valid; guard tetap armed dan menunggu balance/mark price fresh.")
+                source = self._autostop_source_name()
+                if source == "REAL" and self.real.cached_usdt_balance() is None:
+                    detail = "wallet balance belum tersedia dari REST atau ACCOUNT_UPDATE"
+                else:
+                    missing = [
+                        t.pair for t in self.active_trades.values()
+                        if t.status == "FILLED" and t.real_enabled == (source == "REAL")
+                        and (self.prices.get(t.pair) is None or not self.prices[t.pair].live)
+                    ]
+                    detail = "mark price belum fresh: " + ", ".join(missing[:6]) if missing else "snapshot equity belum lengkap"
+                log.info("[AUTOSTOP] snapshot WAIT; guard remains ARMED | source=%s | %s", source, detail)
+                await self.reply(
+                    "╔══ ACCOUNT GUARD / SNAPSHOT ══╗\n"
+                    "STATE   : ARMED · WAITING DATA\n"
+                    f"SOURCE  : {source}\n"
+                    f"DETAIL  : {detail}\n"
+                    "ACTION  : tidak mengubah peak/floor dan tidak membuka entry baru dari guard\n"
+                    "GUARD   : tetap aktif; evaluasi dilanjutkan otomatis ketika data fresh"
+                )
             return
+
+        if self._autostop_data_hold:
+            self._autostop_data_hold = False
+            self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+            await self.reply(
+                "╔══ ACCOUNT GUARD / DATA RESTORED ══╗\n"
+                "STATE   : ARMED · EQUITY FRESH\n"
+                "ACTION  : pemantauan drawdown aktif kembali\n"
+                f"SCANNER : {'RESUME QUEUED' if self._scan_trigger_now else 'UNCHANGED'}"
+            )
+            log.info("[AUTOSTOP] equity snapshot fresh; entry scanner hold released.")
 
         current_source = self._autostop_source_name()
         source_changed = self._autostop_source is not None and self._autostop_source != current_source
@@ -5878,6 +6490,7 @@ class TradingEngine:
         arg = parts[1].lower()
         if arg == "off":
             self.autostop_percent = None
+            self._autostop_data_hold = False
             self._autostop_triggered = False
             self._equity_peak = None
             self._equity_last = None
@@ -5895,6 +6508,7 @@ class TradingEngine:
             self._equity_peak = equity if equity is not None and equity > 0 else None
             self._equity_last = equity if equity is not None and equity > 0 else None
             self._autostop_source = self._autostop_source_name() if equity is not None else None
+            self._autostop_data_hold = bool(equity is None or equity <= 0)
             self._autostop_triggered = False
             self._autostop_last_persist = 0.0
             self._autostop_dirty = False
@@ -5921,6 +6535,7 @@ class TradingEngine:
             self._equity_peak = equity if equity is not None and equity > 0 else None
             self._equity_last = equity if equity is not None and equity > 0 else None
             self._autostop_source = self._autostop_source_name() if equity is not None else None
+            self._autostop_data_hold = bool(self._equity_peak is None)
         self._autostop_triggered = False
         self._autostop_last_persist = 0.0
         self._autostop_dirty = False
@@ -6140,7 +6755,7 @@ class TradingEngine:
                     "Order LIMIT REAL yang sudah berada di Binance tidak dibatalkan hanya karena cooldown; fill tetap dipantau melalui User Data WebSocket bila stream tersambung."
                 )
                 return
-            log.warning("Command %s membutuhkan Binance REST tetapi ditahan cooldown: %s", command, exc)
+            log.info("[COMMAND] %s ditahan rate governor; tidak hilang dan dapat dicoba ulang setelah cooldown | %s", command, exc)
             await self.reply(
                 f"⏳ {command} belum dijalankan karena Binance REST cooldown "
                 f"({self._binance_cooldown_remaining():.0f}s). Perintah ini bersifat lokal/read-only dan dapat diulang setelah API pulih."
