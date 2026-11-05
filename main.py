@@ -68,6 +68,15 @@ if not isinstance(getattr(volumatic, "TIMEFRAME_MS", None), dict) or set(volumat
     raise RuntimeError("strategy module mismatch: TIMEFRAME_MS H4/D1 tidak tersedia. Pastikan try.py dan STRATEGY_FILE satu versi.")
 if not isinstance(getattr(volumatic, "TIMEFRAME_INTERVALS", None), dict) or set(volumatic.TIMEFRAME_INTERVALS) != {"H4", "D1"}:
     raise RuntimeError("strategy module mismatch: TIMEFRAME_INTERVALS H4/D1 tidak tersedia.")
+if (
+    not callable(getattr(volumatic, "normalize_trend_length", None))
+    or not hasattr(volumatic, "DEFAULT_TREND_LENGTH")
+    or int(getattr(volumatic, "DEFAULT_TREND_LENGTH", 0)) != 100
+):
+    raise RuntimeError(
+        "strategy module mismatch: API /length tidak tersedia atau default Trend Length bukan 100. "
+        "Sinkronkan main.py dan strategy.py dengan versi Volumatic adjustable length."
+    )
 
 # ---------------------------------------------------------------------------
 # Environment and runtime configuration
@@ -149,8 +158,8 @@ SCAN_MAX_PAIRS_PER_CYCLE = 50
 SCAN_PAIR_DELAY_SECONDS = float(os.getenv("SCAN_PAIR_DELAY_SECONDS", "0.15") or "0.15")
 SCAN_POLL_SECONDS = 2.0
 MAINTENANCE_POLL_SECONDS = 2.0
-# 499 candles use the lighter Binance kline weight tier while remaining ample
-# for EMA(40)/ATR(200) warm-up on both H4 and D1.
+# Base request remains 499 candles. _kline_history_limit() expands history only
+# when /length is raised, capped below Binance USD-M per-request maximum.
 KLINE_HISTORY = max(400, min(499, int(os.getenv("VOLUMATIC_KLINE_HISTORY", "499") or "499")))
 EXCLUDED_SYMBOLS = {
     x.strip().upper() for x in (os.getenv("EXCLUDED_SYMBOLS", "BTCUSDT,ETHUSDT") or "").split(",") if x.strip()
@@ -513,6 +522,7 @@ class Trade:
     pair: str
     direction: str                    # LONG / SHORT
     timeframe: str
+    trend_length: int
     signal: str                       # BLUE / RED
     signal_time: datetime
     bubble_price: Decimal
@@ -573,7 +583,8 @@ class Trade:
         return {
             "trade_id": self.trade_id, "session_id": self.session_id,
             "pair": self.pair, "direction": self.direction,
-            "timeframe": self.timeframe, "signal": self.signal,
+            "timeframe": self.timeframe, "trend_length": self.trend_length,
+            "signal": self.signal,
             "signal_time": iso_utc(self.signal_time),
             "bubble_price": decimal_to_str(self.bubble_price),
             "signal_atr": decimal_to_str(self.signal_atr),
@@ -625,12 +636,17 @@ class Trade:
             except (InvalidOperation, ValueError):
                 return default
         signal_time = parse_iso(row.get("signal_time") or row.get("created_at")) or now_utc()
+        try:
+            saved_trend_length = volumatic.normalize_trend_length(row.get("trend_length", volumatic.DEFAULT_TREND_LENGTH))
+        except (TypeError, ValueError):
+            saved_trend_length = volumatic.DEFAULT_TREND_LENGTH
         return cls(
             trade_id=str(row.get("trade_id") or generate_trade_id(str(row.get("pair") or "UNKNOWN"))),
             session_id=str(row.get("session_id") or "RECOVERED"),
             pair=normalize_symbol(str(row.get("pair") or "")),
             direction=str(row.get("direction") or "LONG").upper(),
             timeframe=str(row.get("timeframe") or "H4").upper(),
+            trend_length=saved_trend_length,
             signal=str(row.get("signal") or ("BLUE" if str(row.get("direction")).upper() == "LONG" else "RED")).upper(),
             signal_time=signal_time,
             bubble_price=dec("bubble_price", dec("entry", Decimal("0"))) or Decimal("0"),
@@ -1361,7 +1377,7 @@ class BinanceREST:
         symbol = normalize_symbol(symbol)
         api_interval = self._binance_interval(interval)
         span_ms = int(interval_ms or self._interval_ms(api_interval))
-        count = max(3, min(499, int(count)))
+        count = max(3, min(1500, int(count)))
         now_ms = int(time.time() * 1000)
         payload = await self._get("/fapi/v1/klines", {
             "symbol": symbol, "interval": api_interval,
@@ -3445,6 +3461,7 @@ class TradingEngine:
         self.min_margin_enabled = False
         self.max_active_trades = MAX_ACTIVE_TRADES
         self.timeframe = "H4"
+        self.trend_length = volumatic.DEFAULT_TREND_LENGTH
         self.ema_filter_length: int | None = volumatic.DEFAULT_EMA_FILTER_LENGTH
         self.scan_enabled = False
 
@@ -3599,6 +3616,12 @@ class TradingEngine:
             payload = json.loads(raw.decode("utf-8"))
             tf = str(payload.get("timeframe") or "H4").upper()
             self.timeframe = tf if tf in volumatic.TIMEFRAME_MS else "H4"
+            raw_trend_length = payload.get("trend_length", volumatic.DEFAULT_TREND_LENGTH)
+            try:
+                self.trend_length = volumatic.normalize_trend_length(raw_trend_length)
+            except ValueError:
+                self.trend_length = volumatic.DEFAULT_TREND_LENGTH
+                log.warning("trend_length tidak valid; default %s dipakai.", self.trend_length)
             raw_ema_filter = payload.get("ema_filter_length", volumatic.DEFAULT_EMA_FILTER_LENGTH)
             try:
                 self.ema_filter_length = volumatic.normalize_ema_filter_length(raw_ema_filter)
@@ -3686,6 +3709,7 @@ class TradingEngine:
             payload = {
                 "strategy": volumatic.STRATEGY_NAME,
                 "timeframe": self.timeframe,
+                "trend_length": self.trend_length,
                 "ema_filter_length": self.ema_filter_length,
                 # Deliberately do not persist scan_enabled. Scanner requires an
                 # explicit `/scan on` in every fresh engine session.
@@ -4118,6 +4142,7 @@ class TradingEngine:
         self.scan_enabled = False
         self._scan_trigger_now = False
         self.timeframe = "H4"
+        self.trend_length = volumatic.DEFAULT_TREND_LENGTH
         self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
         self.margin_usdt = DEFAULT_MARGIN_USDT
         self.leverage = DEFAULT_LEVERAGE
@@ -4137,6 +4162,7 @@ class TradingEngine:
         self._scan_resume_cursor = 0
         self._scan_resume_boundary_ms = 0
         self._scan_resume_timeframe = "H4"
+        self._scan_resume_trend_length = self.trend_length
         self._scan_interrupted_by_cooldown = False
         self._was_in_binance_cooldown = False
         self._last_scan_boundary_ms = 0
@@ -4170,14 +4196,16 @@ class TradingEngine:
         self._maintenance_task = asyncio.create_task(self._maintenance_loop(), name="volumatic-maintenance")
         self._scan_task = asyncio.create_task(self._scan_loop(), name="volumatic-scanner")
         log.info(
-            "[START] FRESH Volumatic session | scanner=OFF | timeframe=H4 | "
+            "[START] FRESH Volumatic session | scanner=OFF | timeframe=H4 | length=%s | "
             "EMA=%s | no persisted engine state imported",
+            self.trend_length,
             f"EMA{self.ema_filter_length}" if self.ema_filter_length is not None else "OFF",
         )
         await self.reply(
             "🟢 VOLUMATIC TREND / FRESH SESSION\n\n"
             "Runtime state : CLEAN (tidak memuat data sesi sebelumnya)\n"
             "Timeframe     : H4 (default)\n"
+            f"Trend length  : {self.trend_length} (default {volumatic.DEFAULT_TREND_LENGTH})\n"
             f"EMA filter    : {'EMA' + str(self.ema_filter_length) if self.ema_filter_length is not None else 'OFF'}\n"
             f"Max positions : {self.max_active_trades}\n"
             "Scanner       : OFF — menunggu /scan on\n"
@@ -4285,15 +4313,19 @@ class TradingEngine:
         return sorted(result)
 
     async def _send_scan_batch_report(
-        self, *, timeframe: str, ema_length: int | None, batch_number: int,
+        self, *, timeframe: str, trend_length: int, ema_length: int | None, batch_number: int,
         batch_start: int, batch_end: int, universe_total: int,
         stats: dict[str, Any], elapsed: float, interrupted: bool = False,
-        pass_start: int | None = None,
+        configuration_changed: bool = False, pass_start: int | None = None,
     ) -> None:
         """Telegram telemetry for every completed or interrupted logical batch."""
         ema = f"EMA{ema_length}" if ema_length is not None else "OFF"
         cooldown = self._binance_cooldown_remaining()
-        state = "REST COOLDOWN / PAUSED" if interrupted or cooldown > 0 else "BATCH COMPLETE"
+        state = (
+            "REST COOLDOWN / PAUSED" if interrupted or cooldown > 0 else
+            "CONFIG CHANGED / RESTART" if configuration_changed else
+            "BATCH COMPLETE"
+        )
         processed = int(stats.get("processed", 0))
         requested = int(stats.get("requested", 0))
         pass_start = batch_start if pass_start is None else pass_start
@@ -4308,7 +4340,7 @@ class TradingEngine:
         unknown = int(stats.get("unknown", 0))
         lines = [
             "╔══ VOL / SCAN BATCH REPORT ══╗",
-            f"ENGINE    : VOLUMATIC TREND · {timeframe} · {ema} · VISUAL OFFSET B",
+            f"ENGINE    : VOLUMATIC TREND · {timeframe} · LEN{trend_length} · {ema} · VISUAL OFFSET B",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
             f"STATE     : {state}",
@@ -4333,6 +4365,8 @@ class TradingEngine:
             lines.append(f"GOVERNOR  : REST HOLD · {self._short_duration(cooldown)} remaining")
             lines.append(f"RESUME    : coin #{self._scan_resume_cursor + 1:04d} setelah cooldown")
             lines.append("ORDERS    : existing GTC tetap aktif · User Data WS tetap dipantau")
+        elif configuration_changed:
+            lines.append("NEXT      : mengulang siklus dengan parameter terbaru dari coin #0001")
         elif batch_end < universe_total:
             next_start = batch_end + 1
             next_end = min(universe_total, next_start + SCAN_MAX_PAIRS_PER_CYCLE - 1)
@@ -4389,6 +4423,7 @@ class TradingEngine:
             return
         async with self._scan_cycle_lock:
             timeframe = self.timeframe
+            trend_length = self.trend_length
             ema_filter_length = self.ema_filter_length
             interval_ms = volumatic.TIMEFRAME_MS[timeframe]
             universe = await self._universe()
@@ -4401,10 +4436,12 @@ class TradingEngine:
             if (
                 self._scan_resume_boundary_ms != boundary_ms
                 or self._scan_resume_timeframe != timeframe
+                or getattr(self, "_scan_resume_trend_length", trend_length) != trend_length
                 or self._scan_resume_cursor >= len(universe)
             ):
                 self._scan_resume_boundary_ms = boundary_ms
                 self._scan_resume_timeframe = timeframe
+                self._scan_resume_trend_length = trend_length
                 self._scan_resume_cursor = 0
             if not universe:
                 await self.reply(
@@ -4415,8 +4452,8 @@ class TradingEngine:
                 return
 
             log.info(
-                "[SCAN] cycle start | tf=%s | ema=%s | signal_mode=VISUAL_OFFSET_INTRABAR_B | universe=%s | batch_size=%s | cursor=%s",
-                timeframe, f"EMA{ema_filter_length}" if ema_filter_length is not None else "OFF",
+                "[SCAN] cycle start | tf=%s | length=%s | ema=%s | signal_mode=VISUAL_OFFSET_INTRABAR_B | universe=%s | batch_size=%s | cursor=%s",
+                timeframe, trend_length, f"EMA{ema_filter_length}" if ema_filter_length is not None else "OFF",
                 len(universe), SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
             )
             await self._expire_due_pending()
@@ -4427,8 +4464,8 @@ class TradingEngine:
             while offset < len(universe):
                 if not self._running or not self.scan_enabled:
                     break
-                if self.timeframe != timeframe:
-                    log.info("[SCAN] timeframe changed mid-cycle; restart next cycle.")
+                if self.timeframe != timeframe or self.trend_length != trend_length:
+                    log.info("[SCAN] timeframe/trend length changed mid-cycle; restart next cycle.")
                     self._scan_resume_cursor = 0
                     self._scan_resume_boundary_ms = 0
                     break
@@ -4449,15 +4486,20 @@ class TradingEngine:
                     "errors": 0, "details": [],
                 }
                 interrupted = False
+                configuration_changed = False
                 log.info(
-                    "[SCAN] batch start | batch=%02d | logical_coins=%04d-%04d/%04d | pass_from=%04d | tf=%s | ema=%s",
+                    "[SCAN] batch start | batch=%02d | logical_coins=%04d-%04d/%04d | pass_from=%04d | tf=%s | len=%s | ema=%s",
                     batch_number, batch_start, batch_end, len(universe), pass_start,
-                    timeframe, ema_filter_length or "OFF",
+                    timeframe, trend_length, ema_filter_length or "OFF",
                 )
 
                 for local_index, symbol in enumerate(batch):
                     absolute_index = offset + local_index
-                    if self.timeframe != timeframe:
+                    if (self.timeframe != timeframe or self.trend_length != trend_length
+                            or self.ema_filter_length != ema_filter_length):
+                        configuration_changed = True
+                        self._scan_resume_cursor = 0
+                        self._scan_resume_boundary_ms = 0
                         break
                     if self._binance_cooldown_remaining() > 0:
                         self._scan_interrupted_by_cooldown = True
@@ -4470,9 +4512,17 @@ class TradingEngine:
                     try:
                         api_interval = volumatic.TIMEFRAME_INTERVALS[timeframe]
                         candles = await self.rest.get_klines_with_forming(
-                            symbol, api_interval, KLINE_HISTORY, interval_ms
+                            symbol, api_interval, self._kline_history_limit(trend_length), interval_ms
                         )
-                        if candles is None or len(candles) < max(volumatic.ATR_LENGTH + 10, volumatic.TREND_LENGTH + 10):
+                        # Settings may change while the REST call is in flight.
+                        # Do not evaluate this symbol with a stale cycle snapshot.
+                        if (self.timeframe != timeframe or self.trend_length != trend_length
+                                or self.ema_filter_length != ema_filter_length):
+                            configuration_changed = True
+                            self._scan_resume_cursor = 0
+                            self._scan_resume_boundary_ms = 0
+                            break
+                        if candles is None or len(candles) < max(volumatic.ATR_LENGTH + 10, trend_length + 10):
                             stats["warmup"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
@@ -4501,7 +4551,8 @@ class TradingEngine:
                             continue
 
                         self._cache_live_signal_context(
-                            symbol, timeframe, candles, ema_filter_length=ema_filter_length
+                            symbol, timeframe, candles, trend_length=trend_length,
+                            ema_filter_length=ema_filter_length
                         )
                         context_key = f"{timeframe}:{symbol}"
                         live_context = self._live_signal_candles.get(context_key)
@@ -4560,7 +4611,7 @@ class TradingEngine:
                             ema_text = "EMA OFF" if ema_len is None else f"EMA{ema_len}={ema_val if ema_val is not None else 'N/A'}"
                             closed_old = bool(signal.get("_closed_opposite"))
                             close_note = f"CLOSE {signal.get('_closed_direction', 'OPPOSITE')} MARKET → " if closed_old else ""
-                            trace = f"#{absolute_index + 1:04d} {symbol} {bubble}/{direction} VISUAL-CLOSE={close_price} · {ema_text} · {close_note}{outcome}"
+                            trace = f"#{absolute_index + 1:04d} {symbol} {bubble}/{direction} LEN{trend_length} VISUAL-CLOSE={close_price} · {ema_text} · {close_note}{outcome}"
                             stats["details"].append(trace[:190])
 
                             self.last_processed_candles[key] = entry_open_ms
@@ -4592,15 +4643,18 @@ class TradingEngine:
 
                 release_memory()
                 await self._send_scan_batch_report(
-                    timeframe=timeframe, ema_length=ema_filter_length,
+                    timeframe=timeframe, trend_length=trend_length, ema_length=ema_filter_length,
                     batch_number=batch_number, batch_start=batch_start, batch_end=batch_end,
                     universe_total=len(universe), stats=stats,
                     elapsed=time.monotonic() - batch_started, interrupted=interrupted,
-                    pass_start=pass_start,
+                    configuration_changed=configuration_changed, pass_start=pass_start,
                 )
                 await self._save_runtime_settings()
                 await self._save_active_state()
 
+                if configuration_changed:
+                    self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+                    break
                 if interrupted or self._binance_cooldown_remaining() > 0 or self._scan_interrupted_by_cooldown:
                     self._scan_trigger_now = True
                     break
@@ -4867,6 +4921,7 @@ class TradingEngine:
             trade = Trade(
                 trade_id=generate_trade_id(pair), session_id=self.session_id, pair=pair,
                 direction=direction, timeframe=str(signal["timeframe"]),
+                trend_length=volumatic.normalize_trend_length(signal.get("trend_length", self.trend_length)),
                 signal=str(signal["signal"]), signal_time=signal_close,
                 bubble_price=bubble_price, signal_atr=atr_value, reference_sl=reference_value,
                 entry=limit_price, expires_at=expiry_dt, signal_close_price=signal_close_price,
@@ -4907,6 +4962,7 @@ class TradingEngine:
             await self._record_event(
                 "LIMIT_SUBMITTED", trade, order_type="LIMIT",
                 signal_mode=signal.get("signal_mode", "VISUAL_OFFSET_INTRABAR_B"),
+                trend_length=trade.trend_length,
                 bubble_visual_time_ms=signal.get("bubble_visual_time_ms"),
                 visual_candle_close_time_ms=signal.get("visual_candle_close_time_ms"),
                 visual_candle_close_price=signal.get("visual_candle_close_price", signal.get("close_price")),
@@ -4940,7 +4996,7 @@ class TradingEngine:
             signal["_closed_direction"] = closed_direction
             await self.reply(
                 f"{'🟢' if direction == 'LONG' else '🔴'} VOLUMATIC {direction} • {pair}\n\n"
-                f"Timeframe: {trade.timeframe}\nSignal: {trade.signal} BUBBLE\n"
+                f"Timeframe: {trade.timeframe} • Volumatic Length: {trade.trend_length}\nSignal: {trade.signal} BUBBLE\n"
                 f"Bubble line (EMA1): {fmt_price(trade.bubble_price)}\n"
                 f"VISUAL bubble candle close: {fmt_price(trade.signal_close_price or trade.entry)}\n"
                 f"Bubble candle close time: {format_wib(signal_close)}\n"
@@ -5923,16 +5979,32 @@ class TradingEngine:
                 log.exception("[MAINTENANCE] loop error")
                 await asyncio.sleep(3)
 
+    def _kline_history_limit(self, trend_length: int | None = None) -> int:
+        """Return enough closed history for the selected trend EMA and ATR warm-up.
+
+        The default 100-length keeps the existing 499-row request. Longer lengths
+        expand history to roughly four EMA lengths, capped at 1,500 Binance rows.
+        """
+        length = volumatic.normalize_trend_length(
+            self.trend_length if trend_length is None else trend_length
+        )
+        needed = max(KLINE_HISTORY, volumatic.ATR_LENGTH + 10, length * 4 + 10)
+        return min(1500, int(needed))
+
     def _cache_live_signal_context(
         self, symbol: str, timeframe: str, candles: np.ndarray,
-        *, ema_filter_length: int | None = None,
+        *, trend_length: int | None = None, ema_filter_length: int | None = None,
     ) -> None:
         """Precompute a small context once; WebSocket ticks then use scalar math."""
         key = f"{str(timeframe).upper()}:{normalize_symbol(symbol)}"
         if not isinstance(candles, np.ndarray) or candles.dtype.names is None or not candles.size:
             return
+        selected_trend_length = volumatic.normalize_trend_length(
+            self.trend_length if trend_length is None else trend_length
+        )
         context = volumatic.prepare_live_visual_context(
             candles, symbol=symbol, timeframe=timeframe,
+            trend_length=selected_trend_length,
             interval_ms=volumatic.TIMEFRAME_MS[str(timeframe).upper()],
             ema_filter_length=ema_filter_length,
         )
@@ -5947,6 +6019,7 @@ class TradingEngine:
             and int(previous.get("entry_candle_open_time_ms") or 0)
                 == int(context.get("entry_candle_open_time_ms") or 0)
             and previous.get("ema_filter_length") == context.get("ema_filter_length")
+            and previous.get("trend_length") == context.get("trend_length")
         )
         # A repeated scanner refresh inside the same active candle must not
         # clear the per-candle bubble latch; otherwise a repaint can submit the
@@ -5966,6 +6039,7 @@ class TradingEngine:
         without repeatedly polling REST.
         """
         by_key: dict[str, Trade] = {}
+        trend_length = self.trend_length
         ema_filter_length = self.ema_filter_length
         for trade in self.active_trades.values():
             if trade.status in {"PENDING", "FILLED"}:
@@ -5987,9 +6061,10 @@ class TradingEngine:
                     continue
             try:
                 candles = await self.rest.get_klines_with_forming(
-                    seed_trade.pair, "4h" if tf == "H4" else "1d", KLINE_HISTORY, span
+                    seed_trade.pair, "4h" if tf == "H4" else "1d",
+                    self._kline_history_limit(trend_length), span
                 )
-                if candles is None or len(candles) < volumatic.ATR_LENGTH + 10:
+                if candles is None or len(candles) < max(volumatic.ATR_LENGTH + 10, trend_length + 10):
                     continue
                 live_open = int(candles["t"][-1])
                 live_close = live_open + span
@@ -5997,7 +6072,8 @@ class TradingEngine:
                     continue
 
                 self._cache_live_signal_context(
-                    seed_trade.pair, tf, candles, ema_filter_length=ema_filter_length
+                    seed_trade.pair, tf, candles, trend_length=trend_length,
+                    ema_filter_length=ema_filter_length
                 )
                 signal = volumatic.evaluate_live_visual_context(
                     self._live_signal_candles.get(key), float(candles["c"][-1]), now_ms=now_ms
@@ -6131,8 +6207,11 @@ class TradingEngine:
             if now_mono - self._live_signal_last_eval.get(key, 0.0) < 0.15:
                 continue
             self._live_signal_last_eval[key] = now_mono
-            if context.get("ema_filter_length") != self.ema_filter_length:
-                # A runtime /EMA change invalidates the old filter snapshot.
+            if (
+                context.get("ema_filter_length") != self.ema_filter_length
+                or int(context.get("trend_length") or volumatic.DEFAULT_TREND_LENGTH) != self.trend_length
+            ):
+                # Runtime /EMA or /length change invalidates the old indicator snapshot.
                 # A fresh strategy context will be built on the next scan/bar.
                 continue
             signal = volumatic.evaluate_live_visual_context(context, px, now_ms=event_ms)
@@ -6350,6 +6429,55 @@ class TradingEngine:
             await self.reply("🟡 REAL OFF untuk entry baru. Pending/posisi REAL yang sudah ada tetap direkonsiliasi dan dikelola sampai selesai.")
         else:
             await self.reply(f"REAL: {'ON' if self.real_mode else 'OFF'}\nGunakan /real on atau /real off.")
+
+    async def _handle_length(self, text: str) -> None:
+        parts = str(text or "").split()
+        if len(parts) == 1:
+            await self.reply(
+                f"VOLUMATIC TREND LENGTH: {self.trend_length}\n"
+                f"Default fresh session: {volumatic.DEFAULT_TREND_LENGTH}\n"
+                f"Range: {volumatic.MIN_TREND_LENGTH}–{volumatic.MAX_TREND_LENGTH}\n\n"
+                "Gunakan /length 100 atau /length <angka>.\n"
+                "Length berlaku untuk EMA-SWMA dan EMA close Volumatic Trend; ATR tetap 200.\n"
+                "Perubahan berlaku pada sinyal baru dan scanner akan membangun ulang konteks candle aktif."
+            )
+            return
+        if len(parts) != 2:
+            await self.reply(f"Gunakan /length <angka> (1–{volumatic.MAX_TREND_LENGTH}).")
+            return
+        try:
+            selected = volumatic.normalize_trend_length(parts[1])
+        except ValueError as exc:
+            await self.reply(f"❌ {exc}")
+            return
+        old = self.trend_length
+        if selected == old:
+            await self.reply(f"Trend length sudah {selected}.")
+            return
+
+        self.trend_length = selected
+        # Invalidate cached contexts and restart scanner cursor so every symbol
+        # in the next pass is evaluated with the same new indicator length.
+        self._live_signal_candles.clear()
+        self._live_signal_last_eval.clear()
+        self._live_signal_seen.clear()
+        self.last_processed_candles.clear()
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_resume_trend_length = selected
+        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+        await self._save_runtime_settings()
+        await self.reply(
+            f"✅ VOLUMATIC LENGTH UPDATED\n\n"
+            f"Previous : {old}\n"
+            f"Current  : {selected}\n"
+            f"EMA1     : EMA-SWMA({selected})\n"
+            f"EMA2     : EMA(Close, {selected})\n"
+            f"ATR      : {volumatic.ATR_LENGTH} (unchanged)\n\n"
+            "Cache indikator dibangun ulang. Pengaturan berlaku untuk sinyal berikutnya.\n"
+            "Catatan: /try berikutnya memulai fresh session dengan default 100."
+        )
+        log.info("[CONFIG] Volumatic length changed: %s -> %s", old, selected)
 
     async def _handle_ema(self, text: str) -> None:
         parts = str(text or "").split()
@@ -6644,13 +6772,13 @@ class TradingEngine:
         current_ema = f"EMA{self.ema_filter_length}" if self.ema_filter_length is not None else "OFF"
         lines = [
             f"ACTIVE TRADES • {len(active)}/{self.max_active_trades} slots\n"
-            f"Scanner TF: {self.timeframe} • EMA filter: {current_ema}\n"
+            f"Scanner TF: {self.timeframe} • Length: {self.trend_length} • EMA filter: {current_ema}\n"
         ]
         for t in sorted(active, key=lambda x: (x.status, x.pair)):
             price = self._current_price(t.pair)
             if t.status == "PENDING":
                 lines.append(
-                    f"⏳ {t.pair} • PENDING {t.direction} ({t.timeframe})\n"
+                    f"⏳ {t.pair} • PENDING {t.direction} ({t.timeframe} • LEN {t.trend_length})\n"
                     f"Signal: {t.signal} | Candle close: {fmt_price(t.signal_close_price or t.entry)} | Limit: {fmt_price(t.entry)}\n"
                     f"EMA at signal: {('OFF' if t.ema_filter_length is None else f'EMA{t.ema_filter_length} @ {fmt_price(t.ema_filter_value)}')}\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
@@ -6678,7 +6806,7 @@ class TradingEngine:
                     pnl_pct = move / entry * Decimal("100")
                     pnl_usdt = move * (t.quantity or Decimal("0"))
                 lines.append(
-                    f"{'🟢' if t.direction == 'LONG' else '🔴'} {t.pair} • {t.direction} FILLED ({t.timeframe})\n"
+                    f"{'🟢' if t.direction == 'LONG' else '🔴'} {t.pair} • {t.direction} FILLED ({t.timeframe} • LEN {t.trend_length})\n"
                     f"Entry: {fmt_price(entry)} | Live: {fmt_price(price)}\n"
                     f"EMA at signal: {('OFF' if t.ema_filter_length is None else f'EMA{t.ema_filter_length} @ {fmt_price(t.ema_filter_value)}')}\n"
                     f"Floating: {fmt_num(pnl_pct, 2)}% | {fmt_num(pnl_usdt, 4)} USDT\n"
@@ -7009,7 +7137,7 @@ class TradingEngine:
         )
         lines = [
             "╔════ VOLUMATIC / TELEMETRY ════╗",
-            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  {self.timeframe}   EMA  {('EMA' + str(self.ema_filter_length)) if self.ema_filter_length is not None else 'OFF'}   MODE  {'REAL' if self.real_mode else 'PAPER'}",
+            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  {self.timeframe}   LEN  {self.trend_length}   EMA  {('EMA' + str(self.ema_filter_length)) if self.ema_filter_length is not None else 'OFF'}   MODE  {'REAL' if self.real_mode else 'PAPER'}",
             "────────────────────────────────",
             "[ PERFORMANCE ]",
             f"CLOSED       {len(closed):>5}     W/L/BE   {len(wins)}/{len(losses)}/{be}",
@@ -7058,7 +7186,7 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            f"Timeframe: {self.timeframe}\nEMA filter: {('EMA' + str(self.ema_filter_length)) if self.ema_filter_length is not None else 'OFF'}\nScanner: {'ON' if self.scan_enabled else 'OFF'}\n"
+            f"Timeframe: {self.timeframe}\nTrend length: {self.trend_length}\nEMA filter: {('EMA' + str(self.ema_filter_length)) if self.ema_filter_length is not None else 'OFF'}\nScanner: {'ON' if self.scan_enabled else 'OFF'}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending: {pending} | Filled: {filled} | Max: {self.max_active_trades}\n"
             f"Binance REST cooldown: {self._binance_cooldown_remaining():.0f}s | Deferred commands: {len(self.deferred_commands)}\n"
@@ -7072,6 +7200,7 @@ class TradingEngine:
             "COMMAND VOLUMATIC TREND\n\n"
             "/scan on|off - aktif/nonaktifkan scanner Volumatic Mode B (bubble visual offset=-1)\n"
             "/timeframe [H4|D1] - pilih timeframe (default H4)\n"
+            f"/length [1–{volumatic.MAX_TREND_LENGTH}] - atur Trend Length Volumatic (default 100)\n"
             "/EMA [50|100|200|off] - filter arah LONG/SHORT berdasarkan EMA timeframe aktif\n"
             "/max [angka] - batas total pending + filled\n"
             "/trade - lihat pending order dan posisi aktif\n"
@@ -7092,7 +7221,7 @@ class TradingEngine:
             "/resetstats - arsipkan lalu reset statistik trade\n"
             "/reset CONFIRM - reset history/event/catatan (tanpa mengubah posisi)\n"
             "/status - status sistem\n/help - bantuan\n\n"
-            "Aturan: BLUE=LONG, RED=SHORT; LIMIT di CLOSE candle sinyal untuk satu candle berikutnya; bubble berlawanan menutup posisi via MARKET lalu membuat LIMIT arah baru; tanpa SL/TP/trailing."
+            "Aturan: BLUE=LONG, RED=SHORT; Volumatic Length mengatur EMA-SWMA dan EMA close; LIMIT di CLOSE candle visual bubble untuk satu candle berikutnya; bubble berlawanan menutup posisi via MARKET lalu membuat LIMIT arah baru; tanpa SL/TP/trailing."
         )
 
     async def _dispatch_command(self, text: str) -> None:
@@ -7104,6 +7233,7 @@ class TradingEngine:
         if command in {"/try", "/end", "/ganti", "/healthz"}:
             return
         if command == "/timeframe": await self._handle_timeframe(text)
+        elif command == "/length": await self._handle_length(text)
         elif command == "/ema": await self._handle_ema(text)
         elif command == "/scan": await self._handle_scan(text)
         elif command == "/max": await self._handle_max(text)
