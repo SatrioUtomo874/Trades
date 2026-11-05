@@ -1,23 +1,22 @@
 from __future__ import annotations
 
-"""
-try.py - Telegram Launcher
+"""Volumatic Trend - minimal Telegram launcher.
 
-Tugas launcher:
-1. Menjalankan polling Telegram.
-2. /try menyinkronkan main.py + strategy.py dari GitHub lalu reload main.py.
-3. /end menghentikan main.py.
-4. /ganti mengganti main.py atau strategy.py di GitHub dan menyalin versi baru
-   ke runtime lokal.
-5. Meneruskan command/update lain ke main.py.
-6. Menyediakan endpoint HTTP sederhana untuk Render health check.
+Responsibilities of this file are intentionally limited to:
+- keep Telegram polling and Render health endpoints alive;
+- /try: read-only sync main + strategy source from GitHub, then load/start them;
+- /end: stop main engine only; this launcher and Render service stay alive;
+- forward every other Telegram update to main.handle_update().
 
-main.py tetap menjadi engine. strategy.py tetap menjadi modul analisis terpisah.
+This launcher DOES NOT own or persist Binance cooldowns, ban lists, trades,
+orders, positions, settings, events, or strategy state. Those belong to main.py.
+strategy.py remains a pure signal/indicator module.
 """
 
 import ast
 import asyncio
 import base64
+import importlib
 import importlib.util
 import logging
 import os
@@ -28,7 +27,6 @@ import time
 from pathlib import Path
 from types import ModuleType
 from urllib.parse import quote
-from uuid import uuid4
 
 import requests
 from dotenv import load_dotenv
@@ -36,42 +34,41 @@ from flask import Flask, jsonify
 
 
 # -----------------------------------------------------------------------------
-# CONFIG
+# Configuration
 # -----------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 load_dotenv(BASE_DIR / "trades.env")
 
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or "").strip()
-MAIN_FILE = (os.getenv("MAIN_FILE") or "main.py").strip()
-STRATEGY_FILE = (os.getenv("STRATEGY_FILE") or "strategy.py").strip()
+ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0") or "0")
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
 REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
-PORT = int(os.getenv("PORT", "10000"))
-TG_POLL_TIMEOUT = max(5, int(os.getenv("TG_POLL_TIMEOUT", "30")))
-HTTP_TIMEOUT = max(10, int(os.getenv("HTTP_TIMEOUT", "30")))
-GITHUB_REQUEST_SECONDS = max(10, int(os.getenv("GITHUB_REQUEST_SECONDS", "30")))
 
-try:
-    ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
-except ValueError as exc:
-    raise RuntimeError("ALLOWED_USER_ID harus berupa integer.") from exc
+# Latest descriptive filenames. They can still be overridden in Render env.
+MAIN_FILE = (os.getenv("MAIN_FILE") or "main_volumatic_rate_guard_batch_telemetry_20261105.py").strip()
+STRATEGY_FILE = (os.getenv("STRATEGY_FILE") or "strategy_volumatic_ema_filter_20261105.py").strip()
+
+PORT = max(1, int(os.getenv("PORT", "10000") or "10000"))
+TG_POLL_TIMEOUT = max(5, min(50, int(os.getenv("TG_POLL_TIMEOUT", "30") or "30")))
+HTTP_TIMEOUT = max(10, int(os.getenv("HTTP_TIMEOUT", "30") or "30"))
+GITHUB_TIMEOUT = max(10, int(os.getenv("GITHUB_REQUEST_SECONDS", "30") or "30"))
 
 if not TELEGRAM_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN belum diset di .env")
+    raise RuntimeError("TELEGRAM_TOKEN belum diset.")
 if not ALLOWED_USER_ID:
-    raise RuntimeError("ALLOWED_USER_ID belum diset di .env")
+    raise RuntimeError("ALLOWED_USER_ID belum diset atau tidak valid.")
 if not GITHUB_TOKEN:
-    raise RuntimeError("GITHUB_TOKEN belum diset di .env")
+    raise RuntimeError("GITHUB_TOKEN belum diset; /try membutuhkan sinkronisasi source read-only.")
 if not REPO_NAME or "/" not in REPO_NAME:
-    raise RuntimeError("REPO_NAME belum diset atau formatnya tidak valid.")
+    raise RuntimeError("REPO_NAME belum diset atau format owner/repo tidak valid.")
 
 
 # -----------------------------------------------------------------------------
-# STATE
+# Launcher-only runtime state (memory only; never trading data)
 # -----------------------------------------------------------------------------
-log = logging.getLogger("launcher")
+log = logging.getLogger("volumatic.launcher")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -87,27 +84,87 @@ STRATEGY_MODULE: ModuleType | None = None
 MAIN_RUNNING = False
 STOP_EVENT = asyncio.Event()
 
-# /ganti state. Hanya ada satu user yang diizinkan sehingga state global cukup.
-GANTI_WAITING_SELECTION = False
-GANTI_TARGET: str | None = None
-
 
 # -----------------------------------------------------------------------------
-# PATH HELPERS
+# Path + source validation
 # -----------------------------------------------------------------------------
 def safe_runtime_path(relative_path: str) -> Path:
-    """Resolve path lokal dan cegah path keluar dari folder launcher."""
     raw = Path(str(relative_path).strip())
     if raw.is_absolute():
         raise ValueError(f"Runtime path harus relatif: {relative_path}")
-
     root = BASE_DIR.resolve()
     path = (BASE_DIR / raw).resolve()
     try:
         path.relative_to(root)
     except ValueError as exc:
-        raise ValueError(f"Runtime path keluar dari BASE_DIR: {relative_path}") from exc
+        raise ValueError(f"Path keluar dari folder launcher: {relative_path}") from exc
     return path
+
+
+def _top_level_functions(source: str) -> set[str]:
+    tree = ast.parse(source)
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def validate_python_source(content: bytes, relative_path: str) -> None:
+    try:
+        source = content.decode("utf-8")
+        compile(source, relative_path, "exec")
+        functions = _top_level_functions(source)
+    except (UnicodeDecodeError, SyntaxError) as exc:
+        where = f"line {getattr(exc, 'lineno', '?')}"
+        raise RuntimeError(f"{relative_path} tidak valid ({where}): {exc}") from exc
+
+    basename = Path(relative_path).name.lower()
+    if basename == Path(MAIN_FILE).name.lower():
+        required = {"on_start", "handle_update", "on_stop"}
+        missing = sorted(required - functions)
+        if missing:
+            raise RuntimeError(f"{relative_path} tidak memiliki kontrak launcher: {', '.join(missing)}")
+        return
+
+    if basename == Path(STRATEGY_FILE).name.lower():
+        required_functions = {
+            "signals_since", "detect_signals_since", "detect_latest_signal",
+            "calculate_indicators", "analyze", "reference_risk", "trade_result_r",
+        }
+        missing = sorted(required_functions - functions)
+        if missing:
+            raise RuntimeError(f"{relative_path} tidak kompatibel: fungsi wajib {', '.join(missing)}")
+
+        # Execute in a temporary registered module so dataclasses resolve __module__.
+        validation_module = ModuleType("_volumatic_strategy_validation")
+        validation_module.__file__ = relative_path
+        sys.modules[validation_module.__name__] = validation_module
+        try:
+            exec(compile(source, relative_path, "exec"), validation_module.__dict__)
+            required_values = {
+                "TIMEFRAME_MS", "TIMEFRAME_INTERVALS", "STRATEGY_NAME", "STRATEGY_VERSION",
+                "TREND_LENGTH", "ATR_LENGTH", "REFERENCE_BUFFER_ATR",
+            }
+            missing_values = sorted(name for name in required_values if name not in validation_module.__dict__)
+            if missing_values:
+                raise RuntimeError(f"{relative_path} tidak memiliki konstanta: {', '.join(missing_values)}")
+            tf_ms = validation_module.TIMEFRAME_MS
+            tf_intervals = validation_module.TIMEFRAME_INTERVALS
+            if not isinstance(tf_ms, dict) or set(tf_ms) != {"H4", "D1"}:
+                raise RuntimeError("strategy TIMEFRAME_MS harus memuat H4 dan D1.")
+            if not isinstance(tf_intervals, dict) or set(tf_intervals) != {"H4", "D1"}:
+                raise RuntimeError("strategy TIMEFRAME_INTERVALS harus memuat H4 dan D1.")
+        finally:
+            sys.modules.pop(validation_module.__name__, None)
+
+
+def github_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
 
 def github_content_url(path: str) -> str:
@@ -115,942 +172,421 @@ def github_content_url(path: str) -> str:
     return f"{GITHUB_API}/repos/{REPO_NAME}/contents/{encoded}"
 
 
-def github_headers() -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2026-03-10",
-    }
-
-
-# -----------------------------------------------------------------------------
-# SMALL HTTP SERVER - Render health check
-# -----------------------------------------------------------------------------
-app = Flask(__name__)
-
-
-@app.get("/")
-def index():
-    return jsonify(
-        {
-            "ok": True,
-            "service": "telegram-launcher",
-            "main_running": MAIN_RUNNING,
-            "main_file": MAIN_FILE,
-            "strategy_file": STRATEGY_FILE,
-        }
-    )
-
-
-@app.get("/healthz")
-def healthz():
-    return jsonify(
-        {
-            "ok": True,
-            "service": "telegram-launcher",
-            "main_running": MAIN_RUNNING,
-            "timestamp": time.time(),
-            "main_file": MAIN_FILE,
-            "strategy_file": STRATEGY_FILE,
-        }
-    )
-
-
-def run_http_server() -> None:
-    app.run(
-        host="0.0.0.0",
-        port=PORT,
-        debug=False,
-        use_reloader=False,
-        threaded=True,
-    )
-
-
-# -----------------------------------------------------------------------------
-# TELEGRAM
-# -----------------------------------------------------------------------------
-def tg_call(
-    method: str,
-    payload: dict | None = None,
-    timeout: int = HTTP_TIMEOUT,
-):
-    response = requests.post(
-        f"{TG_API}/{method}",
-        json=payload or {},
-        timeout=timeout,
-    )
-
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"Telegram {method}: HTTP {response.status_code}: {response.text[:800]}"
-        )
-
-    body = response.json()
-    if not body.get("ok"):
-        raise RuntimeError(f"Telegram {method}: {body}")
-
-    return body.get("result")
-
-
-def tg_send(chat_id: int, text: str) -> None:
-    text = str(text)
-    for start in range(0, len(text), 3900):
-        chunk = text[start : start + 3900]
-        try:
-            tg_call("sendMessage", {"chat_id": chat_id, "text": chunk})
-        except Exception:
-            log.exception("Gagal mengirim Telegram ke chat_id=%s", chat_id)
-            return
-
-
-def tg_send_document(chat_id: int, document_path: str, caption: str = "") -> None:
-    path = Path(str(document_path))
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(f"Dokumen tidak ditemukan: {path}")
-
-    with path.open("rb") as document:
-        response = requests.post(
-            f"{TG_API}/sendDocument",
-            data={
-                "chat_id": str(chat_id),
-                "caption": str(caption or "")[:1024],
-            },
-            files={
-                "document": (path.name, document),
-            },
-            timeout=HTTP_TIMEOUT,
-        )
-
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"Telegram sendDocument: HTTP {response.status_code}: "
-            f"{response.text[:800]}"
-        )
-
-    body = response.json()
-    if not body.get("ok"):
-        raise RuntimeError(f"Telegram sendDocument: {body}")
-
-
-def download_telegram_document(file_id: str) -> tuple[bytes, str]:
-    result = tg_call("getFile", {"file_id": file_id}, timeout=HTTP_TIMEOUT)
-    file_path = str((result or {}).get("file_path") or "").strip()
-    if not file_path:
-        raise RuntimeError("Telegram getFile tidak mengembalikan file_path.")
-
-    response = requests.get(
-        f"{TG_FILE_API}/{file_path}",
-        timeout=HTTP_TIMEOUT,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(
-            f"Telegram file download: HTTP {response.status_code}: "
-            f"{response.text[:800]}"
-        )
-
-    return response.content, Path(file_path).name
-
-
-# -----------------------------------------------------------------------------
-# SOURCE VALIDATION
-# -----------------------------------------------------------------------------
-def _function_names(source: str) -> set[str]:
-    tree = ast.parse(source)
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            names.add(node.name)
-    return names
-
-
-def validate_python_source(source: bytes, relative_path: str) -> None:
-    text = source.decode("utf-8")
-    try:
-        compile(text, relative_path, "exec")
-        names = _function_names(text)
-    except SyntaxError as exc:
-        location = f"line {exc.lineno or '?'}"
-        raise RuntimeError(
-            f"{relative_path} memiliki syntax error di {location}: {exc.msg}"
-        ) from exc
-
-    normalized = Path(relative_path).name.lower()
-    if normalized == Path(MAIN_FILE).name.lower():
-        required = {"on_start", "handle_update", "on_stop"}
-        missing = sorted(required - names)
-        if missing:
-            raise RuntimeError(
-                f"{relative_path} wajib memiliki function: {', '.join(missing)}"
-            )
-
-    if normalized == Path(STRATEGY_FILE).name.lower():
-        # Kontrak Volumatic yang dipakai main.py dan launcher.
-        required = {
-            "signals_since", "detect_signals_since", "detect_latest_signal",
-            "calculate_indicators", "analyze", "reference_risk", "trade_result_r",
-        }
-        missing = sorted(required - names)
-        if missing:
-            raise RuntimeError(
-                f"{relative_path} tidak kompatibel dengan Volumatic. "
-                f"Function wajib: {', '.join(missing)}."
-            )
-        # Execute strategy validation inside a temporary registered module.
-        # dataclasses (and some libraries) resolve cls.__module__ through
-        # sys.modules during class creation; a plain dictionary namespace is
-        # insufficient and caused /try to fail before it could load main.py.
-        validation_name = f"_strategy_validation_{uuid4().hex}"
-        validation_module = ModuleType(validation_name)
-        validation_module.__file__ = relative_path
-        sys.modules[validation_name] = validation_module
-        try:
-            exec(compile(text, relative_path, "exec"), validation_module.__dict__)
-        finally:
-            sys.modules.pop(validation_name, None)
-        namespace = validation_module.__dict__
-        required_values = {
-            "TIMEFRAME_MS", "TIMEFRAME_INTERVALS", "STRATEGY_NAME", "STRATEGY_VERSION",
-            "TREND_LENGTH", "ATR_LENGTH", "REFERENCE_BUFFER_ATR",
-        }
-        missing_values = sorted(name for name in required_values if name not in namespace)
-        if missing_values:
-            raise RuntimeError(
-                f"{relative_path} tidak kompatibel dengan main.py. "
-                f"Konstanta wajib: {', '.join(missing_values)}."
-            )
-        tf_ms = namespace.get("TIMEFRAME_MS")
-        if not isinstance(tf_ms, dict) or set(tf_ms) != {"H4", "D1"}:
-            raise RuntimeError(f"{relative_path}: TIMEFRAME_MS harus memuat H4 dan D1.")
-
-
-# -----------------------------------------------------------------------------
-# GITHUB
-# -----------------------------------------------------------------------------
-def github_get_file(path: str) -> tuple[bytes, str | None]:
+def github_get_source(path: str) -> bytes:
     response = requests.get(
         github_content_url(path),
         headers=github_headers(),
         params={"ref": GITHUB_BRANCH},
-        timeout=GITHUB_REQUEST_SECONDS,
+        timeout=GITHUB_TIMEOUT,
     )
-
     if response.status_code == 404:
-        raise FileNotFoundError(
-            f"File {path} tidak ditemukan di GitHub branch {GITHUB_BRANCH}."
-        )
-
+        raise FileNotFoundError(f"{path} tidak ditemukan di {REPO_NAME}/{GITHUB_BRANCH}.")
     if response.status_code >= 400:
-        raise RuntimeError(
-            f"GitHub GET {path}: HTTP {response.status_code}: "
-            f"{response.text[:800]}"
-        )
+        raise RuntimeError(f"GitHub GET {path}: HTTP {response.status_code}: {response.text[:600]}")
 
     body = response.json()
     if body.get("type") != "file":
         raise RuntimeError(f"GitHub path bukan file: {path}")
 
     encoded = str(body.get("content") or "").replace("\n", "")
-    try:
-        content = base64.b64decode(encoded)
-    except Exception as exc:
-        raise RuntimeError(f"GitHub file {path} gagal di-decode.") from exc
-
-    return content, str(body.get("sha") or "") or None
-
-
-def github_put_file(path: str, content: bytes, commit_message: str) -> str:
-    last_error: Exception | None = None
-
-    for _attempt in range(3):
+    if encoded:
         try:
-            try:
-                _old_content, sha = github_get_file(path)
-            except FileNotFoundError:
-                sha = None
-
-            payload = {
-                "message": commit_message,
-                "content": base64.b64encode(content).decode("ascii"),
-                "branch": GITHUB_BRANCH,
-            }
-            if sha:
-                payload["sha"] = sha
-
-            response = requests.put(
-                github_content_url(path),
-                headers=github_headers(),
-                json=payload,
-                timeout=GITHUB_REQUEST_SECONDS,
-            )
-
-            if response.status_code == 409:
-                raise RuntimeError("GITHUB_CONFLICT")
-
-            if response.status_code >= 400:
-                raise RuntimeError(
-                    f"GitHub PUT {path}: HTTP {response.status_code}: "
-                    f"{response.text[:800]}"
-                )
-
-            body = response.json()
-            return str((body.get("content") or {}).get("sha") or "")
-
-        except RuntimeError as exc:
-            last_error = exc
-            if str(exc) != "GITHUB_CONFLICT":
-                raise
-            time.sleep(0.5)
+            return base64.b64decode(encoded, validate=False)
         except Exception as exc:
-            last_error = exc
-            raise
+            raise RuntimeError(f"Konten GitHub {path} gagal di-decode.") from exc
 
-    raise RuntimeError(f"GitHub gagal memperbarui {path}: {last_error}")
+    # GitHub may omit `content` for large files; use its raw download URL.
+    download_url = str(body.get("download_url") or "").strip()
+    if not download_url:
+        raise RuntimeError(f"GitHub tidak menyediakan konten atau download_url untuk {path}.")
+    raw = requests.get(download_url, headers=github_headers(), timeout=GITHUB_TIMEOUT)
+    if raw.status_code >= 400:
+        raise RuntimeError(f"GitHub raw download {path}: HTTP {raw.status_code}")
+    return raw.content
 
 
-def atomic_write(path: Path, content: bytes) -> None:
+def _atomic_write_source(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_name: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
+            mode="wb", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
         ) as handle:
             temp_name = handle.name
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-
         os.replace(temp_name, path)
         temp_name = None
     finally:
         if temp_name:
             try:
                 Path(temp_name).unlink(missing_ok=True)
-            except Exception:
-                pass
+            except OSError:
+                log.exception("Gagal membersihkan temporary source file.")
 
 
-# -----------------------------------------------------------------------------
-# SYNC MAIN + STRATEGY
-# -----------------------------------------------------------------------------
-def sync_runtime_files() -> list[str]:
-    """Download main.py + strategy.py dari GitHub dan replace secara atomik.
+def sync_source_pair() -> list[str]:
+    """Read-only GitHub sync. Only source-code files are written locally.
 
-    Kedua file divalidasi sebelum satu pun file lokal diganti. Jadi /try tidak
-    meninggalkan runtime dalam keadaan setengah-ter-update ketika salah satu
-    sumber invalid.
+    No trade/cooldown/ban/settings/event data is read or written by this launcher.
+    Both source files are downloaded and validated before either local file changes.
     """
-    targets = [MAIN_FILE, STRATEGY_FILE]
-    downloaded: dict[str, bytes] = {}
+    downloaded = {
+        MAIN_FILE: github_get_source(MAIN_FILE),
+        STRATEGY_FILE: github_get_source(STRATEGY_FILE),
+    }
+    for name, content in downloaded.items():
+        validate_python_source(content, name)
 
-    for target in targets:
-        content, _sha = github_get_file(target)
-        validate_python_source(content, target)
-        downloaded[target] = content
-
-    for target, content in downloaded.items():
-        atomic_write(safe_runtime_path(target), content)
-
-    return targets
+    for name, content in downloaded.items():
+        _atomic_write_source(safe_runtime_path(name), content)
+    return list(downloaded)
 
 
 # -----------------------------------------------------------------------------
-# MAIN LOADER
+# Telegram transport (launcher only)
 # -----------------------------------------------------------------------------
-def load_main_module() -> ModuleType:
-    """Load strategy.py fresh before main.py to avoid stale sys.modules imports.
+def tg_call(method: str, payload: dict | None = None, timeout: int = HTTP_TIMEOUT):
+    response = requests.post(f"{TG_API}/{method}", json=payload or {}, timeout=timeout)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Telegram {method}: HTTP {response.status_code}: {response.text[:600]}")
+    body = response.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"Telegram {method}: {body}")
+    return body.get("result")
 
-    Reloading only main.py is insufficient: Python may otherwise retain an old
-    strategy module from a previous /try. That was the source of TIMEFRAME_MS
-    missing-at-runtime warnings even though the synced file already contained it.
-    """
+
+def tg_send(chat_id: int, message: str) -> None:
+    message = str(message)
+    for start in range(0, len(message), 3900):
+        try:
+            tg_call("sendMessage", {"chat_id": chat_id, "text": message[start:start + 3900]})
+        except Exception:
+            log.exception("Telegram sendMessage gagal.")
+            return
+
+
+def tg_send_document(chat_id: int, document_path: str, caption: str = "") -> None:
+    """Transport helper for main.py exports; launcher does not store the document."""
+    path = Path(str(document_path))
+    if not path.is_file():
+        raise FileNotFoundError(f"Dokumen tidak ditemukan: {path}")
+    with path.open("rb") as source:
+        response = requests.post(
+            f"{TG_API}/sendDocument",
+            data={"chat_id": str(chat_id), "caption": str(caption or "")[:1024]},
+            files={"document": (path.name, source)},
+            timeout=HTTP_TIMEOUT,
+        )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Telegram sendDocument: HTTP {response.status_code}: {response.text[:600]}")
+    body = response.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"Telegram sendDocument: {body}")
+
+
+# -----------------------------------------------------------------------------
+# Render health endpoint
+# -----------------------------------------------------------------------------
+app = Flask(__name__)
+
+
+@app.get("/")
+def index():
+    return jsonify({
+        "ok": True,
+        "service": "volumatic-launcher",
+        "main_running": MAIN_RUNNING,
+        "main_file": MAIN_FILE,
+        "strategy_file": STRATEGY_FILE,
+    })
+
+
+@app.get("/healthz")
+def healthz():
+    return jsonify({
+        "ok": True,
+        "service": "volumatic-launcher",
+        "main_running": MAIN_RUNNING,
+        "timestamp": time.time(),
+    })
+
+
+def run_http_server() -> None:
+    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False, threaded=True)
+
+
+# -----------------------------------------------------------------------------
+# Load strategy first, then main. No business state is kept in launcher.
+# -----------------------------------------------------------------------------
+def load_engine_modules() -> ModuleType:
     global STRATEGY_MODULE
     strategy_path = safe_runtime_path(STRATEGY_FILE)
-    if not strategy_path.exists():
-        raise FileNotFoundError(f"{STRATEGY_FILE} tidak ditemukan di {BASE_DIR}")
+    main_path = safe_runtime_path(MAIN_FILE)
+    if not strategy_path.is_file():
+        raise FileNotFoundError(f"{STRATEGY_FILE} tidak ditemukan.")
+    if not main_path.is_file():
+        raise FileNotFoundError(f"{MAIN_FILE} tidak ditemukan.")
+
     strategy_source = strategy_path.read_text(encoding="utf-8")
     validate_python_source(strategy_source.encode("utf-8"), STRATEGY_FILE)
-    strategy_code = compile(strategy_source, str(strategy_path), "exec")
-
-    # The main engine imports `strategy` by module name. Replace that exact
-    # module before executing main.py; never reuse an in-memory older module.
     sys.modules.pop("strategy", None)
     importlib.invalidate_caches()
+
     strategy_module = ModuleType("strategy")
     strategy_module.__file__ = str(strategy_path)
     strategy_module.__package__ = ""
     sys.modules["strategy"] = strategy_module
     try:
-        exec(strategy_code, strategy_module.__dict__)
+        exec(compile(strategy_source, str(strategy_path), "exec"), strategy_module.__dict__)
     except Exception:
         sys.modules.pop("strategy", None)
-        STRATEGY_MODULE = None
         raise
 
-    # Fail early with a clear compatibility error, not deep inside runtime settings.
-    if not isinstance(getattr(strategy_module, "TIMEFRAME_MS", None), dict):
-        raise RuntimeError("strategy.py tidak menyediakan TIMEFRAME_MS (H4/D1).")
     if not callable(getattr(strategy_module, "signals_since", None)):
         raise RuntimeError("strategy.py tidak menyediakan signals_since().")
-    if not callable(getattr(strategy_module, "detect_latest_signal", None)):
-        raise RuntimeError("strategy.py tidak menyediakan detect_latest_signal().")
-    STRATEGY_MODULE = strategy_module
 
-    path = safe_runtime_path(MAIN_FILE)
-    if not path.exists():
-        raise FileNotFoundError(f"{MAIN_FILE} tidak ditemukan di {BASE_DIR}")
-
-    source = path.read_text(encoding="utf-8")
-    code = compile(source, str(path), "exec")
+    main_source = main_path.read_text(encoding="utf-8")
+    validate_python_source(main_source.encode("utf-8"), MAIN_FILE)
     module_name = "trading_main_runtime"
     sys.modules.pop(module_name, None)
-    spec = importlib.util.spec_from_file_location(module_name, path)
+    spec = importlib.util.spec_from_file_location(module_name, main_path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Tidak dapat membuat module spec untuk {MAIN_FILE}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    exec(code, module.__dict__)
-    if getattr(module, "volumatic", None) is not strategy_module:
-        raise RuntimeError("main.py tidak menggunakan strategy.py yang baru disinkronkan.")
-    return module
+        raise ImportError(f"Tidak bisa memuat {MAIN_FILE}.")
+    main_module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = main_module
+    try:
+        exec(compile(main_source, str(main_path), "exec"), main_module.__dict__)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        sys.modules.pop("strategy", None)
+        raise
+
+    if getattr(main_module, "volumatic", None) is not strategy_module:
+        raise RuntimeError("main.py tidak memakai instance strategy.py yang baru dimuat.")
+    for name in ("on_start", "handle_update", "on_stop"):
+        if not callable(getattr(main_module, name, None)):
+            raise RuntimeError(f"main.py tidak menyediakan {name}().")
+
+    STRATEGY_MODULE = strategy_module
+    return main_module
 
 
-async def _call(module: ModuleType, function_name: str, context: dict) -> object:
-    function = getattr(module, function_name, None)
-    if function is None:
+async def _call_main(module: ModuleType, name: str, context: dict) -> object:
+    callback = getattr(module, name, None)
+    if not callable(callback):
         return None
-
-    result = function(context)
+    result = callback(context)
     if asyncio.iscoroutine(result):
         return await result
     return result
 
 
-async def start_or_reload_main(chat_id: int) -> None:
-    """Sync main.py + strategy.py lalu start/reload main.py."""
-    global MAIN_MODULE, MAIN_RUNNING, GANTI_TARGET, GANTI_WAITING_SELECTION
+def _main_context(chat_id: int) -> dict:
+    return {
+        "chat_id": chat_id,
+        "user_id": ALLOWED_USER_ID,
+        "send_message": tg_send,
+        "send_document": tg_send_document,
+        "launcher": "volumatic-launcher",
+        "main_file": str(safe_runtime_path(MAIN_FILE)),
+        "strategy_file": str(safe_runtime_path(STRATEGY_FILE)),
+        "is_running": lambda: MAIN_RUNNING,
+    }
 
+
+async def start_or_reset_main(chat_id: int) -> None:
+    """/try: sync source pair, stop current engine if any, then start fresh pair."""
+    global MAIN_MODULE, MAIN_RUNNING, STRATEGY_MODULE
     async with MAIN_LOCK:
-        # Sync dilakukan SEBELUM main lama dihentikan.
-        synced = await asyncio.to_thread(sync_runtime_files)
-        log.info("/try sync selesai: %s", ", ".join(synced))
+        # Sync/validate happens before stopping a running engine. GitHub failure
+        # therefore leaves the current engine untouched.
+        synced = await asyncio.to_thread(sync_source_pair)
+        log.info("[LAUNCHER] source sync OK: %s", ", ".join(synced))
 
         old_module = MAIN_MODULE
-
         if old_module is not None and MAIN_RUNNING:
-            log.info("/try diterima saat main aktif -> reload main.py")
             MAIN_RUNNING = False
             try:
-                await _call(
-                    old_module,
-                    "on_stop",
-                    {
-                        "chat_id": chat_id,
-                        "user_id": ALLOWED_USER_ID,
-                        "send_message": tg_send,
-                        "send_document": tg_send_document,
-                        "launcher": "try.py",
-                        "main_file": str(safe_runtime_path(MAIN_FILE)),
-                        "strategy_file": str(safe_runtime_path(STRATEGY_FILE)),
-                    },
-                )
+                await _call_main(old_module, "on_stop", _main_context(chat_id))
             except Exception:
-                log.exception("on_stop() main lama gagal")
+                log.exception("[LAUNCHER] on_stop main lama gagal saat /try reset.")
 
         MAIN_MODULE = None
+        STRATEGY_MODULE = None
         sys.modules.pop("trading_main_runtime", None)
+        sys.modules.pop("strategy", None)
 
+        module = load_engine_modules()
+        MAIN_MODULE = module
+        MAIN_RUNNING = True
         try:
-            module = load_main_module()
-
-            required = ("on_start", "handle_update", "on_stop")
-            missing = [
-                name
-                for name in required
-                if not callable(getattr(module, name, None))
-            ]
-            if missing:
-                raise RuntimeError(
-                    f"{MAIN_FILE} wajib memiliki function: {', '.join(missing)}"
-                )
-
-            context = {
-                "chat_id": chat_id,
-                "user_id": ALLOWED_USER_ID,
-                "send_message": tg_send,
-                "send_document": tg_send_document,
-                "launcher": "try.py",
-                "main_file": str(safe_runtime_path(MAIN_FILE)),
-                "strategy_file": str(safe_runtime_path(STRATEGY_FILE)),
-                "is_running": lambda: MAIN_RUNNING,
-            }
-
-            MAIN_RUNNING = True
-            MAIN_MODULE = module
-
-            result = await _call(module, "on_start", context)
+            result = await _call_main(module, "on_start", _main_context(chat_id))
             if result is False:
-                MAIN_RUNNING = False
-                MAIN_MODULE = None
-                sys.modules.pop("trading_main_runtime", None)
                 raise RuntimeError("main.py menolak startup melalui on_start().")
-
-            GANTI_WAITING_SELECTION = False
-            GANTI_TARGET = None
-            log.info("main.py aktif")
-
         except Exception:
             MAIN_RUNNING = False
             MAIN_MODULE = None
+            STRATEGY_MODULE = None
             sys.modules.pop("trading_main_runtime", None)
+            sys.modules.pop("strategy", None)
             raise
 
+        log.info("[LAUNCHER] /try selesai; engine Volumatic aktif.")
 
-async def stop_main() -> bool:
-    """Hentikan main.py. Return True jika sebelumnya aktif."""
-    global MAIN_MODULE, MAIN_RUNNING, GANTI_WAITING_SELECTION, GANTI_TARGET
 
+async def stop_main(chat_id: int) -> bool:
+    """/end: stop the trading engine only; keep Render + Telegram launcher alive."""
+    global MAIN_MODULE, MAIN_RUNNING, STRATEGY_MODULE
     async with MAIN_LOCK:
         module = MAIN_MODULE
         was_running = bool(module is not None and MAIN_RUNNING)
         MAIN_RUNNING = False
         MAIN_MODULE = None
-
-        if module is not None:
-            try:
-                await _call(
-                    module,
-                    "on_stop",
-                    {
-                        "chat_id": ALLOWED_USER_ID,
-                        "user_id": ALLOWED_USER_ID,
-                        "send_message": tg_send,
-                        "send_document": tg_send_document,
-                        "launcher": "try.py",
-                        "main_file": str(safe_runtime_path(MAIN_FILE)),
-                        "strategy_file": str(safe_runtime_path(STRATEGY_FILE)),
-                    },
-                )
-            except Exception:
-                log.exception("on_stop() gagal")
-
-        sys.modules.pop("trading_main_runtime", None)
-        sys.modules.pop("strategy", None)
-        GANTI_WAITING_SELECTION = False
-        GANTI_TARGET = None
+        try:
+            if module is not None:
+                await _call_main(module, "on_stop", _main_context(chat_id))
+        finally:
+            sys.modules.pop("trading_main_runtime", None)
+            sys.modules.pop("strategy", None)
+            STRATEGY_MODULE = None
         return was_running
 
 
 # -----------------------------------------------------------------------------
-# /GANTI
+# Telegram command router: only /try and /end are owned by launcher.
 # -----------------------------------------------------------------------------
-def _ganti_menu() -> str:
-    return (
-        "🔄 GANTI FILE\n\n"
-        f"Kirim {Path(MAIN_FILE).name} atau {Path(STRATEGY_FILE).name} "
-        "langsung sebagai Document Telegram.\n"
-        "Target akan dikenali otomatis dari nama file.\n\n"
-        "Jika nama file berbeda, gunakan:\n"
-        f"/ganti {MAIN_FILE}\n"
-        f"/ganti {STRATEGY_FILE}\n\n"
-        "Gunakan /back untuk membatalkan."
-    )
-
-
-def _resolve_ganti_target(value: str) -> str | None:
-    answer = str(value or "").strip().lower()
-    main_name = Path(MAIN_FILE).name.lower()
-    strategy_name = Path(STRATEGY_FILE).name.lower()
-
-    if answer in {"1", main_name, MAIN_FILE.lower(), "/ganti " + main_name}:
-        return MAIN_FILE
-    if answer in {"2", strategy_name, STRATEGY_FILE.lower(), "/ganti " + strategy_name}:
-        return STRATEGY_FILE
-    return None
-
-
-async def start_ganti(chat_id: int, argument: str = "") -> None:
-    global GANTI_WAITING_SELECTION, GANTI_TARGET
-
-    target = _resolve_ganti_target(argument) if argument else None
-    if target:
-        GANTI_WAITING_SELECTION = False
-        GANTI_TARGET = target
-        tg_send(
-            chat_id,
-            f"📎 TARGET GANTI: {target}\n\n"
-            "Sekarang kirim file Python sebagai Document Telegram.\n"
-            "Gunakan /back untuk membatalkan.",
-        )
-        return
-
-    GANTI_WAITING_SELECTION = True
-    GANTI_TARGET = None
-    tg_send(chat_id, _ganti_menu())
-
-
-async def _handle_ganti_selection(chat_id: int, text: str) -> None:
-    global GANTI_WAITING_SELECTION, GANTI_TARGET
-
-    target = _resolve_ganti_target(text)
-    if not target:
-        tg_send(
-            chat_id,
-            "❌ Pilihan tidak valid.\n\n" + _ganti_menu(),
-        )
-        return
-
-    GANTI_WAITING_SELECTION = False
-    GANTI_TARGET = target
-    tg_send(
-        chat_id,
-        f"📎 TARGET GANTI: {target}\n\n"
-        "Sekarang kirim file Python sebagai Document Telegram.\n"
-        "Gunakan /back untuk membatalkan.",
-    )
-
-
-async def handle_ganti_document(chat_id: int, document: dict) -> None:
-    global GANTI_WAITING_SELECTION, GANTI_TARGET
-
-    target = GANTI_TARGET
-    if not target:
-        tg_send(chat_id, "❌ Belum ada target /ganti. Kirim /ganti terlebih dahulu.")
-        return
-
-    file_id = str(document.get("file_id") or "").strip()
-    original_name = str(document.get("file_name") or "document.py").strip()
-
-    if not file_id:
-        tg_send(chat_id, "❌ Telegram document tidak memiliki file_id.")
-        return
-
-    if not original_name.lower().endswith(".py"):
-        tg_send(chat_id, "❌ /ganti hanya menerima file Python (.py).")
-        return
-
-    tg_send(chat_id, f"⏳ Memproses {original_name} → {target} ...")
-
-    try:
-        content, telegram_name = await asyncio.to_thread(
-            download_telegram_document,
-            file_id,
-        )
-        del telegram_name
-
-        validate_python_source(content, target)
-
-        sha = await asyncio.to_thread(
-            github_put_file,
-            target,
-            content,
-            f"launcher: replace {target}",
-        )
-
-        atomic_write(
-            safe_runtime_path(target),
-            content,
-        )
-
-        GANTI_WAITING_SELECTION = False
-        GANTI_TARGET = None
-
-        tg_send(
-            chat_id,
-            "✅ FILE BERHASIL DIGANTI\n\n"
-            f"Target: {target}\n"
-            f"GitHub: {REPO_NAME}/{target}\n"
-            f"Branch: {GITHUB_BRANCH}\n"
-            f"Commit SHA: {(sha[:10] + '...') if sha else '-'}\n\n"
-            "Runtime lokal juga sudah diperbarui.\n"
-            "Gunakan /try untuk reload main.py + memastikan kedua file "
-            "sinkron kembali dari GitHub.",
-        )
-
-    except Exception as exc:
-        log.exception("/ganti gagal untuk %s", target)
-        tg_send(
-            chat_id,
-            "❌ /ganti gagal\n\n"
-            f"Target: {target}\n"
-            f"Error: {exc}",
-        )
-
-
-# -----------------------------------------------------------------------------
-# ROUTER
-# -----------------------------------------------------------------------------
-def authorized(message: dict) -> bool:
+def is_authorized(message: dict) -> bool:
     chat_id = int((message.get("chat") or {}).get("id") or 0)
     user_id = int((message.get("from") or {}).get("id") or 0)
     return chat_id == ALLOWED_USER_ID and user_id == ALLOWED_USER_ID
 
 
-def get_command(text: str) -> str:
-    if not text:
-        return ""
-    return text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+def message_text(message: dict) -> str:
+    return str(message.get("text") or message.get("caption") or "").strip()
 
 
-def get_argument(text: str) -> str:
+def command_parts(text: str) -> tuple[str, str]:
     parts = str(text or "").strip().split(maxsplit=1)
-    return parts[1].strip() if len(parts) == 2 else ""
-
-
-def get_message_text(message: dict) -> str:
-    """Ambil text command dari message.text atau document caption.
-
-    Telegram menaruh command pada `caption` ketika user mengirim file
-    dengan caption, bukan pada `text`. Launcher commands harus mengenali
-    keduanya agar `/ganti`, `/try`, dan `/end` konsisten.
-    """
-    text = str(message.get("text") or "").strip()
-    if text:
-        return text
-    return str(message.get("caption") or "").strip()
-
-
-def infer_ganti_target_from_document(document: dict) -> str | None:
-    """Infer target /ganti dari nama file jika tepat main.py/strategy.py."""
-    filename = Path(str(document.get("file_name") or "").strip()).name.lower()
-    main_name = Path(MAIN_FILE).name.lower()
-    strategy_name = Path(STRATEGY_FILE).name.lower()
-
-    if filename == main_name:
-        return MAIN_FILE
-    if filename == strategy_name:
-        return STRATEGY_FILE
-    return None
+    if not parts:
+        return "", ""
+    command = parts[0].split("@", 1)[0].lower()
+    argument = parts[1].strip() if len(parts) > 1 else ""
+    return command, argument
 
 
 async def route_message(message: dict, update: dict) -> None:
-    global GANTI_WAITING_SELECTION, GANTI_TARGET
-
-    if not authorized(message):
+    if not is_authorized(message):
         return
-
     chat_id = int((message.get("chat") or {}).get("id") or 0)
-    text = get_message_text(message)
-    command = get_command(text)
-    document = message.get("document")
-
-    # /back selalu tersedia di launcher untuk membatalkan /ganti.
-    if command == "/back" and (GANTI_WAITING_SELECTION or GANTI_TARGET):
-        GANTI_WAITING_SELECTION = False
-        GANTI_TARGET = None
-        tg_send(chat_id, "✅ /ganti dibatalkan.")
-        return
+    text = message_text(message)
+    command, _argument = command_parts(text)
 
     if command == "/try":
-        GANTI_WAITING_SELECTION = False
-        GANTI_TARGET = None
+        tg_send(chat_id, "⟳ VOLUMATIC LAUNCHER / RESET\nMemuat source main + strategy dan menginisialisasi engine...")
         try:
-            await start_or_reload_main(chat_id)
-            if MAIN_RUNNING:
-                tg_send(
-                    chat_id,
-                    "🔄 /try selesai.\n"
-                    f"Sinkron: {MAIN_FILE} + {STRATEGY_FILE}\n"
-                    "main.py aktif.",
-                )
-            else:
-                tg_send(chat_id, "❌ main.py gagal aktif.")
+            await start_or_reset_main(chat_id)
+            tg_send(
+                chat_id,
+                "✓ VOLUMATIC ENGINE ONLINE\n\n"
+                f"MAIN     : {Path(MAIN_FILE).name}\n"
+                f"STRATEGY : {Path(STRATEGY_FILE).name}\n"
+                "LAUNCHER : tetap online\n"
+                "Gunakan /end untuk menghentikan engine tanpa mematikan Render.",
+            )
         except Exception as exc:
-            log.exception("Gagal menjalankan /try")
-            tg_send(chat_id, f"❌ Gagal menjalankan /try\n\n{exc}")
+            log.exception("[LAUNCHER] /try gagal.")
+            tg_send(chat_id, f"✕ /try gagal\n{str(exc)[:2500]}\n\nLauncher tetap online; source engine sebelumnya tidak disentuh bila sync gagal.")
         return
 
     if command == "/end":
         try:
-            stopped = await stop_main()
+            stopped = await stop_main(chat_id)
             if stopped:
-                tg_send(
-                    chat_id,
-                    "🛑 main.py dihentikan.\n"
-                    "Runtime state main.py sudah dibersihkan oleh on_stop().\n"
-                    "Sesi /ganti juga dibatalkan."
-                )
+                tg_send(chat_id, "■ VOLUMATIC ENGINE STOPPED\n\nMain engine dihentikan melalui on_stop().\nTelegram launcher dan Render tetap ONLINE.\nGunakan /try untuk menjalankan ulang.")
             else:
-                tg_send(chat_id, "ℹ️ main.py memang sedang tidak aktif.")
+                tg_send(chat_id, "i VOLUMATIC ENGINE sudah STOPPED.\nTelegram launcher dan Render tetap ONLINE.\nGunakan /try untuk menjalankan ulang.")
         except Exception as exc:
-            log.exception("Gagal menjalankan /end")
-            tg_send(chat_id, f"❌ /end gagal\n\n{exc}")
+            log.exception("[LAUNCHER] /end gagal.")
+            tg_send(chat_id, f"✕ /end gagal\n{str(exc)[:2000]}")
         return
 
     if command == "/healthz":
         tg_send(
             chat_id,
-            "HEALTHZ\n\n"
-            f"Launcher: ONLINE\n"
-            f"Main: {'RUNNING' if MAIN_RUNNING else 'STOPPED'}\n"
-            f"Main File: {MAIN_FILE}\n"
-            f"Strategy File: {STRATEGY_FILE}",
+            "VOLUMATIC LAUNCHER STATUS\n\n"
+            f"LAUNCHER : ONLINE\nENGINE   : {'RUNNING' if MAIN_RUNNING else 'STOPPED'}\n"
+            f"MAIN     : {Path(MAIN_FILE).name}\nSTRATEGY : {Path(STRATEGY_FILE).name}",
         )
         return
 
-    # -----------------------------------------------------------------
-    # DOCUMENT / /GANTI
-    # -----------------------------------------------------------------
-    # Telegram menyimpan command pada `caption` saat user mengirim file.
-    # Karena itu document harus diproses sebelum command /ganti plain-text.
-    if document is not None:
-        if GANTI_TARGET:
-            await handle_ganti_document(chat_id, document)
-            return
-
-        if command == "/ganti":
-            argument = get_argument(text)
-            inferred_target = _resolve_ganti_target(argument) if argument else None
-            if inferred_target is None:
-                inferred_target = infer_ganti_target_from_document(document)
-
-            if inferred_target:
-                GANTI_WAITING_SELECTION = False
-                GANTI_TARGET = inferred_target
-                await handle_ganti_document(chat_id, document)
-                return
-
-            # Jangan pernah meneruskan file + /ganti ke main.py.
-            GANTI_WAITING_SELECTION = True
-            GANTI_TARGET = None
-            tg_send(
-                chat_id,
-                "📎 File diterima, tetapi target /ganti tidak bisa ditentukan.\n\n"
-                f"Pilih target terlebih dahulu:\n1. {MAIN_FILE}\n2. {STRATEGY_FILE}\n\n"
-                "File belum di-upload. Setelah memilih target, kirim ulang file tersebut.",
-            )
-            return
-
-        if GANTI_WAITING_SELECTION:
-            inferred_target = infer_ganti_target_from_document(document)
-            if inferred_target:
-                GANTI_WAITING_SELECTION = False
-                GANTI_TARGET = inferred_target
-                await handle_ganti_document(chat_id, document)
-                return
-            tg_send(
-                chat_id,
-                "❌ Nama file tidak dikenali. Kirim file dengan nama "
-                f"{Path(MAIN_FILE).name} atau {Path(STRATEGY_FILE).name}, "
-                "atau gunakan /ganti main.py / /ganti strategy.py lalu kirim ulang.",
-            )
-            return
-
-        # File lain yang bukan bagian dari /ganti tidak diproses launcher.
-        # Bila main aktif, biarkan main.py yang menentukan perilakunya hanya
-        # untuk update document yang memang bukan sesi /ganti.
-
-    if command == "/ganti":
-        await start_ganti(chat_id, get_argument(text))
-        return
-
-    if GANTI_WAITING_SELECTION and text:
-        await _handle_ganti_selection(chat_id, text)
-        return
-
-    # Selain command launcher: teruskan semuanya ke main.py.
+    # No launcher-side trading commands or persistence. Everything else belongs
+    # to main.py. If main is stopped, tell the user; /try remains available.
     module = MAIN_MODULE
     if module is None or not MAIN_RUNNING:
-        tg_send(chat_id, "ℹ️ main.py belum aktif. Kirim /try terlebih dahulu.")
+        tg_send(chat_id, "i Engine belum aktif. Gunakan /try untuk menjalankan main.py + strategy.py.")
         return
 
     try:
-        context = {
-            "chat_id": chat_id,
-            "user_id": int((message.get("from") or {}).get("id") or 0),
-            "send_message": tg_send,
-            "send_document": tg_send_document,
-            "launcher": "try.py",
-            "main_file": str(safe_runtime_path(MAIN_FILE)),
-            "strategy_file": str(safe_runtime_path(STRATEGY_FILE)),
-            "is_running": lambda: MAIN_RUNNING,
-        }
-
-        await _call_update(module, update, context)
+        result = module.handle_update(update, _main_context(chat_id))
+        if asyncio.iscoroutine(result):
+            await result
     except Exception as exc:
-        log.exception("main.py gagal memproses update")
-        tg_send(chat_id, f"❌ main.py error\n{exc}")
-
-
-async def _call_update(module: ModuleType, update: dict, context: dict) -> None:
-    handler = getattr(module, "handle_update", None)
-    if not callable(handler):
-        raise RuntimeError(f"{MAIN_FILE} tidak memiliki handle_update().")
-
-    result = handler(update, context)
-    if asyncio.iscoroutine(result):
-        await result
+        log.exception("[LAUNCHER] forward update ke main.py gagal.")
+        tg_send(chat_id, f"✕ Main engine gagal memproses update: {str(exc)[:1800]}")
 
 
 # -----------------------------------------------------------------------------
-# TELEGRAM POLLING
+# Telegram polling + Render process lifetime
 # -----------------------------------------------------------------------------
 async def telegram_loop() -> None:
     offset: int | None = None
     backoff = 2
-
     try:
         tg_call("deleteWebhook", {"drop_pending_updates": False}, timeout=20)
     except Exception:
-        log.exception("Gagal deleteWebhook")
+        log.exception("[LAUNCHER] deleteWebhook gagal; polling tetap dicoba.")
 
     tg_send(
         ALLOWED_USER_ID,
-        "🚀 Launcher online.\n\n"
-        "Gunakan /try untuk sinkronisasi + menjalankan main.py.\n"
-        "Gunakan /ganti untuk mengganti main.py / strategy.py.",
+        "⌁ VOLUMATIC LAUNCHER ONLINE\n\n"
+        "/try  — start / reset main + strategy\n"
+        "/end  — stop main engine; Render tetap hidup\n"
+        "/healthz — status launcher dan engine\n\n"
+        "Trading state, cooldown, ban recovery, order, dan trade history dikelola main.py.",
     )
 
     while not STOP_EVENT.is_set():
         try:
-            payload = {
-                "timeout": TG_POLL_TIMEOUT,
-                "allowed_updates": ["message"],
-            }
+            payload = {"timeout": TG_POLL_TIMEOUT, "allowed_updates": ["message"]}
             if offset is not None:
                 payload["offset"] = offset
-
-            updates = await asyncio.to_thread(
-                tg_call,
-                "getUpdates",
-                payload,
-                TG_POLL_TIMEOUT + 10,
-            )
+            updates = await asyncio.to_thread(tg_call, "getUpdates", payload, TG_POLL_TIMEOUT + 10)
             backoff = 2
-
             for update in updates or []:
                 update_id = update.get("update_id")
                 if isinstance(update_id, int):
                     offset = update_id + 1
-
                 message = update.get("message")
                 if isinstance(message, dict):
                     await route_message(message, update)
-
         except Exception as exc:
-            log.warning("Telegram polling error: %s", exc)
+            log.warning("[LAUNCHER] Telegram polling reconnect: %s", exc)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
 
-# -----------------------------------------------------------------------------
-# PROCESS ENTRY POINT
-# -----------------------------------------------------------------------------
 async def async_main() -> None:
-    threading.Thread(
-        target=run_http_server,
-        name="http-health",
-        daemon=True,
-    ).start()
-
+    threading.Thread(target=run_http_server, name="volumatic-health", daemon=True).start()
     try:
         await telegram_loop()
     finally:
         STOP_EVENT.set()
-        await stop_main()
+        try:
+            await stop_main(ALLOWED_USER_ID)
+        except Exception:
+            log.exception("[LAUNCHER] cleanup engine saat process shutdown gagal.")
 
 
 if __name__ == "__main__":
