@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "1.5.0",
-  "updated_at": "2026-11-05T12:03:13.833448+00:00",
+  "updated_at": "2026-11-05T12:03:18.330853+00:00",
   "active_trades": [
     {
       "trade_id": "ESPORTSUSDT-20261105-190308-4DA2B8",
@@ -40,14 +40,14 @@
       "target_notional": "5.001",
       "actual_notional": "5.001",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": null,
+      "entry_order_id": 2214534622,
       "entry_client_order_id": "VT7ad7ac397a544de299338bd4d598",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": null,
-      "entry_order_status": "UNKNOWN",
+      "entry_executed_qty": "0",
+      "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
       "last_ws_event_key": null,
