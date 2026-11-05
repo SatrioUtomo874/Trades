@@ -12,3 +12,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-05T10:03:30.763028+00:00 | Reason: BINANCE_REJECTED: HTTP 400 | code -4116 | /fapi/v1/order: ClientOrderId is duplicated.
+## SOLVUSDT LONG — CANCELED
+- Trade ID: `SOLVUSDT-20261105-170852-7708FD`
+- Timeframe: H4 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-05T10:09:21.307206+00:00 | Reason: BINANCE_REJECTED: HTTP 400 | code -4116 | /fapi/v1/order: ClientOrderId is duplicated.
