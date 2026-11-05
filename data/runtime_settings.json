@@ -107,15 +107,18 @@
     "H4:BIOUSDT": 1793836800000,
     "H4:BIRBUSDT": 1793836800000,
     "H4:BLESSUSDT": 1793836800000,
-    "H4:BLUAIUSDT": 1793836800000
+    "H4:BLUAIUSDT": 1793836800000,
+    "H4:BLURUSDT": 1793836800000,
+    "H4:BMTUSDT": 1793836800000,
+    "H4:BNBUSDT": 1793836800000
   },
   "last_position_candles": {
     "H4:1000000MOGUSDT": 1793836800000,
     "H4:1000CATUSDT": 1793836800000
   },
   "signal_retries": {},
-  "scan_resume_cursor": 95,
+  "scan_resume_cursor": 98,
   "scan_resume_boundary_ms": 1793836800000,
   "scan_resume_timeframe": "H4",
-  "updated_at": "2026-11-05T02:03:45.391784+00:00"
+  "updated_at": "2026-11-05T02:03:48.231619+00:00"
 }
