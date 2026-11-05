@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "1.5.0",
-  "updated_at": "2026-11-05T10:03:10.119773+00:00",
+  "updated_at": "2026-11-05T10:03:13.630483+00:00",
   "active_trades": [
     {
       "trade_id": "ARXUSDT-20261105-165937-ED253D",
@@ -95,14 +95,14 @@
       "target_notional": "5.0166",
       "actual_notional": "5.0166",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": null,
+      "entry_order_id": 1530391244,
       "entry_client_order_id": "VT92cda3b6768e43bea5114dcc219e",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": null,
-      "entry_order_status": "UNKNOWN",
+      "entry_executed_qty": "0",
+      "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
       "last_ws_event_key": null,
