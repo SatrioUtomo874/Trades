@@ -24,8 +24,11 @@ from typing import Any, Mapping
 import numpy as np
 
 STRATEGY_NAME = "VOLUMATIC_TREND"
-STRATEGY_VERSION = "1.4.1"
-TREND_LENGTH = 40
+STRATEGY_VERSION = "1.5.0"
+DEFAULT_TREND_LENGTH = 100
+TREND_LENGTH = DEFAULT_TREND_LENGTH  # backward-compatible public default
+MIN_TREND_LENGTH = 1
+MAX_TREND_LENGTH = 300
 ATR_LENGTH = 200
 REFERENCE_BUFFER_ATR = 0.30
 SUPPORTED_EMA_FILTERS = (50, 100, 200)
@@ -52,6 +55,7 @@ class VolumaticSignal:
     ema1: float
     ema2: float
     trend: str
+    trend_length: int
     ema_filter_length: int | None
     ema_filter_value: float | None
     ema_filter_passed: bool
@@ -78,6 +82,7 @@ class VolumaticSignal:
             "ema1": self.ema1,
             "ema2": self.ema2,
             "trend": self.trend,
+            "trend_length": self.trend_length,
             "ema_filter_length": self.ema_filter_length,
             "ema_filter_value": self.ema_filter_value,
             "ema_filter_passed": self.ema_filter_passed,
@@ -189,6 +194,21 @@ def _rma_tv(values: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
+def normalize_trend_length(value: Any) -> int:
+    """Validate the adjustable Volumatic Trend length used by /length."""
+    if isinstance(value, bool):
+        raise ValueError("Trend length harus berupa bilangan bulat 1–300.")
+    try:
+        length = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Trend length harus berupa bilangan bulat 1–300.") from exc
+    if str(value).strip() not in {str(length), f"+{length}"}:
+        raise ValueError("Trend length harus berupa bilangan bulat 1–300.")
+    if not MIN_TREND_LENGTH <= length <= MAX_TREND_LENGTH:
+        raise ValueError(f"Trend length harus antara {MIN_TREND_LENGTH} dan {MAX_TREND_LENGTH}.")
+    return length
+
+
 def normalize_ema_filter_length(value: Any) -> int | None:
     """Normalize /EMA selection. None/"off" disables the directional filter."""
     if value is None or (isinstance(value, str) and value.strip().lower() in {"off", "none", "0", ""}):
@@ -215,6 +235,10 @@ def calculate_indicators(
     signal[t] is +1 for blue/bullish flip, -1 for red/bearish flip, and 0
     when no valid flip is present. Indices without enough history are invalid.
     """
+    trend_length = normalize_trend_length(trend_length)
+    atr_length = int(atr_length)
+    if atr_length < 1:
+        raise ValueError("ATR length harus >= 1.")
     ts, opens, highs, lows, closes, volumes = _extract_columns(candles)
     n = len(closes)
 
@@ -278,6 +302,7 @@ def calculate_indicators(
         "ema2": ema2,
         "ema_filter": ema_filter,
         "ema_filter_length": np.asarray([filter_length if filter_length is not None else 0], dtype=np.int16),
+        "trend_length": np.asarray([trend_length], dtype=np.int16),
         "tr": tr,
         "atr": atr,
         "trend": trend,
@@ -346,6 +371,7 @@ def _signal_from_indicators(
         ema1=float(indicators["ema1"][i]),
         ema2=float(indicators["ema2"][i]),
         trend="BULLISH" if code == 1 else "BEARISH",
+        trend_length=int(indicators.get("trend_length", np.asarray([TREND_LENGTH]))[0]),
         ema_filter_length=filter_length,
         ema_filter_value=filter_value,
         ema_filter_passed=bool(filter_passed),
@@ -444,6 +470,7 @@ def prepare_live_visual_context(
     tf = str(timeframe).upper()
     if tf not in TIMEFRAME_MS:
         raise ValueError(f"Timeframe tidak didukung: {timeframe}. Gunakan H4 atau D1.")
+    trend_length = normalize_trend_length(trend_length)
     span_ms = int(interval_ms or TIMEFRAME_MS[tf])
     indicators = calculate_indicators(
         candles, trend_length=trend_length, atr_length=atr_length,
@@ -484,6 +511,7 @@ def prepare_live_visual_context(
         "strategy_version": STRATEGY_VERSION,
         "symbol": str(symbol).upper(),
         "timeframe": tf,
+        "trend_length": trend_length,
         "signal_mode": "VISUAL_OFFSET_INTRABAR_B",
         "repaint_risk": True,
         # The signal's visual candle is the penultimate CLOSED row. Pine's
@@ -673,6 +701,7 @@ def analyze(
         "strategy_version": STRATEGY_VERSION,
         "symbol": str(symbol).upper(),
         "timeframe": tf,
+        "trend_length": int(indicators.get("trend_length", np.asarray([TREND_LENGTH]))[0]),
         "latest_open_time_ms": int(indicators["timestamp"][i]),
         "latest_close_time_ms": int(indicators["timestamp"][i]) + TIMEFRAME_MS[tf],
         "latest_close": float(indicators["close"][i]),
@@ -717,7 +746,8 @@ def trade_result_r(direction: str, entry_price: float, exit_price: float, initia
 
 
 __all__ = [
-    "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "ATR_LENGTH",
+    "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "DEFAULT_TREND_LENGTH",
+    "MIN_TREND_LENGTH", "MAX_TREND_LENGTH", "normalize_trend_length", "ATR_LENGTH",
     "REFERENCE_BUFFER_ATR", "TIMEFRAME_MS", "TIMEFRAME_INTERVALS", "SUPPORTED_TIMEFRAMES", "VolumaticSignal",
     "SUPPORTED_EMA_FILTERS", "DEFAULT_EMA_FILTER_LENGTH", "normalize_ema_filter_length",
     "calculate_indicators", "detect_latest_signal", "detect_signals_since", "signals_since", "analyze",
