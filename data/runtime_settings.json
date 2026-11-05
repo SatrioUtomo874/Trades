@@ -18,6 +18,12 @@
     "H4:1000BONKUSDT": 1793808000000,
     "H4:1000CATUSDT": 1793808000000
   },
-  "last_position_candles": {},
-  "updated_at": "2026-11-04T23:26:19.210327+00:00"
+  "last_position_candles": {
+    "H4:1000000MOGUSDT": 1793836800000
+  },
+  "signal_retries": {},
+  "scan_resume_cursor": 0,
+  "scan_resume_boundary_ms": 0,
+  "scan_resume_timeframe": "H4",
+  "updated_at": "2026-11-05T01:32:26.069705+00:00"
 }
