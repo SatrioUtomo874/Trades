@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "1.5.0",
-  "updated_at": "2026-11-05T09:58:43.229609+00:00",
+  "updated_at": "2026-11-05T09:58:45.913689+00:00",
   "active_trades": [
     {
       "trade_id": "ACUUSDT-20261105-165825-E74FEB",
@@ -40,11 +40,11 @@
       "target_notional": "5.05302",
       "actual_notional": "5.05302",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_REJECTED",
       "position_side": "BOTH",
       "entry_order_id": 884998235,
       "entry_client_order_id": "VTbe6828a564e94c07b5bbb84a286e",
-      "real_error": null,
+      "real_error": "HTTP 400 | code -4116 | /fapi/v1/order: ClientOrderId is duplicated.",
       "real_submit_ambiguous": false,
       "entry_executed_qty": "0",
       "entry_order_status": "NEW",
