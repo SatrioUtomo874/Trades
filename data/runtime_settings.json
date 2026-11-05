@@ -8,10 +8,10 @@
   "leverage": 10,
   "min_margin_enabled": true,
   "autostop_percent": "70",
-  "autostop_peak_equity": "99.97",
-  "autostop_last_equity": "99.97",
+  "autostop_peak_equity": "8.04438819",
+  "autostop_last_equity": "8.04438819",
   "autostop_triggered": false,
-  "autostop_source": "PAPER",
+  "autostop_source": "REAL",
   "last_processed_candles": {
     "H4:0GUSDT": 1793836800000,
     "H4:1000000MOGUSDT": 1793836800000,
@@ -110,15 +110,17 @@
     "H4:BLUAIUSDT": 1793836800000,
     "H4:BLURUSDT": 1793836800000,
     "H4:BMTUSDT": 1793836800000,
-    "H4:BNBUSDT": 1793836800000
+    "H4:BNBUSDT": 1793836800000,
+    "H4:BNTUSDT": 1793836800000,
+    "H4:BOMEUSDT": 1793836800000
   },
   "last_position_candles": {
     "H4:1000000MOGUSDT": 1793836800000,
     "H4:1000CATUSDT": 1793836800000
   },
   "signal_retries": {},
-  "scan_resume_cursor": 98,
+  "scan_resume_cursor": 100,
   "scan_resume_boundary_ms": 1793836800000,
   "scan_resume_timeframe": "H4",
-  "updated_at": "2026-11-05T02:03:48.231619+00:00"
+  "updated_at": "2026-11-05T02:03:50.321804+00:00"
 }
