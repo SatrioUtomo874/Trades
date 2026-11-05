@@ -3536,7 +3536,11 @@ class TradingEngine:
             except ValueError:
                 self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
                 log.warning("ema_filter_length tidak valid; default EMA %s dipakai.", self.ema_filter_length)
-            self.scan_enabled = bool(payload.get("scan_enabled", False))
+            # Scanner arming is intentionally SESSION-ONLY. A fresh /try (or
+            # Render restart) must never resume a previous scan automatically.
+            # The only way to arm scanning is an explicit Telegram `/scan on`.
+            self.scan_enabled = False
+            self._scan_trigger_now = False
             self.max_active_trades = max(1, min(1000, int(payload.get("max_active_trades") or MAX_ACTIVE_TRADES)))
             self.margin_usdt = parse_decimal(payload.get("margin_usdt") or DEFAULT_MARGIN_USDT)
             self.leverage = max(1, min(125, int(payload.get("leverage") or DEFAULT_LEVERAGE)))
@@ -3614,7 +3618,8 @@ class TradingEngine:
                 "strategy": volumatic.STRATEGY_NAME,
                 "timeframe": self.timeframe,
                 "ema_filter_length": self.ema_filter_length,
-                "scan_enabled": self.scan_enabled,
+                # Deliberately do not persist scan_enabled. Scanner requires an
+                # explicit `/scan on` in every fresh engine session.
                 "max_active_trades": self.max_active_trades,
                 "margin_usdt": decimal_to_str(self.margin_usdt),
                 "leverage": self.leverage,
@@ -4041,6 +4046,10 @@ class TradingEngine:
             self._telegram_error_handler_added = True
 
         await self._load_runtime_settings()
+        # Fail-safe: every engine start/reload begins with scanner OFF.
+        # Only /scan on may turn it ON during this session.
+        self.scan_enabled = False
+        self._scan_trigger_now = False
         await self._load_history()
         await self._load_notes()
         await self._load_active_state()
@@ -4111,6 +4120,7 @@ class TradingEngine:
             f"Timeframe: {self.timeframe} (default H4)\n"
             f"Universe: {len(self.symbols)} USDT Perpetual\n"
             f"Batch scanner: {SCAN_MAX_PAIRS_PER_CYCLE} pair\n"
+            "Scanner: OFF (menunggu /scan on)\n"
             f"Active restored: {len(self.active_trades)}\n"
             f"Deferred commands: {len(self.deferred_commands)}\n"
             f"Binance cooldown: {self._binance_cooldown_remaining():.0f}s\n"
@@ -6043,6 +6053,7 @@ class TradingEngine:
         self.scan_enabled = enable
         if enable:
             self._scan_trigger_now = True
+            log.info("[SCAN] explicitly armed by Telegram /scan on | tf=%s | batch=%s", self.timeframe, SCAN_MAX_PAIRS_PER_CYCLE)
             await self.reply(f"🟢 Scanner ON • Volumatic {self.timeframe} • batch {SCAN_MAX_PAIRS_PER_CYCLE}.")
         else:
             await self.reply("🟡 Scanner OFF. Posisi dan pending order tetap dimonitor; order tetap expired pada akhir candle.")
