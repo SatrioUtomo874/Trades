@@ -1399,22 +1399,43 @@ class BinanceREST:
         span_ms = int(interval_ms or self._interval_ms(api_interval))
         count = max(3, min(1500, int(count)))
         now_ms = int(time.time() * 1000)
-        payload = await self._get("/fapi/v1/klines", {
-            "symbol": symbol, "interval": api_interval,
-            "endTime": now_ms, "limit": count,
-        })
+        expected_open = (now_ms // span_ms) * span_ms
+        payload = None
+        rows = np.empty(0, dtype=KLINE_CACHE_DTYPE)
+        last_error = None
+        # At an exact H4/D1 boundary Binance's REST kline endpoint can lag a
+        # few seconds and return only the candle that just closed. Retry once
+        # with a small future endTime; accept only the expected current open.
+        for attempt in range(2):
+            request_now = int(time.time() * 1000)
+            try:
+                payload = await self._get("/fapi/v1/klines", {
+                    "symbol": symbol, "interval": api_interval,
+                    "endTime": request_now + 20_000, "limit": count,
+                })
+                if isinstance(payload, list) and payload:
+                    # A short 20s allowance accounts for exchange/local clock
+                    # skew at candle boundaries; do not accept another candle.
+                    rows = self._pack_kline_rows(payload, span_ms, request_now + 20_000, include_forming=True)
+                    if rows.size and int(rows["t"][-1]) == expected_open:
+                        break
+                last_error = f"last_open={int(rows['t'][-1]) if rows.size else 'none'}, expected_open={expected_open}"
+            except Exception as exc:
+                last_error = str(exc)
+            if attempt == 0:
+                await asyncio.sleep(0.8)
+                now_ms = int(time.time() * 1000)
+                expected_open = (now_ms // span_ms) * span_ms
         if not isinstance(payload, list) or not payload:
             raise RuntimeError(f"Binance tidak mengembalikan kline live untuk {symbol} {api_interval}.")
-        rows = self._pack_kline_rows(payload, span_ms, now_ms, include_forming=True)
         if rows.size < max(3, min(count - 1, volumatic.ATR_LENGTH + 5)):
-            raise RuntimeError(
-                f"Kline live {symbol} {api_interval} tidak cukup: {rows.shape[0]}/{count}."
-            )
+            raise RuntimeError(f"Kline live {symbol} {api_interval} tidak cukup: {rows.shape[0]}/{count}.")
         last_open = int(rows["t"][-1])
-        if not (last_open <= now_ms < last_open + span_ms):
+        now_ms = int(time.time() * 1000)
+        if last_open != expected_open or not (last_open <= now_ms + 20_000 < last_open + span_ms):
             raise RuntimeError(
-                f"Tidak ada candle aktif yang valid untuk {symbol} {api_interval}; "
-                f"last_open={last_open}, now={now_ms}."
+                f"Candle H4/D1 baru belum dipublikasikan Binance untuk {symbol} {api_interval}; "
+                f"last_open={last_open}, expected_open={expected_open}, now={now_ms}; retry pada batch berikutnya."
             )
         return rows
 
@@ -2523,7 +2544,7 @@ class BinanceWebSocket:
         remove = sorted(self._subscribed_symbols - normalized)
         add = sorted(normalized - self._subscribed_symbols)
         # Keep each command comfortably under Binance's stream/message limits.
-        batch_size = 200
+        batch_size = 40  # keep Binance control payloads small for large universes
         for start in range(0, len(remove), batch_size):
             await self._send_unsubscribe(remove[start:start + batch_size])
         for start in range(0, len(add), batch_size):
@@ -2587,10 +2608,10 @@ class BinanceWebSocket:
         if not symbols:
             return False
 
-        params = [
-            f"{symbol.lower()}@aggTrade"
-            for symbol in symbols
-        ]
+        # Per-symbol trade ticks. Mark prices arrive separately through the
+        # single global !markPrice@arr@1s stream (one stream for the universe),
+        # avoiding the 1024-stream ceiling for a 522-symbol universe.
+        params = [f"{symbol.lower()}@aggTrade" for symbol in symbols]
 
         payload = {
             "method": method,
@@ -2671,17 +2692,59 @@ class BinanceWebSocket:
 
         return sent
 
+    async def _send_global_markprice_stream(self) -> None:
+        """Subscribe once to Binance's all-symbol mark-price array stream."""
+        if self._ws is None or not self.connected:
+            return
+        payload = {
+            "method": "SUBSCRIBE",
+            "params": ["!markPrice@arr@1s"],
+            "id": int(time.time() * 1000) % 2_000_000_000,
+        }
+        async with self._command_lock:
+            ws = self._ws
+            if ws is None or not self.connected:
+                return
+            await ws.send(json.dumps(payload))
+
     async def _resubscribe_all(self) -> None:
         self._subscribed_symbols.clear()
+        symbols = sorted(self._desired_symbols)
+        # Global mark-price array is a single stream, independent of the
+        # symbol count. aggTrade subscriptions are sent in small batches.
+        await self._send_global_markprice_stream()
+        batch_size = 40
+        for start in range(0, len(symbols), batch_size):
+            if self._stop.is_set():
+                break
+            batch = symbols[start:start + batch_size]
+            await self._send_subscribe(batch)
+            await asyncio.sleep(0.10)
 
-        symbols = sorted(
-            self._desired_symbols
-        )
-
-        if symbols:
-            await self._send_subscribe(
-                symbols
-            )
+    async def _handle_market_event(self, data: dict[str, Any]) -> None:
+        event_type = str(data.get("e") or "")
+        if event_type not in {"aggTrade", "markPriceUpdate"}:
+            return
+        symbol = normalize_symbol(str(data.get("s") or ""))
+        price_raw = str(data.get("p") or "")
+        event_time_ms = int(data.get("E") or data.get("T") or int(time.time() * 1000))
+        try:
+            aggregate_trade_id = int(data.get("a")) if event_type == "aggTrade" else -1
+        except (TypeError, ValueError):
+            aggregate_trade_id = -1
+        if not symbol or not price_raw:
+            return
+        event_key = (event_time_ms, aggregate_trade_id)
+        last_key = self._last_market_event_key.get(symbol)
+        if last_key is not None and event_key <= last_key:
+            return
+        self._last_market_event_key[symbol] = event_key
+        try:
+            price = parse_decimal(price_raw)
+        except ValueError:
+            log.warning("Harga WebSocket tidak valid: %s", price_raw)
+            return
+        await self.on_price(symbol, price, event_time_ms, aggregate_trade_id)
 
     async def _run(self) -> None:
         backoff = WS_RECONNECT_MIN
@@ -2756,78 +2819,15 @@ class BinanceWebSocket:
                         # /market/stream memakai combined-stream subscription dan
                         # membungkus event sebagai {"stream":"...","data":{...}}.
                         # Parser tetap menerima raw payload untuk kompatibilitas.
-                        if "data" in payload and isinstance(
-                            payload.get("data"),
-                            dict,
-                        ):
-                            data = payload["data"]
-                        else:
-                            data = payload
-
-                        if data.get("e") != "aggTrade":
-                            continue
-
-                        symbol = normalize_symbol(
-                            str(data.get("s") or "")
-                        )
-
-                        price_raw = str(
-                            data.get("p") or ""
-                        )
-
-                        event_time_ms = int(
-                            data.get("E")
-                            or data.get("T")
-                            or int(time.time() * 1000)
-                        )
-
-                        # aggTrade memiliki aggregate trade ID ("a").
-                        # Simpan bersama event time supaya event lama yang
-                        # terlambat datang setelah reconnect tidak diproses
-                        # sebagai harga terbaru. Untuk aggTrade normal, ID
-                        # tersedia; fallback  -1 hanya untuk payload yang
-                        # tidak menyediakannya.
-                        try:
-                            aggregate_trade_id = int(data.get("a"))
-                        except (TypeError, ValueError):
-                            aggregate_trade_id = -1
-
-                        if not symbol or not price_raw:
-                            continue
-
-                        event_key = (
-                            event_time_ms,
-                            aggregate_trade_id,
-                        )
-
-                        last_key = self._last_market_event_key.get(
-                            symbol
-                        )
-
-                        if last_key is not None and event_key <= last_key:
-                            # Event lama/duplikat. Abaikan agar tick stale tidak
-                            # mengubah status fill/expiry atau PnL secara mundur.
-                            continue
-
-                        self._last_market_event_key[symbol] = event_key
-
-                        try:
-                            price = parse_decimal(
-                                price_raw
-                            )
-                        except ValueError:
-                            log.warning(
-                                "Harga WebSocket tidak valid: %s",
-                                price_raw,
-                            )
-                            continue
-
-                        await self.on_price(
-                            symbol,
-                            price,
-                            event_time_ms,
-                            aggregate_trade_id,
-                        )
+                        # Combined !markPrice@arr@1s frames contain a list;
+                        # individual aggTrade frames contain one dictionary.
+                        data = payload.get("data", payload) if isinstance(payload, dict) else payload
+                        if isinstance(data, list):
+                            for item in data:
+                                if isinstance(item, dict):
+                                    await self._handle_market_event(item)
+                        elif isinstance(data, dict):
+                            await self._handle_market_event(data)
 
             except asyncio.CancelledError:
                 break
@@ -3033,6 +3033,31 @@ class BinanceUserDataWebSocket:
         self.listen_key = await self.real.keepalive_user_stream(self.listen_key)
         self.last_keepalive_monotonic = time.monotonic()
         log.info("[USER WS] listenKey renewed")
+
+    async def _handle_market_event(self, data: dict[str, Any]) -> None:
+        event_type = str(data.get("e") or "")
+        if event_type not in {"aggTrade", "markPriceUpdate"}:
+            return
+        symbol = normalize_symbol(str(data.get("s") or ""))
+        price_raw = str(data.get("p") or "")
+        event_time_ms = int(data.get("E") or data.get("T") or int(time.time() * 1000))
+        try:
+            aggregate_trade_id = int(data.get("a")) if event_type == "aggTrade" else -1
+        except (TypeError, ValueError):
+            aggregate_trade_id = -1
+        if not symbol or not price_raw:
+            return
+        event_key = (event_time_ms, aggregate_trade_id)
+        last_key = self._last_market_event_key.get(symbol)
+        if last_key is not None and event_key <= last_key:
+            return
+        self._last_market_event_key[symbol] = event_key
+        try:
+            price = parse_decimal(price_raw)
+        except ValueError:
+            log.warning("Harga WebSocket tidak valid: %s", price_raw)
+            return
+        await self.on_price(symbol, price, event_time_ms, aggregate_trade_id)
 
     async def _run(self) -> None:
         backoff = WS_RECONNECT_MIN
@@ -4724,10 +4749,19 @@ class TradingEngine:
                         log.info("[SCAN] paused at symbol=%s | resume_cursor=%s", symbol, self._scan_resume_cursor)
                         break
                     except Exception as exc:
-                        stats["errors"] += 1
-                        errors_total += 1
-                        self._scan_resume_cursor = absolute_index + 1
-                        log.exception("[SCAN] %s failed: %s", symbol, exc)
+                        message = str(exc)
+                        if "belum dipublikasikan Binance" in message:
+                            # Normal short publication lag at a new H4/D1
+                            # boundary. Do not flood Telegram/logs as ERROR;
+                            # leave the cursor here so the next pass can retry.
+                            stats["stale"] += 1
+                            self._scan_resume_cursor = absolute_index
+                            log.info("[SCAN] %s candle baru belum tersedia dari Binance; ditunda ke pass berikutnya.", symbol)
+                        else:
+                            stats["errors"] += 1
+                            errors_total += 1
+                            self._scan_resume_cursor = absolute_index + 1
+                            log.exception("[SCAN] %s failed: %s", symbol, exc)
 
                     if SCAN_PAIR_DELAY_SECONDS > 0:
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
@@ -7431,7 +7465,23 @@ class TradingEngine:
         )
 
     async def show_trades(self) -> None:
-        active = [t for t in self.active_trades.values() if t.status in {"PENDING", "FILLED"}]
+        raw_active = [t for t in self.active_trades.values() if t.status in {"PENDING", "FILLED"}]
+        # Binance can emit ORDER_TRADE_UPDATE and ACCOUNT_UPDATE almost
+        # simultaneously. Reconciliation may briefly create a second in-memory
+        # projection for the same exchange exposure; /trade must show one row.
+        deduped: dict[tuple[str, str, str], Trade] = {}
+        for trade in raw_active:
+            key = (trade.pair, trade.direction, trade.status)
+            current = deduped.get(key)
+            score = lambda item: (
+                int(bool(item.real_enabled)),
+                int(bool(item.entry_order_id or item.entry_client_order_id)),
+                int(bool(item.exchange_adopted)),
+                item.filled_at.timestamp() if item.filled_at else item.created_at.timestamp(),
+            )
+            if current is None or score(trade) > score(current):
+                deduped[key] = trade
+        active = list(deduped.values())
         if not active:
             await self.reply("Tidak ada pending order atau posisi aktif.")
             return
