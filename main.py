@@ -157,6 +157,18 @@ MAX_ACTIVE_TRADES = max(1, int(os.getenv("MAX_ACTIVE_TRADES", "100") or "100"))
 SCAN_MAX_PAIRS_PER_CYCLE = 50
 SCAN_PAIR_DELAY_SECONDS = float(os.getenv("SCAN_PAIR_DELAY_SECONDS", "0.15") or "0.15")
 SCAN_POLL_SECONDS = 2.0
+# One-time scanner activation slots in Asia/Jakarta (WIB). 12:00 is an
+# additional user-requested slot; the other six align with H4 closes.
+SCAN_SCHEDULE_SLOTS = (
+    ("1", "07:00"),
+    ("2", "11:00"),
+    ("3", "15:00"),
+    ("4", "19:00"),
+    ("5", "23:00"),
+    ("6", "03:00"),
+    ("7", "12:00"),
+)
+SCAN_SCHEDULE_BY_NUMBER = dict(SCAN_SCHEDULE_SLOTS)
 MAINTENANCE_POLL_SECONDS = 2.0
 # Base request remains 499 candles. _kline_history_limit() expands history only
 # when /length is raised, capped below Binance USD-M per-request maximum.
@@ -574,6 +586,10 @@ class Trade:
     # passed while Binance REST was IP-banned. It remains until fill, reversal,
     # or explicit manual cancellation.
     preserve_gtc_after_cooldown: bool = False
+    # Live exchange snapshot adoption is not a local-history restore. It lets a
+    # fresh /try session display/manage existing bot-created Binance exposure.
+    exchange_adopted: bool = False
+    exchange_adoption_source: str | None = None
 
     @property
     def entry_side(self) -> str:
@@ -616,6 +632,8 @@ class Trade:
             "last_ws_event_key": self.last_ws_event_key,
             "late_fill_during_api_cooldown": self.late_fill_during_api_cooldown,
             "preserve_gtc_after_cooldown": self.preserve_gtc_after_cooldown,
+            "exchange_adopted": self.exchange_adopted,
+            "exchange_adoption_source": self.exchange_adoption_source,
             "strategy_name": volumatic.STRATEGY_NAME, "strategy_version": volumatic.STRATEGY_VERSION,
             "entry_reason": "Volumatic Trend visual offset=-1 bubble candle CLOSE; LIMIT valid on adjacent live candle only (mode B)",
             "price_exp_reason": (
@@ -683,6 +701,8 @@ class Trade:
             last_ws_event_key=row.get("last_ws_event_key"),
             late_fill_during_api_cooldown=bool(row.get("late_fill_during_api_cooldown", False)),
             preserve_gtc_after_cooldown=bool(row.get("preserve_gtc_after_cooldown", False)),
+            exchange_adopted=bool(row.get("exchange_adopted", False)),
+            exchange_adoption_source=row.get("exchange_adoption_source"),
         )
 
 
@@ -3464,6 +3484,12 @@ class TradingEngine:
         self.trend_length = volumatic.DEFAULT_TREND_LENGTH
         self.ema_filter_length: int | None = volumatic.DEFAULT_EMA_FILTER_LENGTH
         self.scan_enabled = False
+        # Session-only delayed scanner activation. It is deliberately not
+        # persisted: every fresh /try starts with scanner OFF and no schedule.
+        self.scan_schedule_slots: tuple[str, ...] = ()
+        self.scan_schedule_waiting = False
+        self.scan_schedule_activated_at: str | None = None
+        self._scan_schedule_last_fired_minute: str | None = None
 
         # Account safety: trailing equity drawdown guard. It pauses NEW scanning
         # only; it never silently closes existing positions or cancels live orders.
@@ -3491,6 +3517,13 @@ class TradingEngine:
         self._scanner_symbols: set[str] = set()
         self.prices: dict[str, PriceSnapshot] = {}
         self.active_trades: dict[str, Trade] = {}
+        # Live exchange projection. Seeded once from the account-wide snapshot
+        # already requested by /real on, then maintained by ACCOUNT_UPDATE and
+        # ORDER_TRADE_UPDATE. /trade reads this cache only; it never REST-polls.
+        self.exchange_positions: dict[tuple[str, str], dict[str, Any]] = {}
+        self.exchange_open_orders: dict[str, dict[str, Any]] = {}
+        self.exchange_snapshot_at: datetime | None = None
+        self._last_user_ws_reconnect_count = 0
         self.legacy_active_snapshot_count = 0
         self.history_records: list[dict[str, Any]] = []
         self.history_events: list[dict[str, Any]] = []
@@ -4141,6 +4174,10 @@ class TradingEngine:
         self.real_mode = False
         self.scan_enabled = False
         self._scan_trigger_now = False
+        self.scan_schedule_slots = ()
+        self.scan_schedule_waiting = False
+        self.scan_schedule_activated_at = None
+        self._scan_schedule_last_fired_minute = None
         self.timeframe = "H4"
         self.trend_length = volumatic.DEFAULT_TREND_LENGTH
         self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
@@ -4149,6 +4186,10 @@ class TradingEngine:
         self.min_margin_enabled = False
         self.max_active_trades = MAX_ACTIVE_TRADES
         self.active_trades.clear()
+        self.exchange_positions.clear()
+        self.exchange_open_orders.clear()
+        self.exchange_snapshot_at = None
+        self._last_user_ws_reconnect_count = 0
         self.history_records.clear()
         self.history_events.clear()
         self.notes.clear()
@@ -4208,7 +4249,7 @@ class TradingEngine:
             f"Trend length  : {self.trend_length} (default {volumatic.DEFAULT_TREND_LENGTH})\n"
             f"EMA filter    : {'EMA' + str(self.ema_filter_length) if self.ema_filter_length is not None else 'OFF'}\n"
             f"Max positions : {self.max_active_trades}\n"
-            "Scanner       : OFF — menunggu /scan on\n"
+            "Scanner       : OFF — menunggu /scan on atau /scan schedule\n"
             "REAL          : OFF — menunggu /real on\n"
             "Active        : 0\n"
             "Market WS     : OFF — aktif saat scanner dimulai\n"
@@ -4230,6 +4271,10 @@ class TradingEngine:
         self._running = False
         self.scan_enabled = False
         self._scan_trigger_now = False
+        self.scan_schedule_slots = ()
+        self.scan_schedule_waiting = False
+        self.scan_schedule_activated_at = None
+        self._scan_schedule_last_fired_minute = None
         self.real_mode = False
 
         # Signal every loop/socket worker to stop, then cancel concurrently.
@@ -4375,9 +4420,55 @@ class TradingEngine:
             lines.append("NEXT      : menunggu close candle timeframe berikutnya")
         await self.reply("\n".join(lines))
 
+    async def _check_scan_schedule_activation(self) -> bool:
+        """Activate scanner once when a selected WIB slot is reached.
+
+        After activation, scanning remains ON continuously until /scan off.
+        A selected schedule is only a delayed-start gate, not a daily on/off
+        window. Schedule state is intentionally in-memory for this fresh
+        engine session only.
+        """
+        if not self.scan_schedule_waiting or not self.scan_schedule_slots:
+            return False
+        now = datetime.now(TZ)
+        hhmm = now.strftime("%H:%M")
+        if hhmm not in self.scan_schedule_slots:
+            return False
+        minute_key = now.strftime("%Y-%m-%d %H:%M")
+        if minute_key == self._scan_schedule_last_fired_minute:
+            return False
+        if self._autostop_triggered:
+            return False
+        if self.autostop_percent is not None and self._autostop_data_hold:
+            return False
+
+        self._scan_schedule_last_fired_minute = minute_key
+        self.scan_schedule_waiting = False
+        self.scan_schedule_activated_at = now.strftime("%d-%m-%Y %H:%M WIB")
+        self.scan_enabled = True
+        self._scan_trigger_now = True
+        self._last_scan_boundary_ms = 0
+        await self.ws.start()
+        await self._sync_ws_symbols()
+        selected = ", ".join(self.scan_schedule_slots)
+        message = (
+            "🟢 VOLUMATIC / SCHEDULE TRIGGERED\n\n"
+            f"SLOT      : {hhmm} WIB\n"
+            f"SELECTED  : {selected} WIB\n"
+            f"TIMEFRAME : {self.timeframe}\n"
+            f"BATCH     : {SCAN_MAX_PAIRS_PER_CYCLE} symbols\n"
+            "SCANNER   : ON — continuous\n"
+            "CONTROL   : gunakan /scan off untuk menghentikan."
+        )
+        await self.reply(message)
+        log.info("[SCAN SCHEDULE] activated | slot=%s | selected=%s | tf=%s", hhmm, selected, self.timeframe)
+        return True
+
     async def _scan_loop(self) -> None:
         while self._running:
             try:
+                if not self.scan_enabled and self.scan_schedule_waiting:
+                    await self._check_scan_schedule_activation()
                 if not self.scan_enabled:
                     await asyncio.sleep(SCAN_POLL_SECONDS)
                     continue
@@ -4775,7 +4866,8 @@ class TradingEngine:
             # A trade keeps the timeframe that created it. A newly selected
             # timeframe must not reverse or otherwise hijack that existing
             # position; only its own timeframe can manage its lifecycle.
-            if existing and existing.timeframe != str(signal.get("timeframe") or self.timeframe).upper():
+            if (existing and not existing.exchange_adopted
+                    and existing.timeframe != str(signal.get("timeframe") or self.timeframe).upper()):
                 log.info(
                     "[SIGNAL] %s %s %s diabaikan: trade aktif memakai timeframe %s.",
                     pair, direction, signal.get("timeframe"), existing.timeframe,
@@ -6256,8 +6348,462 @@ class TradingEngine:
                 await self._mark_filled(trade, trade.entry, "PAPER_WEBSOCKET_LIMIT_TOUCH")
         await self._evaluate_live_visual_bubble(symbol, price, int(event_time_ms))
 
+    @staticmethod
+    def _exchange_event_time(row: dict[str, Any]) -> datetime:
+        """Best available exchange timestamp, falling back to current UTC."""
+        for key in ("updateTime", "time", "T", "E", "T"):
+            raw = row.get(key)
+            if raw in (None, "", 0, "0"):
+                continue
+            try:
+                value = float(raw)
+                if value > 10_000_000_000:
+                    value /= 1000.0
+                return datetime.fromtimestamp(value, tz=timezone.utc)
+            except (TypeError, ValueError, OSError, OverflowError):
+                continue
+        return now_utc()
+
+    @staticmethod
+    def _exchange_position_direction(row: dict[str, Any], amount: Decimal | None = None) -> str | None:
+        side = str(row.get("positionSide") or row.get("ps") or "BOTH").upper()
+        if side == "LONG":
+            return "LONG"
+        if side == "SHORT":
+            return "SHORT"
+        if amount is None:
+            raw = row.get("positionAmt", row.get("pa", "0"))
+            try:
+                amount = parse_signed_decimal(str(raw or "0"))
+            except Exception:
+                return None
+        if amount > 0:
+            return "LONG"
+        if amount < 0:
+            return "SHORT"
+        return None
+
+    def _refresh_real_position_cache(self, symbol: str) -> None:
+        rows = [
+            dict(row) for (pair, _side), row in self.exchange_positions.items()
+            if pair == symbol
+        ]
+        if rows:
+            self.real.last_positions[symbol] = rows
+            self.real.last_positions_at[symbol] = time.monotonic()
+        else:
+            self.real.last_positions.pop(symbol, None)
+            self.real.last_positions_at[symbol] = time.monotonic()
+
+    def _find_real_trade(self, symbol: str, direction: str) -> Trade | None:
+        return next((
+            trade for trade in self.active_trades.values()
+            if trade.real_enabled and trade.pair == symbol
+            and trade.direction == direction and trade.status in {"PENDING", "FILLED"}
+        ), None)
+
+    def _new_exchange_adopted_trade(
+        self,
+        *,
+        symbol: str,
+        direction: str,
+        entry: Decimal,
+        quantity: Decimal,
+        position_side: str,
+        source: str,
+        status: str = "FILLED",
+        signal_time: datetime | None = None,
+        leverage: int | None = None,
+        margin: Decimal | None = None,
+        client_order_id: str | None = None,
+        order_id: int | None = None,
+        order_status: str = "FILLED",
+        executed_qty: Decimal | None = None,
+        preserve_gtc: bool = False,
+    ) -> Trade:
+        """Create an in-memory view from live Binance state, never from old local files."""
+        stamp = signal_time or now_utc()
+        lev = max(1, int(leverage or self.leverage or DEFAULT_LEVERAGE))
+        notional = abs(quantity) * entry if quantity > 0 and entry > 0 else Decimal("0")
+        margin_value = margin if margin is not None and margin > 0 else (
+            notional / Decimal(lev) if notional > 0 else self.margin_usdt
+        )
+        timeframe_ms = volumatic.TIMEFRAME_MS.get(self.timeframe, volumatic.TIMEFRAME_MS["H4"])
+        direction = direction.upper()
+        return Trade(
+            trade_id=generate_trade_id(symbol),
+            session_id=self.session_id,
+            pair=symbol,
+            direction=direction,
+            timeframe="EXCHANGE",
+            trend_length=self.trend_length,
+            signal="BLUE" if direction == "LONG" else "RED",
+            signal_time=stamp,
+            bubble_price=entry,
+            signal_atr=None,
+            reference_sl=None,
+            entry=entry,
+            expires_at=now_utc() + timedelta(milliseconds=timeframe_ms),
+            signal_close_price=entry,
+            ema_filter_length=None,
+            ema_filter_value=None,
+            ema_filter_passed=None,
+            status=status,
+            created_at=stamp,
+            filled_at=(stamp if status == "FILLED" else None),
+            fill_price=(entry if status == "FILLED" else None),
+            quantity=quantity if quantity > 0 else None,
+            margin_usdt=margin_value,
+            leverage=lev,
+            target_notional=notional if notional > 0 else None,
+            actual_notional=notional if notional > 0 else None,
+            real_enabled=True,
+            real_state=("REAL_EXCHANGE_ADOPTED" if status == "FILLED" else "REAL_EXCHANGE_ADOPTED_PENDING"),
+            position_side=position_side or "BOTH",
+            entry_order_id=order_id,
+            entry_client_order_id=client_order_id,
+            entry_executed_qty=executed_qty,
+            entry_order_status=order_status,
+            entry_order_terminal=(order_status in {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}),
+            preserve_gtc_after_cooldown=preserve_gtc,
+            exchange_adopted=True,
+            exchange_adoption_source=source,
+        )
+
+    async def _upsert_exchange_position(
+        self, row: dict[str, Any], *, source: str, finalize_on_flat: bool = True
+    ) -> Trade | None:
+        """Apply one position row from /account snapshot or ACCOUNT_UPDATE."""
+        symbol = normalize_symbol(str(row.get("symbol") or row.get("s") or ""))
+        if not symbol:
+            return None
+        side = str(row.get("positionSide") or row.get("ps") or "BOTH").upper()
+        amount_raw = row.get("positionAmt", row.get("pa", "0"))
+        try:
+            amount = parse_signed_decimal(str(amount_raw or "0"))
+        except ValueError:
+            return None
+        key = (symbol, side)
+        previous = self.exchange_positions.get(key)
+
+        if amount == 0:
+            old = self.exchange_positions.pop(key, None)
+            self._refresh_real_position_cache(symbol)
+            if old and finalize_on_flat:
+                old_amount = old.get("_position_amount_decimal")
+                try:
+                    old_amount = old_amount if isinstance(old_amount, Decimal) else parse_signed_decimal(str(old.get("positionAmt") or "0"))
+                except Exception:
+                    old_amount = Decimal("0")
+                old_direction = self._exchange_position_direction(old, old_amount)
+                if old_direction:
+                    trade = self._find_real_trade(symbol, old_direction)
+                    if trade and trade.exchange_adopted and trade.status == "FILLED":
+                        close_price = self._current_price(symbol)
+                        if close_price is None:
+                            try:
+                                close_price = Decimal(str(old.get("markPrice") or old.get("entryPrice") or trade.fill_price or trade.entry))
+                            except Exception:
+                                close_price = trade.fill_price or trade.entry
+                        await self._finalize_trade(
+                            trade, "CLOSED", close_price,
+                            f"ACCOUNT_UPDATE_POSITION_FLAT:{source}",
+                        )
+            return None
+
+        normalized = dict(previous or {})
+        normalized.update(row)
+        normalized["symbol"] = symbol
+        normalized["positionSide"] = side
+        normalized["positionAmt"] = str(amount)
+        normalized["_position_amount_decimal"] = amount
+        normalized["_abs_position_amt"] = abs(amount)
+        if row.get("ep") not in (None, ""):
+            normalized["entryPrice"] = str(row.get("ep"))
+        if row.get("mp") not in (None, ""):
+            normalized["markPrice"] = str(row.get("mp"))
+        if row.get("up") not in (None, ""):
+            normalized["unRealizedProfit"] = str(row.get("up"))
+        self.exchange_positions[key] = normalized
+        self._refresh_real_position_cache(symbol)
+
+        direction = self._exchange_position_direction(normalized, amount)
+        if direction is None:
+            return None
+        try:
+            entry = Decimal(str(normalized.get("entryPrice") or "0"))
+        except (InvalidOperation, ValueError):
+            entry = Decimal("0")
+        if entry <= 0:
+            existing = self._find_real_trade(symbol, direction)
+            entry = (existing.fill_price or existing.entry) if existing else Decimal("0")
+        quantity = abs(amount)
+        try:
+            leverage = max(1, int(normalized.get("leverage") or self.leverage or DEFAULT_LEVERAGE))
+        except (TypeError, ValueError):
+            leverage = self.leverage
+        margin = None
+        for margin_key in ("initialMargin", "isolatedMargin", "positionInitialMargin"):
+            try:
+                candidate = Decimal(str(normalized.get(margin_key) or "0"))
+                if candidate > 0:
+                    margin = candidate
+                    break
+            except (InvalidOperation, ValueError):
+                pass
+        stamp = self._exchange_event_time(normalized)
+        trade = self._find_real_trade(symbol, direction)
+        if trade is None:
+            trade = self._new_exchange_adopted_trade(
+                symbol=symbol, direction=direction, entry=entry, quantity=quantity,
+                position_side=side, source=source, status="FILLED", signal_time=stamp,
+                leverage=leverage, margin=margin, order_status="FILLED",
+                executed_qty=quantity,
+            )
+            self.active_trades[trade.trade_id] = trade
+            log.info("[REAL/WS] exchange position adopted | %s %s qty=%s entry=%s source=%s", symbol, direction, quantity, entry, source)
+        else:
+            was_pending = trade.status == "PENDING"
+            trade.quantity = quantity
+            trade.entry_executed_qty = quantity
+            trade.fill_price = entry if entry > 0 else (trade.fill_price or trade.entry)
+            trade.actual_notional = quantity * trade.fill_price
+            trade.margin_usdt = margin if margin is not None else trade.actual_notional / Decimal(max(1, trade.leverage))
+            trade.position_side = side
+            if was_pending:
+                await self._mark_filled(trade, trade.fill_price, f"BINANCE_ACCOUNT_UPDATE_{source}")
+            elif trade.exchange_adopted:
+                trade.real_state = "REAL_EXCHANGE_ADOPTED"
+        await self.ws.add_symbol(symbol)
+        return trade
+
+    async def _upsert_exchange_order_snapshot(self, row: dict[str, Any], *, source: str) -> Trade | None:
+        """Adopt one live open LIMIT order from Binance's account-wide openOrders snapshot."""
+        symbol = normalize_symbol(str(row.get("symbol") or row.get("s") or ""))
+        if not symbol:
+            return None
+        client_id = str(row.get("clientOrderId") or row.get("origClientOrderId") or row.get("c") or "")
+        order_id_raw = row.get("orderId", row.get("i"))
+        try:
+            order_id = int(order_id_raw) if order_id_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            order_id = None
+        key = client_id or (f"{symbol}:{order_id}" if order_id is not None else "")
+        if not key:
+            return None
+        normalized = dict(row)
+        normalized["symbol"] = symbol
+        normalized["clientOrderId"] = client_id
+        normalized["orderId"] = order_id
+        self.exchange_open_orders[key] = normalized
+
+        side = str(row.get("side") or row.get("S") or "").upper()
+        direction = "LONG" if side == "BUY" else "SHORT" if side == "SELL" else None
+        if direction is None:
+            return None
+        try:
+            price = Decimal(str(row.get("price") or row.get("p") or "0"))
+            orig_qty = Decimal(str(row.get("origQty") or row.get("q") or "0"))
+            executed = Decimal(str(row.get("executedQty") or row.get("z") or "0"))
+        except (InvalidOperation, ValueError):
+            return None
+        if price <= 0:
+            return None
+        status = str(row.get("status") or row.get("X") or "NEW").upper()
+        stamp = self._exchange_event_time(row)
+        trade = next((
+            item for item in self.active_trades.values()
+            if item.real_enabled and item.pair == symbol and item.direction == direction
+            and item.status in {"PENDING", "FILLED"}
+            and (
+                (client_id and item.entry_client_order_id == client_id)
+                or (order_id is not None and item.entry_order_id == order_id)
+                or item.exchange_adopted
+            )
+        ), None)
+        if trade is None:
+            trade_status = "FILLED" if executed > 0 else "PENDING"
+            trade = self._new_exchange_adopted_trade(
+                symbol=symbol, direction=direction, entry=price,
+                quantity=(executed if executed > 0 else orig_qty),
+                position_side=str(row.get("positionSide") or row.get("ps") or "BOTH"),
+                source=source, status=trade_status, signal_time=stamp,
+                leverage=self.leverage,
+                client_order_id=client_id or None, order_id=order_id,
+                order_status=status, executed_qty=executed,
+                preserve_gtc=True,
+            )
+            if executed > 0:
+                try:
+                    avg = Decimal(str(row.get("avgPrice") or row.get("ap") or price))
+                    if avg > 0:
+                        trade.fill_price = avg
+                except (InvalidOperation, ValueError):
+                    pass
+            self.active_trades[trade.trade_id] = trade
+            log.info("[REAL/WS] open order adopted | %s %s clientId=%s status=%s", symbol, direction, client_id, status)
+        else:
+            trade.entry_order_id = order_id or trade.entry_order_id
+            trade.entry_client_order_id = client_id or trade.entry_client_order_id
+            trade.entry_order_status = status
+            trade.entry_order_terminal = False
+            trade.entry_executed_qty = executed
+            trade.preserve_gtc_after_cooldown = True
+            if executed > 0:
+                trade.quantity = executed
+                try:
+                    avg = Decimal(str(row.get("avgPrice") or row.get("ap") or price))
+                    if avg > 0:
+                        trade.fill_price = avg
+                except (InvalidOperation, ValueError):
+                    pass
+                if trade.status == "PENDING":
+                    await self._mark_filled(trade, trade.fill_price or price, f"BINANCE_OPEN_ORDER_SNAPSHOT_{source}")
+        await self.ws.add_symbol(symbol)
+        return trade
+
+    async def _adopt_exchange_snapshot(
+        self,
+        account_snapshot: dict[str, Any],
+        open_orders: list[dict[str, Any]],
+        *,
+        source: str,
+    ) -> tuple[int, int]:
+        """Seed current live exchange exposure; deliberately does not read old local/GitHub state."""
+        self.exchange_positions.clear()
+        self.exchange_open_orders.clear()
+        position_rows = account_snapshot.get("positions") if isinstance(account_snapshot, dict) else []
+        for row in position_rows or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                amount = parse_signed_decimal(str(row.get("positionAmt") or "0"))
+            except Exception:
+                continue
+            if amount == 0:
+                continue
+            await self._upsert_exchange_position(row, source=source, finalize_on_flat=False)
+        for row in open_orders or []:
+            if not isinstance(row, dict):
+                continue
+            status = str(row.get("status") or "NEW").upper()
+            if status in {"NEW", "PARTIALLY_FILLED"}:
+                await self._upsert_exchange_order_snapshot(row, source=source)
+        self.exchange_snapshot_at = now_utc()
+        await self._sync_ws_symbols()
+        await self._save_active_state()
+        positions_count = len(self.exchange_positions)
+        orders_count = len(self.exchange_open_orders)
+        log.info(
+            "[REAL/WS] account snapshot seeded | positions=%s open_orders=%s source=%s",
+            positions_count, orders_count, source,
+        )
+        return positions_count, orders_count
+
+    async def _apply_account_update_position(self, row: dict[str, Any]) -> None:
+        """Incrementally update the position projection from ACCOUNT_UPDATE.a.P."""
+        symbol = normalize_symbol(str(row.get("s") or row.get("symbol") or ""))
+        if not symbol:
+            return
+        side = str(row.get("ps") or row.get("positionSide") or "BOTH").upper()
+        try:
+            amount = parse_signed_decimal(str(row.get("pa", row.get("positionAmt", "0")) or "0"))
+        except ValueError:
+            return
+        key = (symbol, side)
+        old = self.exchange_positions.get(key)
+        if amount == 0:
+            old_direction = self._exchange_position_direction(old, old.get("_position_amount_decimal") if old else None) if old else None
+            self.exchange_positions.pop(key, None)
+            self._refresh_real_position_cache(symbol)
+            if old_direction:
+                trade = self._find_real_trade(symbol, old_direction)
+                if trade and trade.exchange_adopted and trade.status == "FILLED":
+                    close_price = self._current_price(symbol)
+                    if close_price is None:
+                        try:
+                            close_price = Decimal(str(old.get("markPrice") or old.get("entryPrice") or trade.fill_price or trade.entry))
+                        except Exception:
+                            close_price = trade.fill_price or trade.entry
+                    await self._finalize_trade(trade, "CLOSED", close_price, "ACCOUNT_UPDATE_POSITION_FLAT_WS")
+            return
+        await self._upsert_exchange_position(row, source="USER_DATA_WS", finalize_on_flat=False)
+
+    async def _upsert_exchange_order_event(self, order: dict[str, Any]) -> Trade | None:
+        """Update order cache from ORDER_TRADE_UPDATE and adopt bot-tagged orders if needed."""
+        symbol = normalize_symbol(str(order.get("s") or order.get("symbol") or ""))
+        if not symbol:
+            return None
+        client_id = str(order.get("c") or order.get("clientOrderId") or "")
+        order_id_raw = order.get("i", order.get("orderId"))
+        try:
+            order_id = int(order_id_raw) if order_id_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            order_id = None
+        status = str(order.get("X") or order.get("status") or "UNKNOWN").upper()
+        execution = str(order.get("x") or "UNKNOWN").upper()
+        cache_key = client_id or (f"{symbol}:{order_id}" if order_id is not None else "")
+        if status in {"NEW", "PARTIALLY_FILLED"} and cache_key:
+            cached = dict(order)
+            cached.update({"symbol": symbol, "clientOrderId": client_id, "orderId": order_id, "status": status})
+            self.exchange_open_orders[cache_key] = cached
+        elif cache_key:
+            self.exchange_open_orders.pop(cache_key, None)
+
+        trade = next((
+            item for item in self.active_trades.values()
+            if item.real_enabled and item.pair == symbol and (
+                (client_id and item.entry_client_order_id == client_id)
+                or (order_id is not None and item.entry_order_id == order_id)
+            ) and item.status in {"PENDING", "FILLED"}
+        ), None)
+        if trade is None and client_id.startswith("VT") and status in {"NEW", "PARTIALLY_FILLED"}:
+            try:
+                price = Decimal(str(order.get("p") or "0"))
+                qty = Decimal(str(order.get("q") or "0"))
+                executed = Decimal(str(order.get("z") or "0"))
+            except (InvalidOperation, ValueError):
+                return None
+            side = str(order.get("S") or "").upper()
+            direction = "LONG" if side == "BUY" else "SHORT" if side == "SELL" else None
+            if direction and price > 0:
+                trade = self._new_exchange_adopted_trade(
+                    symbol=symbol, direction=direction, entry=price,
+                    quantity=(executed if executed > 0 else qty),
+                    position_side=str(order.get("ps") or "BOTH"),
+                    source="USER_DATA_WS_ORDER_TRADE_UPDATE",
+                    status=("FILLED" if executed > 0 else "PENDING"),
+                    signal_time=self._exchange_event_time(order),
+                    client_order_id=client_id, order_id=order_id,
+                    order_status=status, executed_qty=executed,
+                    preserve_gtc=True,
+                )
+                self.active_trades[trade.trade_id] = trade
+        elif trade is None and client_id.startswith("VT") and status in {"FILLED", "PARTIALLY_FILLED"}:
+            # A fill event may arrive after the order snapshot was missed. Use the
+            # account projection from ACCOUNT_UPDATE when it follows; retain a
+            # temporary in-memory trade view meanwhile.
+            try:
+                price = Decimal(str(order.get("ap") or order.get("L") or order.get("p") or "0"))
+                executed = Decimal(str(order.get("z") or "0"))
+            except (InvalidOperation, ValueError):
+                return None
+            side = str(order.get("S") or "").upper()
+            direction = "LONG" if side == "BUY" else "SHORT" if side == "SELL" else None
+            if direction and price > 0 and executed > 0:
+                trade = self._new_exchange_adopted_trade(
+                    symbol=symbol, direction=direction, entry=price, quantity=executed,
+                    position_side=str(order.get("ps") or "BOTH"),
+                    source="USER_DATA_WS_ORDER_TRADE_UPDATE",
+                    status="FILLED", signal_time=self._exchange_event_time(order),
+                    client_order_id=client_id, order_id=order_id,
+                    order_status=status, executed_qty=executed,
+                )
+                self.active_trades[trade.trade_id] = trade
+        return trade
+
     async def _on_user_data_event(self, event: dict[str, Any]) -> None:
-        """Apply authoritative Binance ORDER_TRADE_UPDATE without REST calls."""
+        """Apply Binance user-stream events to the in-memory exchange ledger."""
         event_name = str(event.get("e") or "")
         if event_name == "ACCOUNT_UPDATE":
             account = event.get("a") if isinstance(event.get("a"), dict) else {}
@@ -6273,23 +6819,42 @@ class TradingEngine:
                 self.real.last_balance = cached
                 self.real.last_balance_at = time.monotonic()
                 break
-            # ACCOUNT_UPDATE is authoritative for wallet changes. Unrealized PnL
-            # remains calculated locally from fresh market WebSocket prices to avoid
-            # mixing partial position updates with a stale account-wide total.
+
+            # ACCOUNT_UPDATE contains only changed position rows (P); an empty P
+            # means there was no position change. Never clear other cached symbols.
+            positions = account.get("P") if isinstance(account.get("P"), list) else []
+            changed_symbols: set[str] = set()
+            for row in positions:
+                if not isinstance(row, dict):
+                    continue
+                symbol = normalize_symbol(str(row.get("s") or row.get("symbol") or ""))
+                if symbol:
+                    changed_symbols.add(symbol)
+                await self._apply_account_update_position(row)
+            for symbol in changed_symbols:
+                self._refresh_real_position_cache(symbol)
+            await self._sync_ws_symbols()
             await self._autostop_check()
+            await self._save_active_state()
             return
+
         if event_name != "ORDER_TRADE_UPDATE":
             if event_name == "MARGIN_CALL":
                 await self.reply("🚨 BINANCE MARGIN_CALL diterima. Periksa posisi dan risiko akun LIVE segera.")
             return
+
         order = event.get("o") if isinstance(event.get("o"), dict) else {}
         symbol = normalize_symbol(str(order.get("s") or ""))
         client_id = str(order.get("c") or "")
-        if not symbol or not client_id:
+        if not symbol:
             return
-        trade = next((t for t in self.active_trades.values() if t.real_enabled and t.pair == symbol and t.entry_client_order_id == client_id), None)
+
+        # Always maintain the exchange open-order projection first. The event is
+        # useful even if the current /try session has no matching local trade row.
+        trade = await self._upsert_exchange_order_event(order)
         if trade is None:
-            return  # ignore orders outside this engine's ledger
+            await self._sync_ws_symbols()
+            return
 
         status = str(order.get("X") or "UNKNOWN").upper()
         execution = str(order.get("x") or "UNKNOWN").upper()
@@ -6302,8 +6867,12 @@ class TradingEngine:
             cumulative = Decimal(str(order.get("z") or "0"))
         except (InvalidOperation, ValueError):
             cumulative = Decimal("0")
-        average = Decimal(str(order.get("ap") or "0"))
-        last_price = Decimal(str(order.get("L") or "0"))
+        try:
+            average = Decimal(str(order.get("ap") or "0"))
+            last_price = Decimal(str(order.get("L") or "0"))
+        except (InvalidOperation, ValueError):
+            average = Decimal("0")
+            last_price = Decimal("0")
         fill_price = average if average > 0 else (last_price if last_price > 0 else trade.fill_price or trade.entry)
         event_key = f"{order_id}:{execution}:{status}:{cumulative}:{order.get('t', '')}"
         if trade.last_ws_event_key == event_key:
@@ -6312,6 +6881,8 @@ class TradingEngine:
         trade.entry_order_status = status
         if order_id is not None:
             trade.entry_order_id = order_id
+        if client_id:
+            trade.entry_client_order_id = client_id
 
         terminal = status in {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}
         trade.entry_order_terminal = terminal
@@ -6340,7 +6911,8 @@ class TradingEngine:
                 )
             trade.real_state = (
                 "REAL_FILLED" if status == "FILLED" else
-                "REAL_PARTIAL_TERMINAL" if terminal else "REAL_PARTIALLY_FILLED"
+                "REAL_PARTIAL_TERMINAL" if terminal else
+                ("REAL_EXCHANGE_ADOPTED_PARTIAL" if trade.exchange_adopted else "REAL_PARTIALLY_FILLED")
             )
             if terminal:
                 trade.pending_cancel_reason = None
@@ -6362,6 +6934,12 @@ class TradingEngine:
             t.pair for t in self.active_trades.values()
             if t.status in {"PENDING", "FILLED"}
         }
+        desired.update(symbol for symbol, _side in self.exchange_positions)
+        desired.update(
+            normalize_symbol(str(order.get("symbol") or ""))
+            for order in self.exchange_open_orders.values()
+            if order.get("symbol")
+        )
         if self.scan_enabled:
             desired.update(self._scanner_symbols)
         await self.ws.set_symbols(desired)
@@ -6382,47 +6960,28 @@ class TradingEngine:
             if not self.real.configured:
                 await self.reply("❌ BINANCE_API_KEY / BINANCE_API_SECRET belum lengkap.")
                 return
+            # These are the same account-wide REST snapshots /real on already
+            # needed for its safety preflight. Reuse them to seed the in-memory
+            # exchange projection; do not restore old local session/history files.
             account_snapshot = await self.real.get_account_info()
-            live_positions = []
-            for row in account_snapshot.get("positions") or []:
-                if not isinstance(row, dict):
-                    continue
-                try:
-                    amount = parse_signed_decimal(str(row.get("positionAmt") or "0"))
-                except Exception:
-                    continue
-                if amount != 0:
-                    live_positions.append(f"{row.get('symbol')}:{row.get('positionSide', 'BOTH')} {amount}")
-            if live_positions:
-                await self.reply(
-                    "⛔ REAL ON DITOLAK: akun Binance memiliki posisi yang tidak tercatat di sesi fresh ini.\n"
-                    + "\n".join(live_positions[:12])
-                    + "\nPeriksa/tutup/adopsi posisi secara manual sebelum mencoba /real on lagi."
-                )
-                return
-            # Fresh session has no old order ledger. Refuse to activate LIVE while
-            # any open exchange order exists; never adopt/cancel it silently.
             all_open_orders = await self.real.get_open_orders(None)
-            if all_open_orders:
-                symbols = sorted({str(row.get("symbol") or "?") for row in all_open_orders if isinstance(row, dict)})
-                await self.reply(
-                    "⛔ REAL ON DITOLAK: masih ada open order Binance yang tidak tercatat di sesi fresh ini.\n"
-                    f"Open orders: {len(all_open_orders)} | Pair: {', '.join(symbols[:15])}\n"
-                    "Periksa/batalkan secara manual sebelum mencoba /real on lagi."
-                )
-                return
             await self.real.get_account_config()
             await self.real.get_futures_balance()
-            # Connect the private ORDER_TRADE_UPDATE stream before allowing new
-            # real orders, so fills do not depend solely on REST polling.
+            adopted_positions, adopted_orders = await self._adopt_exchange_snapshot(
+                account_snapshot, all_open_orders, source="REAL_ON_ACCOUNT_SNAPSHOT"
+            )
+            # Private stream becomes the live source of incremental order/position
+            # updates. No REST request is made by /trade after this point.
             await self.user_ws.start()
+            self._last_user_ws_reconnect_count = self.user_ws.reconnect_count
             self.real_mode = True
             if self.autostop_percent is not None and self._equity_peak is None:
                 await self._autostop_check(force=True)
             await self.reply(
                 "🟢 REAL ON. Order baru akan dikirim ke Binance USD-M Futures LIVE.\n"
-                f"Private User Data WS: {self.user_ws.status}. Fill order dipantau lewat WebSocket; REST hanya untuk reconciliation/aksi yang memang memerlukannya.\n"
-                "Posisi REAL yang sudah ada tetap dikelola walaupun /real off."
+                f"Live snapshot : {adopted_positions} posisi · {adopted_orders} open order dimuat dari Binance (tanpa restore file lama).\n"
+                f"Private User Data WS: {self.user_ws.status}. ORDER_TRADE_UPDATE + ACCOUNT_UPDATE menjaga /trade realtime; /trade tidak memanggil REST.\n"
+                "Posisi/order yang sudah ada tetap dikelola walaupun /real off."
             )
         elif arg == "off":
             self.real_mode = False
@@ -6549,10 +7108,101 @@ class TradingEngine:
 
     async def _handle_scan(self, text: str) -> None:
         parts = text.split()
-        if len(parts) < 2 or parts[1].lower() not in {"on", "off"}:
-            await self.reply(f"Scanner: {'ON' if self.scan_enabled else 'OFF'}\nGunakan /scan on atau /scan off.")
+        action = parts[1].lower() if len(parts) > 1 else "status"
+
+        if action == "schedule":
+            if len(parts) == 2:
+                lines = [
+                    "╔════ VOLUMATIC / SCAN SCHEDULE ════╗",
+                    "TIMEZONE : ASIA/JAKARTA (WIB)",
+                    "MODE     : delayed activation → continuous ON",
+                    "──────────────────────────────────",
+                ]
+                for number, hhmm in SCAN_SCHEDULE_SLOTS:
+                    selected = " ✓" if hhmm in self.scan_schedule_slots else ""
+                    lines.append(f"{number}. {hhmm} WIB{selected}")
+                lines += [
+                    "──────────────────────────────────",
+                    f"SCANNER  : {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}",
+                    f"SELECTED : {', '.join(self.scan_schedule_slots) if self.scan_schedule_slots else '-'}",
+                    "PILIH    : /scan schedule 1,3,6",
+                    "CANCEL   : /scan schedule off",
+                    "INFO     : setelah salah satu slot terpilih tercapai, scanner ON terus sampai /scan off.",
+                    "INFO     : slot 12:00 adalah slot tambahan; enam slot lainnya mengikuti close H4 WIB.",
+                ]
+                await self.reply("\n".join(lines))
+                return
+
+            selection = " ".join(parts[2:]).strip().lower()
+            if selection in {"off", "clear", "none"}:
+                self.scan_schedule_slots = ()
+                self.scan_schedule_waiting = False
+                self._scan_schedule_last_fired_minute = None
+                await self.reply(
+                    "🟡 SCAN SCHEDULE CLEARED\n"
+                    f"Scanner saat ini: {'ON' if self.scan_enabled else 'OFF'}. "
+                    "Jika scanner sudah ON, gunakan /scan off untuk menghentikannya."
+                )
+                return
+
+            raw_numbers = [x for x in re.split(r"[,;\s]+", selection) if x]
+            if not raw_numbers:
+                await self.reply("Gunakan /scan schedule 1,3,6 atau /scan schedule off.")
+                return
+            invalid = [x for x in raw_numbers if x not in SCAN_SCHEDULE_BY_NUMBER]
+            if invalid:
+                await self.reply(
+                    "❌ Nomor jadwal tidak valid: " + ", ".join(invalid) +
+                    "\nPilihan hanya 1 sampai 7. Kirim /scan schedule untuk melihat daftar."
+                )
+                return
+
+            selected_numbers = sorted(set(raw_numbers), key=lambda x: int(x))
+            selected_slots = tuple(SCAN_SCHEDULE_BY_NUMBER[x] for x in selected_numbers)
+            if self._autostop_triggered:
+                await self.reply("⛔ AUTOSTOP sedang TRIGGERED. Reset pengaman sebelum memasang jadwal scanner.")
+                return
+
+            # Selecting a schedule explicitly arms a delayed start and forces
+            # scanner OFF now. Once the first selected slot is reached, it
+            # remains ON continuously until a manual /scan off.
+            self.scan_enabled = False
+            self._scan_trigger_now = False
+            self._scanner_symbols.clear()
+            self.scan_schedule_slots = selected_slots
+            self.scan_schedule_waiting = True
+            self.scan_schedule_activated_at = None
+            self._scan_schedule_last_fired_minute = None
+            await self.reply(
+                "⏳ VOLUMATIC / SCAN SCHEDULE ARMED\n\n"
+                f"SELECTED  : {', '.join(selected_slots)} WIB\n"
+                f"TIMEFRAME : {self.timeframe}\n"
+                "SCANNER   : OFF — menunggu slot terpilih\n"
+                "TRIGGER   : slot terpilih pertama yang tercapai\n"
+                "AFTER     : scanner ON terus menerus\n"
+                "STOP      : /scan off"
+            )
+            log.info("[SCAN SCHEDULE] armed | selected=%s | tf=%s", selected_slots, self.timeframe)
             return
-        enable = parts[1].lower() == "on"
+
+        if action == "status":
+            schedule_state = (
+                f"WAITING ({', '.join(self.scan_schedule_slots)} WIB)"
+                if self.scan_schedule_waiting else
+                (f"ACTIVATED {self.scan_schedule_activated_at}" if self.scan_schedule_activated_at else "OFF")
+            )
+            await self.reply(
+                f"Scanner: {'ON' if self.scan_enabled else 'OFF'}\n"
+                f"Schedule: {schedule_state}\n"
+                "Gunakan /scan on, /scan off, atau /scan schedule."
+            )
+            return
+
+        if action not in {"on", "off"}:
+            await self.reply("Gunakan /scan on, /scan off, atau /scan schedule.")
+            return
+
+        enable = action == "on"
         if enable and self._autostop_triggered:
             await self.reply(
                 "⛔ Scanner masih dikunci oleh AUTOSTOP. Periksa equity/posisi, "
@@ -6565,15 +7215,31 @@ class TradingEngine:
                 "tersedia, lalu cek /autostop sebelum mengaktifkan scanner."
             )
             return
+
         self.scan_enabled = enable
         if enable:
+            # Manual ON overrides and clears any pending schedule activation.
+            self.scan_schedule_waiting = False
+            self.scan_schedule_slots = ()
+            self.scan_schedule_activated_at = None
             await self.ws.start()
             self._scan_trigger_now = True
             log.info("[SCAN] explicitly armed by Telegram /scan on | tf=%s | batch=%s", self.timeframe, SCAN_MAX_PAIRS_PER_CYCLE)
-            await self.reply(f"🟢 Scanner ON • Volumatic {self.timeframe} • batch {SCAN_MAX_PAIRS_PER_CYCLE} • Mode B visual bubble / live candle.")
+            await self.reply(
+                f"🟢 Scanner ON • Volumatic {self.timeframe} • batch {SCAN_MAX_PAIRS_PER_CYCLE} "
+                "• Mode B visual bubble / live candle."
+            )
         else:
             self._scanner_symbols.clear()
-            await self.reply("🟡 Scanner OFF. Bubble baru tidak dipindai; posisi dan pending order tetap dimonitor via WebSocket/maintenance.")
+            self._scan_trigger_now = False
+            self.scan_schedule_waiting = False
+            self.scan_schedule_slots = ()
+            self.scan_schedule_activated_at = None
+            self._scan_schedule_last_fired_minute = None
+            await self.reply(
+                "🟡 Scanner OFF. Bubble baru tidak dipindai; posisi dan pending order "
+                "tetap dimonitor via WebSocket/maintenance. Jadwal tertunda dibersihkan."
+            )
         await self._sync_ws_symbols()
         await self._save_runtime_settings()
 
@@ -7172,7 +7838,8 @@ class TradingEngine:
             f"AUTOSTOP     {guard_state}",
             f"EQUITY       {fmt_num(self._equity_last, 4) if self._equity_last is not None else '—'} USDT",
             f"PEAK / FLOOR {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '—'} / {fmt_num(self._autostop_floor(), 4) if self._autostop_floor() is not None else '—'} USDT",
-            f"SCANNER      {'LOCKED' if self._autostop_triggered else ('ON' if self.scan_enabled else 'OFF')}",
+            f"SCANNER      {'LOCKED' if self._autostop_triggered else ('ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF'))}",
+            f"SCAN SCHEDULE {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}",
             "────────────────────────────────",
             "PnL belum termasuk seluruh fee/funding aktual. R = reference risk 0.30 ATR; bukan SL aktif.",
         ]
@@ -7186,7 +7853,8 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            f"Timeframe: {self.timeframe}\nTrend length: {self.trend_length}\nEMA filter: {('EMA' + str(self.ema_filter_length)) if self.ema_filter_length is not None else 'OFF'}\nScanner: {'ON' if self.scan_enabled else 'OFF'}\n"
+            f"Timeframe: {self.timeframe}\nTrend length: {self.trend_length}\nEMA filter: {('EMA' + str(self.ema_filter_length)) if self.ema_filter_length is not None else 'OFF'}\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
+            f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending: {pending} | Filled: {filled} | Max: {self.max_active_trades}\n"
             f"Binance REST cooldown: {self._binance_cooldown_remaining():.0f}s | Deferred commands: {len(self.deferred_commands)}\n"
@@ -7198,7 +7866,8 @@ class TradingEngine:
     async def show_help(self) -> None:
         await self.reply(
             "COMMAND VOLUMATIC TREND\n\n"
-            "/scan on|off - aktif/nonaktifkan scanner Volumatic Mode B (bubble visual offset=-1)\n"
+            "/scan on|off - aktif/nonaktifkan scanner Volumatic Mode B\n"
+            "/scan schedule - lihat jadwal WIB; pilih dengan /scan schedule 1,3,6\n"
             "/timeframe [H4|D1] - pilih timeframe (default H4)\n"
             f"/length [1–{volumatic.MAX_TREND_LENGTH}] - atur Trend Length Volumatic (default 100)\n"
             "/EMA [50|100|200|off] - filter arah LONG/SHORT berdasarkan EMA timeframe aktif\n"
