@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "1.5.0",
-  "updated_at": "2026-11-05T12:05:54.727326+00:00",
+  "updated_at": "2026-11-05T12:05:59.709425+00:00",
   "active_trades": [
     {
       "trade_id": "LIGHTUSDT-20261105-190537-0C6874",
@@ -25,7 +25,7 @@
       "created_at": "2026-11-05T12:05:37.201063+00:00",
       "filled_at": "2026-11-05T12:05:50.512440+00:00",
       "closed_at": null,
-      "fill_price": "0.2355",
+      "fill_price": "0.2352",
       "exit_price": null,
       "result": null,
       "result_reason": null,
@@ -40,9 +40,9 @@
       "target_notional": "5.1744",
       "actual_notional": "5.181",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_FILLED",
       "position_side": "BOTH",
-      "entry_order_id": 2010813112,
+      "entry_order_id": 2010813132,
       "entry_client_order_id": "VT2fa9aaf4c23a40038444f5fcc216",
       "real_error": null,
       "real_submit_ambiguous": false,
