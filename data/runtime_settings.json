@@ -407,14 +407,22 @@
     "H4:SHELLUSDT": 1793880000000,
     "H4:SIGNUSDT": 1793880000000,
     "H4:SIRENUSDT": 1793880000000,
-    "H4:SKLUSDT": 1793880000000
+    "H4:SKLUSDT": 1793880000000,
+    "H4:SKRUSDT": 1793880000000,
+    "H4:SKYAIUSDT": 1793880000000,
+    "H4:SKYUSDT": 1793880000000,
+    "H4:SLPUSDT": 1793880000000,
+    "H4:SLXUSDT": 1793880000000,
+    "H4:SNXUSDT": 1793880000000,
+    "H4:SOLUSDT": 1793880000000,
+    "H4:SOLVUSDT": 1793880000000
   },
   "last_position_candles": {
     "EXCHANGE:ESPORTSUSDT": 1793880000000
   },
   "signal_retries": {},
-  "scan_resume_cursor": 400,
+  "scan_resume_cursor": 408,
   "scan_resume_boundary_ms": 1793880000000,
   "scan_resume_timeframe": "H4",
-  "updated_at": "2026-11-05T12:09:29.258113+00:00"
+  "updated_at": "2026-11-05T12:10:00.812898+00:00"
 }
