@@ -4,12 +4,16 @@ from __future__ import annotations
 
 Responsibilities of this file are intentionally limited to:
 - keep Telegram polling and Render health endpoints alive;
-- /try: read-only sync main + strategy source from GitHub, then load/start them;
+- /try: sync main + strategy source from GitHub, then load/start them;
 - /end: stop main engine only; this launcher and Render service stay alive;
+- /ganti: receive a Python source file from Telegram and update the matching
+  main/strategy source file in GitHub and the local runtime;
+- /back: cancel an active /ganti selection;
 - forward every other Telegram update to main.handle_update().
 
 This launcher DOES NOT own or persist Binance cooldowns, ban lists, trades,
 orders, positions, settings, events, or strategy state. Those belong to main.py.
+Its only mutable session state is the temporary /ganti source-upload selection.
 strategy.py remains a pure signal/indicator module.
 """
 
@@ -83,6 +87,10 @@ MAIN_MODULE: ModuleType | None = None
 STRATEGY_MODULE: ModuleType | None = None
 MAIN_RUNNING = False
 STOP_EVENT = asyncio.Event()
+
+# /ganti state is launcher UI state only; it never stores trading data.
+GANTI_WAITING_SELECTION = False
+GANTI_TARGET: str | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -203,6 +211,72 @@ def github_get_source(path: str) -> bytes:
     if raw.status_code >= 400:
         raise RuntimeError(f"GitHub raw download {path}: HTTP {raw.status_code}")
     return raw.content
+
+
+def github_put_source(path: str, content: bytes, commit_message: str) -> str:
+    """Replace one source file in GitHub. This is source deployment, not trade persistence."""
+    url = github_content_url(path)
+    last_error: Exception | None = None
+
+    for attempt in range(3):
+        response = requests.get(
+            url,
+            headers=github_headers(),
+            params={"ref": GITHUB_BRANCH},
+            timeout=GITHUB_TIMEOUT,
+        )
+        if response.status_code == 404:
+            sha = None
+        elif response.status_code >= 400:
+            raise RuntimeError(
+                f"GitHub GET sebelum /ganti {path}: HTTP {response.status_code}: {response.text[:600]}"
+            )
+        else:
+            body = response.json()
+            if body.get("type") != "file":
+                raise RuntimeError(f"Target GitHub bukan file: {path}")
+            sha = str(body.get("sha") or "").strip() or None
+
+        payload = {
+            "message": commit_message,
+            "content": base64.b64encode(content).decode("ascii"),
+            "branch": GITHUB_BRANCH,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        put = requests.put(
+            url,
+            headers=github_headers(),
+            json=payload,
+            timeout=GITHUB_TIMEOUT,
+        )
+        if put.status_code in (409, 422) and attempt < 2:
+            last_error = RuntimeError(f"GitHub conflict HTTP {put.status_code}: {put.text[:400]}")
+            awaitable_sleep = 0.35 * (attempt + 1)
+            time.sleep(awaitable_sleep)
+            continue
+        if put.status_code >= 400:
+            raise RuntimeError(f"GitHub PUT {path}: HTTP {put.status_code}: {put.text[:600]}")
+        result = put.json()
+        return str((result.get("content") or {}).get("sha") or "")
+
+    raise RuntimeError(f"GitHub gagal mengganti {path}: {last_error}")
+
+
+def download_telegram_document(file_id: str) -> tuple[bytes, str]:
+    result = tg_call("getFile", {"file_id": file_id}, timeout=HTTP_TIMEOUT)
+    file_path = str((result or {}).get("file_path") or "").strip()
+    if not file_path:
+        raise RuntimeError("Telegram getFile tidak mengembalikan file_path.")
+    response = requests.get(f"{TG_FILE_API}/{file_path}", timeout=HTTP_TIMEOUT)
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Telegram document download: HTTP {response.status_code}: {response.text[:500]}"
+        )
+    if len(response.content) > 20 * 1024 * 1024:
+        raise RuntimeError("File terlalu besar; batas /ganti adalah 20 MB.")
+    return response.content, Path(file_path).name
 
 
 def _atomic_write_source(path: Path, content: bytes) -> None:
@@ -455,7 +529,106 @@ async def stop_main(chat_id: int) -> bool:
 
 
 # -----------------------------------------------------------------------------
-# Telegram command router: only /try and /end are owned by launcher.
+# /GANTI - source deployment only (no trading/business persistence)
+# -----------------------------------------------------------------------------
+def _ganti_menu() -> str:
+    return (
+        "⌘ SOURCE UPDATE / GANTI\n\n"
+        "Pilih file yang akan diganti:\n"
+        f"1. {Path(MAIN_FILE).name}\n"
+        f"2. {Path(STRATEGY_FILE).name}\n\n"
+        "Kirim angka 1/2, lalu kirim file .py sebagai Document Telegram.\n"
+        f"Atau langsung gunakan /ganti {Path(MAIN_FILE).name}\n"
+        f"atau /ganti {Path(STRATEGY_FILE).name}\n\n"
+        "Gunakan /back untuk membatalkan."
+    )
+
+
+def _resolve_ganti_target(value: str) -> str | None:
+    answer = str(value or "").strip().lower()
+    main_aliases = {"1", "main", "main.py", Path(MAIN_FILE).name.lower(), MAIN_FILE.lower()}
+    strategy_aliases = {"2", "strategy", "strategy.py", Path(STRATEGY_FILE).name.lower(), STRATEGY_FILE.lower()}
+    if answer in main_aliases:
+        return MAIN_FILE
+    if answer in strategy_aliases:
+        return STRATEGY_FILE
+    return None
+
+
+def _infer_ganti_target(document: dict) -> str | None:
+    filename = Path(str(document.get("file_name") or "").strip()).name.lower()
+    if filename in {Path(MAIN_FILE).name.lower(), "main.py"}:
+        return MAIN_FILE
+    if filename in {Path(STRATEGY_FILE).name.lower(), "strategy.py"}:
+        return STRATEGY_FILE
+    return None
+
+
+async def start_ganti(chat_id: int, argument: str = "") -> None:
+    global GANTI_WAITING_SELECTION, GANTI_TARGET
+    target = _resolve_ganti_target(argument) if argument else None
+    if target:
+        GANTI_WAITING_SELECTION = False
+        GANTI_TARGET = target
+        tg_send(
+            chat_id,
+            "⌁ TARGET SOURCE UPDATE\n\n"
+            f"TARGET : {target}\n"
+            "Kirim file Python (.py) sebagai Document Telegram.\n"
+            "Setelah berhasil diunggah ke GitHub, jalankan /try untuk reload engine.\n"
+            "Gunakan /back untuk membatalkan.",
+        )
+        return
+    GANTI_WAITING_SELECTION = True
+    GANTI_TARGET = None
+    tg_send(chat_id, _ganti_menu())
+
+
+async def handle_ganti_document(chat_id: int, document: dict) -> None:
+    global GANTI_WAITING_SELECTION, GANTI_TARGET
+    target = GANTI_TARGET
+    if not target:
+        tg_send(chat_id, "✕ Target /ganti belum dipilih. Gunakan /ganti terlebih dahulu.")
+        return
+
+    file_id = str(document.get("file_id") or "").strip()
+    filename = Path(str(document.get("file_name") or "source.py")).name
+    if not file_id:
+        tg_send(chat_id, "✕ Telegram document tidak memiliki file_id.")
+        return
+    if not filename.lower().endswith(".py"):
+        tg_send(chat_id, "✕ /ganti hanya menerima file Python (.py).")
+        return
+
+    tg_send(chat_id, f"⟳ SOURCE UPDATE\nMengunduh dan memvalidasi {filename} → {Path(target).name} ...")
+    try:
+        content, _telegram_filename = await asyncio.to_thread(download_telegram_document, file_id)
+        validate_python_source(content, target)
+        sha = await asyncio.to_thread(
+            github_put_source,
+            target,
+            content,
+            f"launcher: replace {Path(target).name}",
+        )
+        _atomic_write_source(safe_runtime_path(target), content)
+        GANTI_WAITING_SELECTION = False
+        GANTI_TARGET = None
+        tg_send(
+            chat_id,
+            "✓ SOURCE UPDATED\n\n"
+            f"TARGET : {target}\n"
+            f"REPO   : {REPO_NAME}\n"
+            f"BRANCH : {GITHUB_BRANCH}\n"
+            f"COMMIT : {(sha[:12] + '…') if sha else 'created/updated'}\n\n"
+            "GitHub dan runtime lokal sudah diperbarui. Engine yang sedang berjalan masih memakai modul lama; gunakan /try untuk reload pasangan main + strategy.",
+        )
+    except Exception as exc:
+        log.exception("[LAUNCHER] /ganti gagal untuk %s", target)
+        tg_send(chat_id, f"✕ /GANTI GAGAL\nTARGET : {target}\nERROR  : {str(exc)[:2200]}")
+
+
+# -----------------------------------------------------------------------------
+# Telegram command router: /try, /end, /ganti, /back, /healthz.
 # -----------------------------------------------------------------------------
 def is_authorized(message: dict) -> bool:
     chat_id = int((message.get("chat") or {}).get("id") or 0)
@@ -477,11 +650,19 @@ def command_parts(text: str) -> tuple[str, str]:
 
 
 async def route_message(message: dict, update: dict) -> None:
+    global GANTI_WAITING_SELECTION, GANTI_TARGET
     if not is_authorized(message):
         return
     chat_id = int((message.get("chat") or {}).get("id") or 0)
     text = message_text(message)
-    command, _argument = command_parts(text)
+    command, argument = command_parts(text)
+    document = message.get("document")
+
+    if command == "/back" and (GANTI_WAITING_SELECTION or GANTI_TARGET):
+        GANTI_WAITING_SELECTION = False
+        GANTI_TARGET = None
+        tg_send(chat_id, "✓ Sesi /ganti dibatalkan. Launcher dan engine tidak berubah.")
+        return
 
     if command == "/try":
         tg_send(chat_id, "⟳ VOLUMATIC LAUNCHER / RESET\nMemuat source main + strategy dan menginisialisasi engine...")
@@ -510,6 +691,56 @@ async def route_message(message: dict, update: dict) -> None:
         except Exception as exc:
             log.exception("[LAUNCHER] /end gagal.")
             tg_send(chat_id, f"✕ /end gagal\n{str(exc)[:2000]}")
+        return
+
+    # Source documents are launcher-owned only during an explicit /ganti session.
+    # Otherwise non-launcher updates continue to main.py unchanged.
+    if document is not None:
+        if GANTI_TARGET:
+            await handle_ganti_document(chat_id, document)
+            return
+        if command == "/ganti":
+            inferred = _resolve_ganti_target(argument) if argument else _infer_ganti_target(document)
+            if inferred:
+                GANTI_WAITING_SELECTION = False
+                GANTI_TARGET = inferred
+                await handle_ganti_document(chat_id, document)
+            else:
+                GANTI_WAITING_SELECTION = True
+                GANTI_TARGET = None
+                tg_send(chat_id, "⌁ File diterima, tetapi target belum jelas.\n\n" + _ganti_menu())
+            return
+        if GANTI_WAITING_SELECTION:
+            inferred = _infer_ganti_target(document)
+            if inferred:
+                GANTI_WAITING_SELECTION = False
+                GANTI_TARGET = inferred
+                await handle_ganti_document(chat_id, document)
+            else:
+                tg_send(
+                    chat_id,
+                    "✕ Nama file tidak cocok dengan target. Gunakan /ganti lalu pilih target, atau kirim file dengan nama target yang sesuai.",
+                )
+            return
+
+    if command == "/ganti":
+        await start_ganti(chat_id, argument)
+        return
+
+    if GANTI_WAITING_SELECTION and text and not command.startswith("/"):
+        target = _resolve_ganti_target(text)
+        if target:
+            GANTI_WAITING_SELECTION = False
+            GANTI_TARGET = target
+            tg_send(
+                chat_id,
+                "⌁ TARGET SOURCE UPDATE\n\n"
+                f"TARGET : {target}\n"
+                "Sekarang kirim file .py sebagai Document Telegram.\n"
+                "Gunakan /back untuk membatalkan.",
+            )
+        else:
+            tg_send(chat_id, "✕ Pilihan tidak valid.\n\n" + _ganti_menu())
         return
 
     if command == "/healthz":
@@ -553,8 +784,10 @@ async def telegram_loop() -> None:
         "⌁ VOLUMATIC LAUNCHER ONLINE\n\n"
         "/try  — start / reset main + strategy\n"
         "/end  — stop main engine; Render tetap hidup\n"
+        "/ganti — update main.py / strategy.py via Telegram document\n"
+        "/back — batalkan sesi /ganti\n"
         "/healthz — status launcher dan engine\n\n"
-        "Trading state, cooldown, ban recovery, order, dan trade history dikelola main.py.",
+        "Launcher hanya mengelola source deployment. Trading state, cooldown, ban recovery, order, dan trade history dikelola main.py.",
     )
 
     while not STOP_EVENT.is_set():
