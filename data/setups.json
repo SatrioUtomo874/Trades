@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "1.5.0",
-  "updated_at": "2026-11-05T12:06:19.252568+00:00",
+  "updated_at": "2026-11-05T12:06:21.376464+00:00",
   "active_trades": [
     {
       "trade_id": "LIGHTUSDT-20261105-190537-0C6874",
@@ -33,12 +33,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.008212701330848948",
       "realized_r": null,
-      "quantity": "22",
-      "margin_usdt": "0.5181",
+      "quantity": "44",
+      "margin_usdt": "1.0362",
       "leverage": 10,
       "min_margin_mode": true,
       "target_notional": "5.1744",
-      "actual_notional": "5.181",
+      "actual_notional": "10.362",
       "real_enabled": true,
       "real_state": "REAL_FILLED",
       "position_side": "BOTH",
@@ -46,7 +46,7 @@
       "entry_client_order_id": "VT2fa9aaf4c23a40038444f5fcc216",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "22",
+      "entry_executed_qty": "44",
       "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
