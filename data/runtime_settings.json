@@ -7,7 +7,7 @@
   "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": true,
-  "autostop_percent": "50",
+  "autostop_percent": "53",
   "autostop_peak_equity": "100",
   "autostop_last_equity": "100",
   "autostop_triggered": false,
@@ -18,5 +18,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "H4",
-  "updated_at": "2026-11-05T14:59:38.768108+00:00"
+  "updated_at": "2026-11-05T15:34:35.127369+00:00"
 }
