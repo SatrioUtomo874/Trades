@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "1.5.0",
-  "updated_at": "2026-11-05T10:09:11.031028+00:00",
+  "updated_at": "2026-11-05T10:09:13.829729+00:00",
   "active_trades": [
     {
       "trade_id": "ARXUSDT-20261105-165937-ED253D",
@@ -95,11 +95,11 @@
       "target_notional": "5.00425",
       "actual_notional": "5.00425",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_REJECTED",
       "position_side": "BOTH",
       "entry_order_id": 1554760547,
       "entry_client_order_id": "VTc20d2a41298b4c6088e565048a24",
-      "real_error": null,
+      "real_error": "HTTP 400 | code -4116 | /fapi/v1/order: ClientOrderId is duplicated.",
       "real_submit_ambiguous": false,
       "entry_executed_qty": "0",
       "entry_order_status": "NEW",
