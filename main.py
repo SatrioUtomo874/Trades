@@ -80,7 +80,7 @@ ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0") or "0")
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
 REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
-MAIN_FILE = (os.getenv("MAIN_FILE") or "main_volumatic_rate_guard_batch_telemetry_20261105.py").strip()
+MAIN_FILE = "main.py"  # canonical runtime/source name; descriptive names are download labels only
 BINANCE_API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
 BINANCE_API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
 

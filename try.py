@@ -50,9 +50,11 @@ GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
 REPO_NAME = (os.getenv("REPO_NAME") or "").strip()
 GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
 
-# Latest descriptive filenames. They can still be overridden in Render env.
-MAIN_FILE = (os.getenv("MAIN_FILE") or "main_volumatic_rate_guard_batch_telemetry_20261105.py").strip()
-STRATEGY_FILE = (os.getenv("STRATEGY_FILE") or "strategy_volumatic_ema_filter_20261105.py").strip()
+# Canonical runtime/source names are deliberately fixed. Descriptive names are
+# for downloaded artifacts only; GitHub root and local runtime must use these.
+# Ignore stale MAIN_FILE / STRATEGY_FILE values from older Render environments.
+MAIN_FILE = "main.py"
+STRATEGY_FILE = "strategy.py"
 
 PORT = max(1, int(os.getenv("PORT", "10000") or "10000"))
 TG_POLL_TIMEOUT = max(5, min(50, int(os.getenv("TG_POLL_TIMEOUT", "30") or "30")))
@@ -534,12 +536,12 @@ async def stop_main(chat_id: int) -> bool:
 def _ganti_menu() -> str:
     return (
         "⌘ SOURCE UPDATE / GANTI\n\n"
-        "Pilih file yang akan diganti:\n"
-        f"1. {Path(MAIN_FILE).name}\n"
-        f"2. {Path(STRATEGY_FILE).name}\n\n"
+        "Pilih target source GitHub/runtime:\n"
+        "1. main.py\n"
+        "2. strategy.py\n\n"
         "Kirim angka 1/2, lalu kirim file .py sebagai Document Telegram.\n"
-        f"Atau langsung gunakan /ganti {Path(MAIN_FILE).name}\n"
-        f"atau /ganti {Path(STRATEGY_FILE).name}\n\n"
+        "Atau langsung gunakan /ganti main\n"
+        "atau /ganti strategy\n\n"
         "Gunakan /back untuk membatalkan."
     )
 
@@ -557,9 +559,9 @@ def _resolve_ganti_target(value: str) -> str | None:
 
 def _infer_ganti_target(document: dict) -> str | None:
     filename = Path(str(document.get("file_name") or "").strip()).name.lower()
-    if filename in {Path(MAIN_FILE).name.lower(), "main.py"}:
+    if filename in {"main.py", "main_volumatic.py"} or filename.startswith("main_"):
         return MAIN_FILE
-    if filename in {Path(STRATEGY_FILE).name.lower(), "strategy.py"}:
+    if filename in {"strategy.py", "strategy_volumatic.py"} or filename.startswith("strategy_"):
         return STRATEGY_FILE
     return None
 
@@ -671,8 +673,8 @@ async def route_message(message: dict, update: dict) -> None:
             tg_send(
                 chat_id,
                 "✓ VOLUMATIC ENGINE ONLINE\n\n"
-                f"MAIN     : {Path(MAIN_FILE).name}\n"
-                f"STRATEGY : {Path(STRATEGY_FILE).name}\n"
+                "MAIN     : main.py\n"
+                "STRATEGY : strategy.py\n"
                 "LAUNCHER : tetap online\n"
                 "Gunakan /end untuk menghentikan engine tanpa mematikan Render.",
             )
@@ -748,7 +750,7 @@ async def route_message(message: dict, update: dict) -> None:
             chat_id,
             "VOLUMATIC LAUNCHER STATUS\n\n"
             f"LAUNCHER : ONLINE\nENGINE   : {'RUNNING' if MAIN_RUNNING else 'STOPPED'}\n"
-            f"MAIN     : {Path(MAIN_FILE).name}\nSTRATEGY : {Path(STRATEGY_FILE).name}",
+            "MAIN     : main.py\nSTRATEGY : strategy.py",
         )
         return
 
