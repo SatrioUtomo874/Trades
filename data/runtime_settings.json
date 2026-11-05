@@ -3,7 +3,7 @@
   "timeframe": "H4",
   "trend_length": 100,
   "ema_filter_length": 100,
-  "max_active_trades": 100,
+  "max_active_trades": 6,
   "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": false,
@@ -18,5 +18,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "H4",
-  "updated_at": "2026-11-05T14:59:22.230381+00:00"
+  "updated_at": "2026-11-05T14:59:26.564521+00:00"
 }
