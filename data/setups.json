@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "1.5.0",
-  "updated_at": "2026-11-05T12:04:21.233668+00:00",
+  "updated_at": "2026-11-05T12:04:24.921222+00:00",
   "active_trades": [
     {
       "trade_id": "EDGEUSDT-20261105-190414-C11CB5",
@@ -40,14 +40,14 @@
       "target_notional": "5.064",
       "actual_notional": "5.064",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": null,
+      "entry_order_id": 983144753,
       "entry_client_order_id": "VTafe861e4dca74761b4d8a98963b9",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": null,
-      "entry_order_status": "UNKNOWN",
+      "entry_executed_qty": "0",
+      "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
       "last_ws_event_key": null,
