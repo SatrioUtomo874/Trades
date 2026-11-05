@@ -112,15 +112,17 @@
     "H4:BMTUSDT": 1793836800000,
     "H4:BNBUSDT": 1793836800000,
     "H4:BNTUSDT": 1793836800000,
-    "H4:BOMEUSDT": 1793836800000
+    "H4:BOMEUSDT": 1793836800000,
+    "H4:BRETTUSDT": 1793836800000,
+    "H4:BREVUSDT": 1793836800000
   },
   "last_position_candles": {
     "H4:1000000MOGUSDT": 1793836800000,
     "H4:1000CATUSDT": 1793836800000
   },
   "signal_retries": {},
-  "scan_resume_cursor": 100,
+  "scan_resume_cursor": 102,
   "scan_resume_boundary_ms": 1793836800000,
   "scan_resume_timeframe": "H4",
-  "updated_at": "2026-11-05T02:03:54.763718+00:00"
+  "updated_at": "2026-11-05T02:04:00.663455+00:00"
 }
