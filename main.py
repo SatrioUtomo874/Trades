@@ -10,7 +10,9 @@ Contract for try.py:
 
 The strategy engine is intentionally limited to Volumatic Trend bubble flips.
 The main process owns Binance REST/private execution, WebSocket prices,
-closed-candle scanner, Telegram, PAPER/REAL ledger, logging and GitHub history.
+H4/D1 scanner, Telegram, PAPER/REAL ledger, logging and GitHub history.
+Mode B detects the offset=-1 visual bubble from the adjacent live candle and
+uses the visually marked prior candle's close as its one-candle LIMIT price.
 """
 
 import asyncio
@@ -604,7 +606,7 @@ class Trade:
             "late_fill_during_api_cooldown": self.late_fill_during_api_cooldown,
             "preserve_gtc_after_cooldown": self.preserve_gtc_after_cooldown,
             "strategy_name": volumatic.STRATEGY_NAME, "strategy_version": volumatic.STRATEGY_VERSION,
-            "entry_reason": "Volumatic Trend confirmed signal candle CLOSE; one-candle LIMIT",
+            "entry_reason": "Volumatic Trend visual offset=-1 bubble candle CLOSE; LIMIT valid on adjacent live candle only (mode B)",
             "price_exp_reason": (
                 "Normal expiry at next candle close; exception: an already-submitted REAL GTC order "
                 "that crosses expiry during Binance REST cooldown is preserved until fill/reversal/manual cancel."
@@ -728,8 +730,9 @@ class BinanceCooldownGate:
         # Preserve multiple recent ban windows. A bot may be offline across more
         # than one rate-limit event; old trade expiries must remain attributable.
         self._ban_intervals: list[list[float]] = []
+        # Fresh-engine policy: cooldown is process/session memory only.
+        # Do not load a previous process' IP ban marker on /try.
         self._state_path = BASE_DIR / "data" / "binance_cooldown_state.json"
-        self._restore_persisted_cooldown()
 
     def _restore_persisted_cooldown(self) -> None:
         """Restore a server IP ban and its historical time range."""
@@ -1151,15 +1154,19 @@ class BinanceREST:
         return aliases.get(token, aliases.get(token.upper(), token.lower()))
 
     @staticmethod
-    def _pack_kline_rows(rows: list[list[Any]], span_ms: int, now_ms: int) -> np.ndarray:
-        """Convert Binance JSON kline rows immediately into a compact numeric array."""
+    def _pack_kline_rows(
+        rows: list[list[Any]], span_ms: int, now_ms: int, *, include_forming: bool = False
+    ) -> np.ndarray:
+        """Convert Binance kline rows; default drops the active candle."""
         packed: list[tuple[int, float, float, float, float, float, float]] = []
         for row in rows:
             if not isinstance(row, (list, tuple)) or len(row) < 10:
                 continue
             try:
                 open_ms = int(row[0])
-                if open_ms + span_ms > now_ms:
+                if open_ms > now_ms:
+                    continue
+                if not include_forming and open_ms + span_ms > now_ms:
                     continue  # closed candles only
                 # The strategy consumes OHLC; volume is retained for audit/extension.
                 values = (
@@ -1341,6 +1348,39 @@ class BinanceREST:
                     if len(self._kline_locks) <= 384:
                         break
         return result
+
+    async def get_klines_with_forming(
+        self, symbol: str, interval: str, count: int, interval_ms: int | None = None,
+    ) -> np.ndarray:
+        """Fetch historical closed bars plus the current forming kline.
+
+        Deliberately bypasses the closed-bar cache: the last row's close field
+        changes intrabar and must represent the current Binance kline snapshot.
+        The response is never persisted into the closed-candle cache/disk cache.
+        """
+        symbol = normalize_symbol(symbol)
+        api_interval = self._binance_interval(interval)
+        span_ms = int(interval_ms or self._interval_ms(api_interval))
+        count = max(3, min(499, int(count)))
+        now_ms = int(time.time() * 1000)
+        payload = await self._get("/fapi/v1/klines", {
+            "symbol": symbol, "interval": api_interval,
+            "endTime": now_ms, "limit": count,
+        })
+        if not isinstance(payload, list) or not payload:
+            raise RuntimeError(f"Binance tidak mengembalikan kline live untuk {symbol} {api_interval}.")
+        rows = self._pack_kline_rows(payload, span_ms, now_ms, include_forming=True)
+        if rows.size < max(3, min(count - 1, volumatic.ATR_LENGTH + 5)):
+            raise RuntimeError(
+                f"Kline live {symbol} {api_interval} tidak cukup: {rows.shape[0]}/{count}."
+            )
+        last_open = int(rows["t"][-1])
+        if not (last_open <= now_ms < last_open + span_ms):
+            raise RuntimeError(
+                f"Tidak ada candle aktif yang valid untuk {symbol} {api_interval}; "
+                f"last_open={last_open}, now={now_ms}."
+            )
+        return rows
 
     async def _get_klines_locked(
         self, symbol: str, interval: str, count: int, interval_ms: int | None = None,
@@ -2180,11 +2220,12 @@ class BinanceRealClient:
             raise BinanceAPIError("Respons order Binance tidak valid.", endpoint="/fapi/v1/order")
         return payload
 
-    async def get_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+    async def get_open_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        params = {"symbol": symbol} if symbol else None
         payload = await self._request(
             "GET",
             "/fapi/v1/openOrders",
-            {"symbol": symbol},
+            params,
         )
         if not isinstance(payload, list):
             raise BinanceAPIError("Respons openOrders Binance tidak valid.", endpoint="/fapi/v1/openOrders")
@@ -2435,6 +2476,25 @@ class BinanceWebSocket:
         self._subscribed_symbols.clear()
         self._desired_symbols.clear()
         self._last_market_event_key.clear()
+
+    async def set_symbols(self, symbols: set[str] | list[str] | tuple[str, ...]) -> None:
+        """Replace the desired stream universe using batched subscribe commands."""
+        normalized = {normalize_symbol(symbol) for symbol in symbols if str(symbol).strip()}
+        old_desired = set(self._desired_symbols)
+        self._desired_symbols = normalized
+        if not self.connected or self._ws is None:
+            return
+        remove = sorted(self._subscribed_symbols - normalized)
+        add = sorted(normalized - self._subscribed_symbols)
+        # Keep each command comfortably under Binance's stream/message limits.
+        batch_size = 200
+        for start in range(0, len(remove), batch_size):
+            await self._send_unsubscribe(remove[start:start + batch_size])
+        for start in range(0, len(add), batch_size):
+            await self._send_subscribe(add[start:start + batch_size])
+        if old_desired != normalized:
+            log.info("[WS] desired market symbols replaced | old=%s new=%s subscribed=%s",
+                     len(old_desired), len(normalized), len(self._subscribed_symbols))
 
     async def add_symbol(self, symbol: str) -> None:
         symbol = normalize_symbol(symbol)
@@ -2804,7 +2864,7 @@ class BinanceUserDataWebSocket:
         # runtime filesystem (never GitHub) so a process restart during an IP ban
         # can reconnect while the existing key remains valid.
         self._state_path = BASE_DIR / "data" / "private_user_stream_state.json"
-        self._load_local_state()
+        # Fresh-engine policy: never restore a private listenKey from a prior /try.
 
     def _load_local_state(self) -> None:
         try:
@@ -2853,7 +2913,6 @@ class BinanceUserDataWebSocket:
                 # Normal path: acquire a listenKey through REST before starting.
                 self.listen_key = await self.real.create_user_stream()
                 self.last_keepalive_monotonic = time.monotonic()
-                self._save_local_state()
             # During an IP ban, deliberately start the task without a listenKey.
             # _run() will try the low-frequency USD-M WebSocket API start method;
             # if Binance blocks that too, it backs off and retries after recovery.
@@ -2930,7 +2989,6 @@ class BinanceUserDataWebSocket:
             try:
                 self.listen_key = await self._user_stream_ws_api("userDataStream.ping")
                 self.last_keepalive_monotonic = time.monotonic()
-                self._save_local_state()
                 log.info("[USER WS] listenKey renewed through WebSocket API during REST cooldown")
             except Exception as exc:
                 self.last_keepalive_monotonic = time.monotonic() - BINANCE_USER_STREAM_KEEPALIVE_SECONDS + 300.0
@@ -2938,7 +2996,6 @@ class BinanceUserDataWebSocket:
             return
         self.listen_key = await self.real.keepalive_user_stream(self.listen_key)
         self.last_keepalive_monotonic = time.monotonic()
-        self._save_local_state()
         log.info("[USER WS] listenKey renewed")
 
     async def _run(self) -> None:
@@ -2954,7 +3011,6 @@ class BinanceUserDataWebSocket:
                         try:
                             self.listen_key = await self._user_stream_ws_api("userDataStream.start")
                             self.last_keepalive_monotonic = time.monotonic()
-                            self._save_local_state()
                         except Exception as exc:
                             log.info("[USER WS] userDataStream.start belum tersedia saat REST cooldown; retry terjadwal | %s", exc)
                             await asyncio.sleep(max(300.0, min(900.0, BINANCE_COOLDOWN.remaining() or 300.0)))
@@ -3370,6 +3426,12 @@ class TradingEngine:
         self.user_id = int(context.get("user_id") or ALLOWED_USER_ID)
         self.send_message = context["send_message"]
         self.session_id = generate_session_id()
+        self.session_data_dir = f"data/sessions/{self.session_id}"
+        self.session_history_trades_path = f"{self.session_data_dir}/trades.json"
+        self.session_history_events_path = f"{self.session_data_dir}/events.jsonl"
+        self.session_history_markdown_path = f"{self.session_data_dir}/trade_history.md"
+        self.session_notes_path = f"{self.session_data_dir}/notes.json"
+        self.session_deferred_commands_path = f"{self.session_data_dir}/deferred_commands.json"
 
         self.rest = BinanceREST()
         self.real = BinanceRealClient()
@@ -3409,6 +3471,7 @@ class TradingEngine:
         self._autostop_source: str | None = None
 
         self.symbols: dict[str, SymbolMeta] = {}
+        self._scanner_symbols: set[str] = set()
         self.prices: dict[str, PriceSnapshot] = {}
         self.active_trades: dict[str, Trade] = {}
         self.legacy_active_snapshot_count = 0
@@ -3417,6 +3480,12 @@ class TradingEngine:
         self.notes: list[dict[str, Any]] = []
         self.last_processed_candles: dict[str, int] = {}
         self.last_position_candles: dict[str, int] = {}
+        # Cached immutable visual-bubble candle context + one adjacent live
+        # candle for Mode-B intrabar evaluation. Context values are dictionaries
+        # prepared by strategy.py, not full candle arrays.
+        self._live_signal_candles: dict[str, dict[str, Any]] = {}
+        self._live_signal_last_eval: dict[str, float] = {}
+        self._live_signal_seen: dict[str, set[str]] = {}
         self._signal_retries: dict[str, dict[str, Any]] = {}
         self.deferred_commands: list[dict[str, Any]] = []
         self._deferred_commands_lock = asyncio.Lock()
@@ -3667,7 +3736,7 @@ class TradingEngine:
         }
         content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         # _persist_bytes writes the local fallback first, then attempts GitHub.
-        await self._persist_bytes(DEFERRED_COMMANDS_PATH, content, "volumatic: deferred command queue")
+        await self._persist_bytes(self.session_deferred_commands_path, content, "volumatic: session deferred command queue")
 
     async def _load_deferred_commands(self) -> None:
         raw = await self._remote_or_local(DEFERRED_COMMANDS_PATH)
@@ -3933,7 +4002,7 @@ class TradingEngine:
             await self.show_notes()
             return
         self.notes.append({"note_id": uuid4().hex[:12].upper(), "text": value[:3000], "created_at": iso_utc(), "created_at_wib": format_wib(now_utc())})
-        await self._persist_bytes(NOTES_PATH, json.dumps(self.notes, ensure_ascii=False, indent=2).encode(), "volumatic: add note")
+        await self._persist_bytes(self.session_notes_path, json.dumps(self.notes, ensure_ascii=False, indent=2).encode(), "volumatic: add session note")
         await self.reply("✅ Catatan tersimpan.")
 
     async def show_notes(self) -> None:
@@ -3947,8 +4016,8 @@ class TradingEngine:
         async with self._history_lock:
             trades = json.dumps(self.history_records, ensure_ascii=False, indent=2).encode("utf-8")
             events = ("\n".join(json.dumps(x, ensure_ascii=False, separators=(",", ":")) for x in self.history_events[-20000:]) + ("\n" if self.history_events else "")).encode("utf-8")
-            await self._persist_bytes(HISTORY_TRADES_PATH, trades, "volumatic: update trade history")
-            await self._persist_bytes(HISTORY_EVENTS_PATH, events, "volumatic: append event log")
+            await self._persist_bytes(self.session_history_trades_path, trades, "volumatic: update session trade history")
+            await self._persist_bytes(self.session_history_events_path, events, "volumatic: update session event log")
 
     async def _record_event(self, event: str, trade: Trade | None = None, **extra: Any) -> None:
         item = {
@@ -4034,9 +4103,47 @@ class TradingEngine:
 
     # ----------------------------- Startup -------------------------------
     async def start(self) -> None:
+        """Start a fresh in-memory engine session without restoring prior data.
+
+        /try is intentionally a clean boot: no runtime settings, history, notes,
+        active-trade snapshots, deferred commands, cooldown markers, saved
+        listenKeys, scanner cursors, or previous Autostop state are imported.
+        Exchange market data is fetched only after an explicit /scan on; private
+        account data is fetched only after an explicit /real on.
+        """
         if self._running:
             return
         self._running = True
+        self.real_mode = False
+        self.scan_enabled = False
+        self._scan_trigger_now = False
+        self.timeframe = "H4"
+        self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
+        self.margin_usdt = DEFAULT_MARGIN_USDT
+        self.leverage = DEFAULT_LEVERAGE
+        self.min_margin_enabled = False
+        self.max_active_trades = MAX_ACTIVE_TRADES
+        self.active_trades.clear()
+        self.history_records.clear()
+        self.history_events.clear()
+        self.notes.clear()
+        self.deferred_commands.clear()
+        self.last_processed_candles.clear()
+        self.last_position_candles.clear()
+        self._live_signal_candles.clear()
+        self._live_signal_last_eval.clear()
+        self._live_signal_seen.clear()
+        self._signal_retries.clear()
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_resume_timeframe = "H4"
+        self._scan_interrupted_by_cooldown = False
+        self._was_in_binance_cooldown = False
+        self._last_scan_boundary_ms = 0
+        self.symbols.clear()
+        self._scanner_symbols.clear()
+        self.prices.clear()
+
         if not self._telegram_error_handler_added:
             for handler in list(log.handlers):
                 if isinstance(handler, TelegramErrorHandler) and handler is not self._telegram_error_handler:
@@ -4045,118 +4152,125 @@ class TradingEngine:
             log.addHandler(self._telegram_error_handler)
             self._telegram_error_handler_added = True
 
-        await self._load_runtime_settings()
-        # Fail-safe: every engine start/reload begins with scanner OFF.
-        # Only /scan on may turn it ON during this session.
-        self.scan_enabled = False
-        self._scan_trigger_now = False
-        await self._load_history()
-        await self._load_notes()
-        await self._load_active_state()
-        await self._load_deferred_commands()
-        await self._restore_cooldown_from_github()
-        try:
-            self.symbols = await self.rest.get_exchange_info()
-            self._last_universe_refresh = time.monotonic()
-        except BinanceRateLimitError as exc:
-            # Telegram/health service must come online even during a long IP ban.
-            self.symbols = self.rest._exchange_info_cache or {}
-            self._last_universe_refresh = 0.0
-            self._was_in_binance_cooldown = True
-            await self._notify_binance_cooldown(exc, source="STARTUP / EXCHANGE INFO")
-            log.info("[START] Binance REST limited; launcher tetap online dalam mode degraded.")
-        except Exception as exc:
-            self.symbols = self.rest._exchange_info_cache or {}
-            self._last_universe_refresh = 0.0
-            log.exception("[START] exchangeInfo belum tersedia; pemulihan otomatis dijadwalkan: %s", exc)
-        if self._binance_cooldown_remaining() <= 0:
-            await self._reconcile_restored_trades()
+        # No exchangeInfo, market WS, private WS, account, or GitHub state request
+        # is performed during startup. Telegram remains responsive and scanner OFF.
+        if self.autostop_percent is not None:
+            self._equity_peak = None
+            self._equity_last = None
+            self._autostop_triggered = False
+            self._autostop_source = None
+            self._autostop_data_hold = True
         else:
-            log.info("[START] REST cooldown aktif; reconciliation REAL ditunda sementara User Data WS tetap berjalan bila tersedia.")
-        await self.ws.start()
-        await self._sync_ws_symbols()
-        if self.real_mode or any(t.real_enabled and t.status in {"PENDING", "FILLED"} for t in self.active_trades.values()):
-            try:
-                await self.user_ws.start()
-            except BinanceRateLimitError as exc:
-                log.info("[START] private user stream menunggu REST pulih; launcher tetap aktif | %s", exc)
-            except Exception as exc:
-                log.exception("[START] private user stream belum tersambung; REST reconciliation tetap aktif: %s", exc)
-
-        if self._binance_cooldown_remaining() > 0:
-            await self._notify_binance_cooldown(source="STARTUP RECOVERY")
-
-        # Prime the Autostop snapshot before the scanner starts. During a cooldown
-        # we do not call REST; the guard remains in DATA HOLD until ACCOUNT_UPDATE
-        # or a later successful balance/mark-price refresh completes the snapshot.
-        if self.autostop_percent is not None and not self._autostop_triggered:
-            if self._autostop_source_name() == "REAL" and self._binance_cooldown_remaining() <= 0:
-                balance = self.real.cached_usdt_balance()
-                if balance is None:
-                    try:
-                        await self.real.get_futures_balance()
-                    except BinanceRateLimitError as exc:
-                        self._was_in_binance_cooldown = True
-                        await self._notify_binance_cooldown(exc, source="STARTUP / AUTOSTOP BALANCE")
-                    except Exception as exc:
-                        log.info("[AUTOSTOP] startup balance snapshot ditunda; guard tetap DATA HOLD: %s", exc)
-            await self._autostop_check(force=True)
+            self._equity_peak = None
+            self._equity_last = None
+            self._autostop_triggered = False
+            self._autostop_data_hold = False
+            self._autostop_source = None
 
         self._maintenance_task = asyncio.create_task(self._maintenance_loop(), name="volumatic-maintenance")
         self._scan_task = asyncio.create_task(self._scan_loop(), name="volumatic-scanner")
         log.info(
-            "[START] Volumatic Trend aktif | timeframe=%s | symbols=%s | restored=%s | "
-            "min_margin=%s | fixed_margin=%s | leverage=%sx",
-            self.timeframe, len(self.symbols), len(self.active_trades),
-            "ON" if self.min_margin_enabled else "OFF", self.margin_usdt, self.leverage,
-        )
-        migration_warning = (
-            f"\n⚠️ {self.legacy_active_snapshot_count} snapshot trade strategi lama tidak dimuat. "
-            "Periksa posisi/pending/algo order lama di Binance secara manual sebelum REAL dipakai.\n"
-            if self.legacy_active_snapshot_count else ""
+            "[START] FRESH Volumatic session | scanner=OFF | timeframe=H4 | "
+            "EMA=%s | no persisted engine state imported",
+            f"EMA{self.ema_filter_length}" if self.ema_filter_length is not None else "OFF",
         )
         await self.reply(
-            "🟢 VOLUMATIC TREND ONLINE\n\n"
-            f"Timeframe: {self.timeframe} (default H4)\n"
-            f"Universe: {len(self.symbols)} USDT Perpetual\n"
-            f"Batch scanner: {SCAN_MAX_PAIRS_PER_CYCLE} pair\n"
-            "Scanner: OFF (menunggu /scan on)\n"
-            f"Active restored: {len(self.active_trades)}\n"
-            f"Deferred commands: {len(self.deferred_commands)}\n"
-            f"Binance cooldown: {self._binance_cooldown_remaining():.0f}s\n"
-            f"Private User Data WS: {self.user_ws.status}\n"
-            "REAL: OFF untuk entry baru\n"
-            "Gunakan /scan on untuk memulai scanner dan /timeframe H4 atau D1 untuk memilih timeframe."
-            + migration_warning
+            "🟢 VOLUMATIC TREND / FRESH SESSION\n\n"
+            "Runtime state : CLEAN (tidak memuat data sesi sebelumnya)\n"
+            "Timeframe     : H4 (default)\n"
+            f"EMA filter    : {'EMA' + str(self.ema_filter_length) if self.ema_filter_length is not None else 'OFF'}\n"
+            f"Max positions : {self.max_active_trades}\n"
+            "Scanner       : OFF — menunggu /scan on\n"
+            "REAL          : OFF — menunggu /real on\n"
+            "Active        : 0\n"
+            "Market WS     : OFF — aktif saat scanner dimulai\n"
+            "Private WS    : OFF — aktif setelah /real on\n"
+            "Startup I/O   : tidak mengambil exchangeInfo, balance, posisi, order, atau snapshot GitHub.\n\n"
+            "PERHATIAN: posisi dan order LIVE yang masih ada di Binance tidak diadopsi oleh sesi baru. "
+            "Periksa akun Binance sebelum mengaktifkan /real on."
         )
 
     async def stop(self) -> None:
+        """Immediately stop this in-memory engine session without touching exchange or saved data.
+
+        This does NOT cancel Binance orders, close positions, delete listenKeys,
+        save snapshots, write runtime settings, or alter journals. Those exchange
+        objects (if any) remain on Binance and must be reviewed before a fresh /try.
+        """
         if not self._running:
             return
         self._running = False
-        for task in (self._scan_task, self._maintenance_task):
+        self.scan_enabled = False
+        self._scan_trigger_now = False
+        self.real_mode = False
+
+        # Signal every loop/socket worker to stop, then cancel concurrently.
+        workers = [self._scan_task, self._maintenance_task, self.ws._task, self.user_ws._task]
+        for component in (self.ws, self.user_ws):
+            try:
+                component._stop.set()
+            except Exception:
+                pass
+        for task in workers:
             if task is not None and not task.done():
                 task.cancel()
-                try: await task
-                except asyncio.CancelledError: pass
-        self._scan_task = self._maintenance_task = None
+
+        # Close sockets best-effort with a strict short bound; never send REST
+        # DELETE/cancel/close actions to Binance during /end.
+        close_jobs = []
+        for component in (self.ws, self.user_ws):
+            socket = getattr(component, "_ws", None)
+            if socket is not None:
+                try:
+                    close_jobs.append(asyncio.create_task(socket.close()))
+                except Exception:
+                    pass
+        if close_jobs:
+            done, pending = await asyncio.wait(close_jobs, timeout=0.20)
+            for task in pending:
+                task.cancel()
+        live_workers = [task for task in workers if task is not None and not task.done()]
+        if live_workers:
+            done, pending = await asyncio.wait(live_workers, timeout=0.35)
+            for task in pending:
+                task.cancel()
+
+        self._scan_task = None
+        self._maintenance_task = None
+        self.ws._task = None
+        self.user_ws._task = None
+        self.ws._ws = None
+        self.user_ws._ws = None
+        self.ws.connected = False
+        self.user_ws.connected = False
+        self.ws._desired_symbols.clear()
+        self.ws._subscribed_symbols.clear()
+
+        # Local resource release only; no network request is performed here.
         try:
-            await self._save_active_state()
-            await self._save_runtime_settings()
+            self.rest._session.close()
         except Exception:
-            log.exception("Persistence saat shutdown gagal.")
-        await self.ws.stop()
-        await self.user_ws.stop()
-        try: self.rest._session.close()
-        except Exception: pass
+            pass
+        try:
+            self.real._session.close()
+        except Exception:
+            pass
+
         self.active_trades.clear()
         self.prices.clear()
+        self._live_signal_candles.clear()
+        self._live_signal_last_eval.clear()
+        self._live_signal_seen.clear()
+        self._scanner_symbols.clear()
+        self._signal_retries.clear()
         if self._telegram_error_handler_added:
-            try: log.removeHandler(self._telegram_error_handler)
-            except Exception: pass
+            try:
+                log.removeHandler(self._telegram_error_handler)
+            except Exception:
+                pass
             self._telegram_error_handler_added = False
         self.session_id = ""
-        log.info("[STOP] Main session berhenti dengan state aktif sudah disnapshot.")
+        log.info("[STOP] Engine OFF (fresh-stop); no persistence writes and no Binance order/position mutation.")
 
     # ------------------------- Universe / scanner ------------------------
     async def _universe(self) -> list[str]:
@@ -4194,7 +4308,7 @@ class TradingEngine:
         unknown = int(stats.get("unknown", 0))
         lines = [
             "╔══ VOL / SCAN BATCH REPORT ══╗",
-            f"ENGINE    : VOLUMATIC TREND · {timeframe} · {ema}",
+            f"ENGINE    : VOLUMATIC TREND · {timeframe} · {ema} · VISUAL OFFSET B",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
             f"STATE     : {state}",
@@ -4278,6 +4392,9 @@ class TradingEngine:
             ema_filter_length = self.ema_filter_length
             interval_ms = volumatic.TIMEFRAME_MS[timeframe]
             universe = await self._universe()
+            self._scanner_symbols = set(universe) if self.scan_enabled else set()
+            if self.scan_enabled:
+                await self._sync_ws_symbols()
             started = time.monotonic()
             processed_total = 0
             errors_total = 0
@@ -4298,7 +4415,7 @@ class TradingEngine:
                 return
 
             log.info(
-                "[SCAN] cycle start | tf=%s | ema=%s | universe=%s | batch_size=%s | cursor=%s",
+                "[SCAN] cycle start | tf=%s | ema=%s | signal_mode=VISUAL_OFFSET_INTRABAR_B | universe=%s | batch_size=%s | cursor=%s",
                 timeframe, f"EMA{ema_filter_length}" if ema_filter_length is not None else "OFF",
                 len(universe), SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
             )
@@ -4352,38 +4469,51 @@ class TradingEngine:
                     stats["requested"] += 1
                     try:
                         api_interval = volumatic.TIMEFRAME_INTERVALS[timeframe]
-                        candles = await self.rest.get_klines(
-                            symbol, api_interval, KLINE_HISTORY, interval_ms, force_refresh=True
+                        candles = await self.rest.get_klines_with_forming(
+                            symbol, api_interval, KLINE_HISTORY, interval_ms
                         )
                         if candles is None or len(candles) < max(volumatic.ATR_LENGTH + 10, volumatic.TREND_LENGTH + 10):
                             stats["warmup"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
 
-                        latest_open_ms = int(candles["t"][-1])
-                        close_ms = latest_open_ms + interval_ms
+                        # MODE B: the last row is the currently-forming candle.
+                        # Pine draws trendFlip at offset=-1, i.e. on the previous
+                        # closed candle. That previous candle is the bubble candle;
+                        # its CLOSE is the LIMIT price. The current row is the only
+                        # candle in which that visual-offset signal may be traded.
+                        entry_open_ms = int(candles["t"][-1])
+                        bubble_open_ms = int(candles["t"][-2])
+                        bubble_close_ms = entry_open_ms
+                        expiry_ms = entry_open_ms + interval_ms
                         key = f"{timeframe}:{symbol}"
                         previous_close = self.last_processed_candles.get(key)
-                        if previous_close is not None and close_ms <= previous_close:
+                        if previous_close is not None and entry_open_ms <= previous_close:
                             stats["already_seen"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
 
                         now_ms = int(time.time() * 1000)
-                        expiry_ms = close_ms + interval_ms
-                        if now_ms >= expiry_ms:
-                            self.last_processed_candles[key] = close_ms
+                        if not (entry_open_ms <= now_ms < expiry_ms) or bubble_open_ms + interval_ms != entry_open_ms:
+                            self.last_processed_candles[key] = entry_open_ms
                             stats["stale"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
 
-                        signal = volumatic.detect_latest_signal(
-                            candles, symbol=symbol, timeframe=timeframe, interval_ms=interval_ms,
-                            ema_filter_length=ema_filter_length,
+                        self._cache_live_signal_context(
+                            symbol, timeframe, candles, ema_filter_length=ema_filter_length
+                        )
+                        context_key = f"{timeframe}:{symbol}"
+                        live_context = self._live_signal_candles.get(context_key)
+                        signal = volumatic.evaluate_live_visual_context(
+                            live_context, float(candles["c"][-1]), now_ms=now_ms
                         )
                         if signal is None:
                             stats["no_signal"] += 1
-                            self.last_processed_candles[key] = close_ms
+                            # One snapshot per active entry candle. If the B-mode
+                            # visual bubble is absent during this scan, do not chase
+                            # it in a later candle.
+                            self.last_processed_candles[key] = entry_open_ms
                         else:
                             bubble = str(signal.get("signal") or "?").upper()
                             direction = str(signal.get("direction") or "?").upper()
@@ -4392,14 +4522,14 @@ class TradingEngine:
                             elif bubble == "RED":
                                 stats["red"] += 1
                             try:
-                                outcome = await self._handle_signal(signal, expiry_ms)
-                            except BinanceRateLimitError:
-                                # Do not consume the signal or move the cursor. The
-                                # same coin is retried when the shared IP recovers.
-                                raise
+                                outcome = await self._dispatch_mode_b_signal(
+                                    signal, expiry_ms, source="SCANNER"
+                                )
                             except Exception as signal_exc:
                                 self._signal_retries[key] = {
                                     "signal": signal, "expiry_ms": expiry_ms, "key": key,
+                                    "attempts": 0, "last_error": str(signal_exc)[:500],
+                                    "source": "SCANNER",
                                 }
                                 stats["errors"] += 1
                                 errors_total += 1
@@ -4430,10 +4560,10 @@ class TradingEngine:
                             ema_text = "EMA OFF" if ema_len is None else f"EMA{ema_len}={ema_val if ema_val is not None else 'N/A'}"
                             closed_old = bool(signal.get("_closed_opposite"))
                             close_note = f"CLOSE {signal.get('_closed_direction', 'OPPOSITE')} MARKET → " if closed_old else ""
-                            trace = f"#{absolute_index + 1:04d} {symbol} {bubble}/{direction} @ {close_price} · {ema_text} · {close_note}{outcome}"
+                            trace = f"#{absolute_index + 1:04d} {symbol} {bubble}/{direction} VISUAL-CLOSE={close_price} · {ema_text} · {close_note}{outcome}"
                             stats["details"].append(trace[:190])
 
-                            self.last_processed_candles[key] = close_ms
+                            self.last_processed_candles[key] = entry_open_ms
                             if outcome != "ERROR_RETRY":
                                 self._signal_retries.pop(key, None)
 
@@ -4497,15 +4627,94 @@ class TradingEngine:
                 processed_total, len(universe), errors_total, self._scan_resume_cursor, elapsed,
             )
 
+    async def _dispatch_mode_b_signal(
+        self, signal: dict[str, Any], expiry_ms: int, *, source: str
+    ) -> str:
+        """Deduplicate one visual bubble and route it through the trade manager.
+
+        The latch is per pair/timeframe/adjacent candle/direction. A rate-limit
+        response creates exactly one in-memory retry item and leaves the latch
+        armed, preventing every incoming aggTrade tick from retrying the same
+        Binance action while the REST governor is closed.
+        """
+        pair = normalize_symbol(signal.get("symbol") or "")
+        timeframe = str(signal.get("timeframe") or self.timeframe).upper()
+        direction = str(signal.get("direction") or "").upper()
+        visual_open = int(signal.get("bubble_visual_time_ms") or 0)
+        entry_open = int(signal.get("entry_candle_open_time_ms") or 0)
+        token = f"{entry_open}:{str(signal.get('signal') or direction).upper()}"
+        key = f"{timeframe}:{pair}"
+        seen = self._live_signal_seen.setdefault(key, set())
+        if token in seen:
+            return "DUPLICATE"
+        seen.add(token)
+        try:
+            outcome = await self._handle_signal(signal, int(expiry_ms))
+        except BinanceRateLimitError as exc:
+            self._signal_retries[key] = {
+                "signal": dict(signal), "expiry_ms": int(expiry_ms), "key": key,
+                "attempts": 0, "last_error": str(exc)[:500],
+                "source": str(source),
+            }
+            self._was_in_binance_cooldown = True
+            await self._notify_binance_cooldown(
+                exc, source=f"{source} / MODE-B BUBBLE", symbol=pair
+            )
+            await self._record_event(
+                "VISUAL_BUBBLE_DEFERRED_RATE_LIMIT", None,
+                pair=pair, timeframe=timeframe, direction=direction,
+                signal=signal.get("signal"), visual_candle_close_price=signal.get("close_price"),
+                limit_price=signal.get("limit_price"), entry_candle_open_ms=entry_open,
+                expiry_ms=int(expiry_ms), source=source,
+            )
+            return "ORDER_DEFERRED"
+        except Exception:
+            # Keep the latch after an ambiguous/error outcome. The retry queue
+            # or order reconciliation owns recovery; do not emit duplicate POSTs.
+            raise
+
+        await self._record_event(
+            "VISUAL_BUBBLE_DISPATCHED", None,
+            pair=pair, timeframe=timeframe, direction=direction,
+            signal=signal.get("signal"),
+            visual_candle_open_ms=visual_open,
+            visual_candle_close_ms=signal.get("visual_candle_close_time_ms"),
+            visual_candle_close_price=signal.get("visual_candle_close_price", signal.get("close_price")),
+            limit_price=signal.get("limit_price"),
+            limit_price_source=signal.get("limit_price_source", "VISUAL_BUBBLE_CANDLE_CLOSE"),
+            entry_candle_open_ms=entry_open, expiry_ms=int(expiry_ms),
+            detection_price=signal.get("detection_price"), repaint_risk=True,
+            source=source, outcome=outcome,
+        )
+        return outcome
+
     async def _handle_signal(self, signal: dict[str, Any], expiry_ms: int) -> str:
         pair = normalize_symbol(signal["symbol"])
         direction = str(signal["direction"]).upper()
         if direction not in {"LONG", "SHORT"}:
             raise ValueError(f"Arah sinyal tidak valid: {direction}")
-        if int(time.time() * 1000) >= int(expiry_ms):
-            await self._record_event("SIGNAL_EXPIRED_BEFORE_SUBMIT", None, pair=pair, direction=direction, timeframe=signal.get("timeframe"))
-            return "EXPIRED"
+        # Even if the adjacent entry candle has just expired, an opposite
+        # bubble must still close/cancel the old exposure. A later freshness
+        # guard below prevents placing a stale new LIMIT.
         async with self._trade_lock:
+            if str(signal.get("signal_mode") or "").upper() == "VISUAL_OFFSET_INTRABAR_B":
+                visual_open = int(signal.get("bubble_visual_time_ms") or 0)
+                entry_open = int(signal.get("entry_candle_open_time_ms") or 0)
+                entry_close = int(signal.get("entry_candle_close_time_ms") or 0)
+                interval = volumatic.TIMEFRAME_MS.get(str(signal.get("timeframe") or "").upper(), 0)
+                if not interval or entry_open != visual_open + interval or entry_close != entry_open + interval:
+                    raise ValueError("Identitas candle visual/entry Mode B tidak konsisten.")
+                visual_close_ms = int(
+                    signal.get("visual_candle_close_time_ms")
+                    or signal.get("bubble_visual_close_time_ms")
+                    or 0
+                )
+                if int(signal.get("signal_close_time_ms") or 0) != entry_open:
+                    raise ValueError("Signal close Mode B harus sama dengan open candle entry berikutnya.")
+                if visual_close_ms != entry_open:
+                    raise ValueError("Candle close visual bubble tidak tepat sebelum candle entry.")
+                if int(expiry_ms) != entry_close:
+                    raise ValueError("Expiry Mode B tidak sama dengan close candle entry.")
             existing = next((t for t in self.active_trades.values() if t.pair == pair and t.status in {"PENDING", "FILLED"}), None)
             closed_opposite = False
             closed_direction = existing.direction if existing and existing.direction != direction else None
@@ -4617,15 +4826,35 @@ class TradingEngine:
                 signal["_closed_direction"] = closed_direction
                 return "MAX_BLOCKED"
 
-            bubble_price = Decimal(str(signal["bubble_price"]))  # EMA1[t-1]: visual/reference only
-            signal_close_price = Decimal(str(signal.get("limit_price") or signal.get("signal_close_price") or signal.get("close_price") or "0"))
+            bubble_price = Decimal(str(signal["bubble_price"]))  # EMA1 on the visually marked bubble candle
+            if str(signal.get("signal_mode") or "").upper() == "VISUAL_OFFSET_INTRABAR_B":
+                # Hard invariant for Mode B: price source is exclusively the
+                # close of the candle on which Pine visually paints offset=-1.
+                visual_close_raw = signal.get(
+                    "visual_candle_close_price", signal.get("close_price")
+                )
+                signal_close_price = Decimal(str(visual_close_raw or "0"))
+                declared_limit = Decimal(str(signal.get("limit_price") or "0"))
+                ordinary_close = Decimal(str(signal.get("close_price") or "0"))
+                if signal_close_price <= 0 or declared_limit != signal_close_price or ordinary_close != signal_close_price:
+                    raise ValueError(
+                        "Mode B ditolak: LIMIT/close harus identik dengan close candle visual bubble, "
+                        "bukan close candle aktif atau harga EMA1."
+                    )
+            else:
+                signal_close_price = Decimal(str(
+                    signal.get("limit_price") or signal.get("signal_close_price")
+                    or signal.get("close_price") or "0"
+                ))
             if signal_close_price <= 0:
                 raise ValueError("Close candle sinyal tidak tersedia atau tidak valid.")
             meta = self.symbols.get(pair)
             if meta is None:
                 raise ValueError(f"Metadata Binance untuk {pair} tidak ditemukan.")
-            # The LIMIT is anchored to the CLOSE of the candle that confirmed
-            # the bubble, not to the EMA-SWMA line where Pine draws the diamond.
+            # MODE B: LIMIT is anchored to the CLOSE of the candle where Pine
+            # visually draws the offset=-1 bubble. The adjacent candle is live
+            # now and defines the one-candle entry expiry. This accepts intrabar
+            # repaint/lookahead behavior by explicit user choice.
             # Respect tickSize without making the order price worse than target:
             # BUY rounds down, SELL rounds up.
             limit_price = quantized_price(signal_close_price, meta.tick_size) if direction == "LONG" else quantized_price_ceiling(signal_close_price, meta.tick_size)
@@ -4677,6 +4906,14 @@ class TradingEngine:
             self.active_trades[trade.trade_id] = trade
             await self._record_event(
                 "LIMIT_SUBMITTED", trade, order_type="LIMIT",
+                signal_mode=signal.get("signal_mode", "VISUAL_OFFSET_INTRABAR_B"),
+                bubble_visual_time_ms=signal.get("bubble_visual_time_ms"),
+                visual_candle_close_time_ms=signal.get("visual_candle_close_time_ms"),
+                visual_candle_close_price=signal.get("visual_candle_close_price", signal.get("close_price")),
+                limit_price_source=signal.get("limit_price_source", "VISUAL_BUBBLE_CANDLE_CLOSE"),
+                entry_candle_open_time_ms=signal.get("entry_candle_open_time_ms"),
+                entry_candle_close_time_ms=signal.get("entry_candle_close_time_ms"),
+                repaint_risk=bool(signal.get("repaint_risk", True)),
                 entry=decimal_to_str(trade.entry), expires_at=iso_utc(trade.expires_at),
                 real=trade.real_enabled, quantity=decimal_to_str(trade.quantity),
                 notional=decimal_to_str(trade.target_notional or trade.actual_notional),
@@ -4705,8 +4942,10 @@ class TradingEngine:
                 f"{'🟢' if direction == 'LONG' else '🔴'} VOLUMATIC {direction} • {pair}\n\n"
                 f"Timeframe: {trade.timeframe}\nSignal: {trade.signal} BUBBLE\n"
                 f"Bubble line (EMA1): {fmt_price(trade.bubble_price)}\n"
-                f"Signal candle close: {fmt_price(trade.signal_close_price or trade.entry)}\n"
-                f"LIMIT entry: {fmt_price(trade.entry)}\n"
+                f"VISUAL bubble candle close: {fmt_price(trade.signal_close_price or trade.entry)}\n"
+                f"Bubble candle close time: {format_wib(signal_close)}\n"
+                f"LIMIT entry: {fmt_price(trade.entry)} (source: visual candle close)\n"
+                f"Entry candle window: {format_wib(signal_close)} → {format_wib(trade.expires_at)}\n"
                 f"EMA filter: {('OFF' if trade.ema_filter_length is None else f'EMA{trade.ema_filter_length} @ {fmt_price(trade.ema_filter_value)}')}\n"
                 f"Margin: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
                 f"Sizing: {'MINIMUM AUTO' if trade.min_margin_mode else 'FIXED TARGET'}\n"
@@ -5138,12 +5377,12 @@ class TradingEngine:
         ]
         addition = "\n".join(lines)
         try:
-            await self.github.append_text_file(HISTORY_MARKDOWN_PATH, addition, "volumatic: trade closed")
-            local = self._local_path(HISTORY_MARKDOWN_PATH)
+            await self.github.append_text_file(self.session_history_markdown_path, addition, "volumatic: session trade closed")
+            local = self._local_path(self.session_history_markdown_path)
             old = local.read_text(encoding="utf-8") if local.exists() else "# Volumatic Trend Trade Journal\n\n"
             local.write_text(old + addition, encoding="utf-8")
         except Exception as exc:
-            log.error("Markdown journal GitHub gagal; detail tetap ada di trades.json: %s", exc)
+            log.error("Markdown journal GitHub gagal; detail tetap ada di session trades.json: %s", exc)
 
     async def _expire_due_pending(self) -> None:
         now = now_utc()
@@ -5684,84 +5923,108 @@ class TradingEngine:
                 log.exception("[MAINTENANCE] loop error")
                 await asyncio.sleep(3)
 
-    async def _monitor_active_positions(self) -> None:
-        """Monitor every filled position on its own timeframe, including missed bars.
+    def _cache_live_signal_context(
+        self, symbol: str, timeframe: str, candles: np.ndarray,
+        *, ema_filter_length: int | None = None,
+    ) -> None:
+        """Precompute a small context once; WebSocket ticks then use scalar math."""
+        key = f"{str(timeframe).upper()}:{normalize_symbol(symbol)}"
+        if not isinstance(candles, np.ndarray) or candles.dtype.names is None or not candles.size:
+            return
+        context = volumatic.prepare_live_visual_context(
+            candles, symbol=symbol, timeframe=timeframe,
+            interval_ms=volumatic.TIMEFRAME_MS[str(timeframe).upper()],
+            ema_filter_length=ema_filter_length,
+        )
+        if context is None:
+            self._live_signal_candles.pop(key, None)
+            self._live_signal_last_eval.pop(key, None)
+            self._live_signal_seen.pop(key, None)
+            return
+        previous = self._live_signal_candles.get(key)
+        same_live_candle = bool(
+            previous
+            and int(previous.get("entry_candle_open_time_ms") or 0)
+                == int(context.get("entry_candle_open_time_ms") or 0)
+            and previous.get("ema_filter_length") == context.get("ema_filter_length")
+        )
+        # A repeated scanner refresh inside the same active candle must not
+        # clear the per-candle bubble latch; otherwise a repaint can submit the
+        # same direction more than once. The closed visual candle is immutable.
+        if same_live_candle:
+            return
+        self._live_signal_candles[key] = context
+        self._live_signal_last_eval[key] = 0.0
+        self._live_signal_seen[key] = set()
 
-        Position exits must not be missed if the process/API was unavailable for
-        several candles. Old opposite bubbles close the position on recovery but
-        do not create a stale reverse LIMIT whose one-candle window has passed.
+    async def _monitor_active_positions(self) -> None:
+        """Refresh one active candle per position; WebSocket handles intrabar ticks.
+
+        On each new H4/D1 bar, fetch the current forming kline once, cache its
+        closed history, and evaluate immediately. Subsequent live ticks update
+        the cached current close and re-evaluate the Pine offset=-1 bubble
+        without repeatedly polling REST.
         """
         by_key: dict[str, Trade] = {}
-        ema_filter_length = self.ema_filter_length  # consistent filter for this position-monitor pass
+        ema_filter_length = self.ema_filter_length
         for trade in self.active_trades.values():
-            if trade.status == "FILLED":
+            if trade.status in {"PENDING", "FILLED"}:
                 by_key.setdefault(f"{trade.timeframe}:{trade.pair}", trade)
+
         now_ms = int(time.time() * 1000)
         for key, seed_trade in list(by_key.items()):
             tf = seed_trade.timeframe if seed_trade.timeframe in volumatic.TIMEFRAME_MS else "H4"
             span = volumatic.TIMEFRAME_MS[tf]
-            expected_close = (now_ms // span) * span
+            active_open_ms = (now_ms // span) * span
             checkpoint = max(
                 self.last_position_candles.get(key, 0),
                 int(seed_trade.signal_time.timestamp() * 1000),
             )
-            if expected_close <= checkpoint:
-                continue
+            if active_open_ms <= checkpoint:
+                # A current context might have been cached by the scanner when
+                # the entry was created. No additional REST request is needed.
+                if key in self._live_signal_candles:
+                    continue
             try:
-                candles = await self.rest.get_klines(
-                    seed_trade.pair, "4h" if tf == "H4" else "1d",
-                    KLINE_HISTORY, span, force_refresh=True,
+                candles = await self.rest.get_klines_with_forming(
+                    seed_trade.pair, "4h" if tf == "H4" else "1d", KLINE_HISTORY, span
                 )
                 if candles is None or len(candles) < volumatic.ATR_LENGTH + 10:
                     continue
-                latest_close_ms = int(candles["t"][-1]) + span
-                if latest_close_ms <= checkpoint:
+                live_open = int(candles["t"][-1])
+                live_close = live_open + span
+                if live_open != active_open_ms or not (live_open <= now_ms < live_close):
                     continue
-                events = volumatic.detect_signals_since(
-                    candles, symbol=seed_trade.pair, timeframe=tf,
-                    after_close_time_ms=checkpoint, interval_ms=span,
-                    ema_filter_length=ema_filter_length,
+
+                self._cache_live_signal_context(
+                    seed_trade.pair, tf, candles, ema_filter_length=ema_filter_length
                 )
-                for signal in events:
-                    signal_close_ms = int(signal["signal_close_time_ms"])
-                    expiry_ms = signal_close_ms + span
+                signal = volumatic.evaluate_live_visual_context(
+                    self._live_signal_candles.get(key), float(candles["c"][-1]), now_ms=now_ms
+                )
+                if signal is not None:
                     existing = next((
                         t for t in self.active_trades.values()
                         if t.pair == seed_trade.pair and t.status in {"PENDING", "FILLED"}
                     ), None)
                     opposite = existing is not None and existing.direction != signal["direction"]
-                    stale = now_ms >= expiry_ms
-
-                    if opposite and stale:
-                        if existing.status == "FILLED":
-                            price = self._current_price(existing.pair)
-                            if price is None:
-                                price = await self.rest.get_price(existing.pair)
-                            await self._close_trade(
-                                existing, price, "LATE_OPPOSITE_BUBBLE_NO_REVERSE"
-                            )
-                            await self._record_event(
-                                "LATE_OPPOSITE_BUBBLE_NO_REVERSE", None,
-                                pair=existing.pair, direction=signal["direction"],
-                                timeframe=tf, signal_close_time_ms=signal_close_ms,
-                            )
-                        elif existing.status == "PENDING":
-                            await self._cancel_pending_trade(
-                                existing, "LATE_OPPOSITE_BUBBLE_CANCEL"
-                            )
-                        continue
-
-                    if not stale:
-                        await self._handle_signal(signal, expiry_ms)
-                    elif opposite and existing is not None and existing.trade_id in self.active_trades:
-                        # REAL cancel/close may still be unresolved. Do not advance
-                        # the checkpoint; retry this bubble on the next maintenance pass.
-                        raise RuntimeError(
-                            f"Opposite bubble {seed_trade.pair} belum selesai direkonsiliasi."
-                        )
-
-                self.last_position_candles[key] = latest_close_ms
-                await self._save_runtime_settings()
+                    outcome = await self._dispatch_mode_b_signal(
+                        signal, live_close, source="POSITION_MONITOR"
+                    )
+                    await self._record_event(
+                        "POSITION_VISUAL_BUBBLE_EVALUATED", None,
+                        pair=seed_trade.pair, timeframe=tf,
+                        signal=signal.get("signal"), direction=signal.get("direction"),
+                        visual_candle_close=signal.get("close_price"),
+                        limit_price=signal.get("limit_price"),
+                        entry_candle_open_ms=live_open,
+                        outcome=outcome, opposite_position=bool(opposite), repaint_risk=True,
+                    )
+                self.last_position_candles[key] = live_open
+            except BinanceRateLimitError:
+                # Non-signal monitoring REST was rate-limited; do not advance the
+                # checkpoint so the same active candle can be fetched later.
+                raise
             except Exception as exc:
                 log.warning(
                     "[POSITION MONITOR] %s %s gagal dianalisis/dieksekusi: %s",
@@ -5774,14 +6037,27 @@ class TradingEngine:
         now = now_utc()
         for key, item in list(self._signal_retries.items()):
             if int(time.time() * 1000) >= int(item["expiry_ms"]):
+                try:
+                    # Stale Mode-B signals must never open a late LIMIT, but an
+                    # opposite bubble can still close/cancel old exposure.
+                    outcome = await self._handle_signal(item["signal"], int(item["expiry_ms"]))
+                except BinanceRateLimitError as exc:
+                    self._was_in_binance_cooldown = True
+                    await self._notify_binance_cooldown(exc, source="EXPIRED SIGNAL / OPPOSITE CLOSE", symbol=item["signal"].get("symbol"))
+                    break
+                except Exception as exc:
+                    item["attempts"] = int(item.get("attempts") or 0) + 1
+                    item["last_error"] = str(exc)[:500]
+                    log.info("[SIGNAL RETRY] stale opposite-close %s deferred: %s", key, exc)
+                    continue
                 self._signal_retries.pop(key, None)
-                self.last_processed_candles[key] = int(item["signal"]["signal_close_time_ms"])
+                self.last_processed_candles[key] = int(item["signal"].get("entry_candle_open_time_ms") or item["signal"]["signal_close_time_ms"])
                 await self._record_event(
                     "SIGNAL_RETRY_EXPIRED", None,
                     pair=item["signal"].get("symbol"),
                     direction=item["signal"].get("direction"),
                     timeframe=item["signal"].get("timeframe"),
-                    attempts=int(item.get("attempts") or 0),
+                    attempts=int(item.get("attempts") or 0), outcome=outcome,
                 )
                 continue
             retry_at = parse_iso(item.get("next_retry_at")) if item.get("next_retry_at") else None
@@ -5817,6 +6093,72 @@ class TradingEngine:
         snapshot = self.prices.get(symbol)
         return snapshot.price if snapshot and snapshot.live else None
 
+    async def _evaluate_live_visual_bubble(self, symbol: str, price: Decimal, event_time_ms: int) -> None:
+        """Evaluate mode-B bubbles on WS ticks for scanned symbols and positions.
+
+        The scanner subscribes the selected USDT perpetual universe in one
+        batched WS request. Contexts are precomputed once per pair/candle, so
+        each tick only performs scalar EMA2 + trend-flip math.
+        """
+        active = [
+            t for t in self.active_trades.values()
+            if t.pair == symbol and t.status in {"PENDING", "FILLED"}
+        ]
+        scanner_watch = self.scan_enabled and symbol in self._scanner_symbols
+        if not active and not scanner_watch:
+            return
+        now_mono = time.monotonic()
+        px = float(price)
+        if not math.isfinite(px) or px <= 0:
+            return
+        timeframes = {t.timeframe for t in active}
+        if scanner_watch:
+            timeframes.add(self.timeframe)
+        for tf in sorted(timeframes):
+            if tf not in volumatic.TIMEFRAME_MS:
+                continue
+            # Do not let the selected scanner timeframe hijack a position that
+            # belongs to another timeframe; active positions use their own key.
+            key = f"{tf}:{symbol}"
+            context = self._live_signal_candles.get(key)
+            if context is None:
+                continue
+            live_open = int(context["entry_candle_open_time_ms"])
+            live_close = int(context["entry_candle_close_time_ms"])
+            event_ms = int(event_time_ms)
+            if not (live_open <= event_ms < live_close):
+                continue  # maintenance/scanner refreshes the context at the next candle
+            if now_mono - self._live_signal_last_eval.get(key, 0.0) < 0.15:
+                continue
+            self._live_signal_last_eval[key] = now_mono
+            if context.get("ema_filter_length") != self.ema_filter_length:
+                # A runtime /EMA change invalidates the old filter snapshot.
+                # A fresh strategy context will be built on the next scan/bar.
+                continue
+            signal = volumatic.evaluate_live_visual_context(context, px, now_ms=event_ms)
+            if signal is None:
+                continue
+            try:
+                outcome = await self._dispatch_mode_b_signal(
+                    signal, live_close, source="MARKET_WEBSOCKET"
+                )
+                log.info(
+                    "[LIVE BUBBLE] %s %s | visual_close=%s | limit=%s | outcome=%s",
+                    symbol, signal.get("signal"), signal.get("visual_candle_close_price"),
+                    signal.get("limit_price"), outcome,
+                )
+            except Exception as exc:
+                # Keep the latch after ambiguous outcomes to prevent duplicate
+                # POSTs. Queue one retry for transient local execution failures.
+                log.exception("[LIVE BUBBLE] %s %s processing failed: %s", symbol, signal.get("signal"), exc)
+                retry_key = f"{tf}:{symbol}"
+                if retry_key not in self._signal_retries:
+                    self._signal_retries[retry_key] = {
+                        "signal": signal, "expiry_ms": live_close, "key": retry_key,
+                        "attempts": 0, "last_error": str(exc)[:500],
+                        "source": "MARKET_WEBSOCKET",
+                    }
+
     async def _on_price(self, symbol: str, price: Decimal, event_time_ms: int, aggregate_trade_id: int = -1) -> None:
         symbol = normalize_symbol(symbol)
         key = (int(event_time_ms), int(aggregate_trade_id))
@@ -5833,6 +6175,7 @@ class TradingEngine:
             touched = price <= trade.entry if trade.direction == "LONG" else price >= trade.entry
             if touched:
                 await self._mark_filled(trade, trade.entry, "PAPER_WEBSOCKET_LIMIT_TOUCH")
+        await self._evaluate_live_visual_bubble(symbol, price, int(event_time_ms))
 
     async def _on_user_data_event(self, event: dict[str, Any]) -> None:
         """Apply authoritative Binance ORDER_TRADE_UPDATE without REST calls."""
@@ -5936,12 +6279,19 @@ class TradingEngine:
             await self._save_active_state()
 
     async def _sync_ws_symbols(self) -> None:
-        desired = {t.pair for t in self.active_trades.values() if t.status in {"PENDING", "FILLED"}}
-        current = set(self.ws.symbols())
-        for symbol in sorted(desired - current):
-            await self.ws.add_symbol(symbol)
-        for symbol in sorted(current - desired):
-            await self.ws.remove_symbol(symbol)
+        desired = {
+            t.pair for t in self.active_trades.values()
+            if t.status in {"PENDING", "FILLED"}
+        }
+        if self.scan_enabled:
+            desired.update(self._scanner_symbols)
+        await self.ws.set_symbols(desired)
+        for key in list(self._live_signal_candles):
+            _tf, pair = key.split(":", 1)
+            if pair not in desired:
+                self._live_signal_candles.pop(key, None)
+                self._live_signal_last_eval.pop(key, None)
+                self._live_signal_seen.pop(key, None)
 
     # ------------------------- Telegram commands -------------------------
     async def _set_real(self, command: str) -> None:
@@ -5953,7 +6303,35 @@ class TradingEngine:
             if not self.real.configured:
                 await self.reply("❌ BINANCE_API_KEY / BINANCE_API_SECRET belum lengkap.")
                 return
-            await self.real.get_account_info()
+            account_snapshot = await self.real.get_account_info()
+            live_positions = []
+            for row in account_snapshot.get("positions") or []:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    amount = parse_signed_decimal(str(row.get("positionAmt") or "0"))
+                except Exception:
+                    continue
+                if amount != 0:
+                    live_positions.append(f"{row.get('symbol')}:{row.get('positionSide', 'BOTH')} {amount}")
+            if live_positions:
+                await self.reply(
+                    "⛔ REAL ON DITOLAK: akun Binance memiliki posisi yang tidak tercatat di sesi fresh ini.\n"
+                    + "\n".join(live_positions[:12])
+                    + "\nPeriksa/tutup/adopsi posisi secara manual sebelum mencoba /real on lagi."
+                )
+                return
+            # Fresh session has no old order ledger. Refuse to activate LIVE while
+            # any open exchange order exists; never adopt/cancel it silently.
+            all_open_orders = await self.real.get_open_orders(None)
+            if all_open_orders:
+                symbols = sorted({str(row.get("symbol") or "?") for row in all_open_orders if isinstance(row, dict)})
+                await self.reply(
+                    "⛔ REAL ON DITOLAK: masih ada open order Binance yang tidak tercatat di sesi fresh ini.\n"
+                    f"Open orders: {len(all_open_orders)} | Pair: {', '.join(symbols[:15])}\n"
+                    "Periksa/batalkan secara manual sebelum mencoba /real on lagi."
+                )
+                return
             await self.real.get_account_config()
             await self.real.get_futures_balance()
             # Connect the private ORDER_TRADE_UPDATE stream before allowing new
@@ -5995,6 +6373,15 @@ class TradingEngine:
             return
         old = self.ema_filter_length
         self.ema_filter_length = selected
+        # Invalidate cached visual-candle filters. If scanner is armed, rebuild
+        # contexts from current candle data without waiting for another H4/D1 close.
+        self._live_signal_candles.clear()
+        self._live_signal_last_eval.clear()
+        self._live_signal_seen.clear()
+        self.last_processed_candles.clear()
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
         await self._save_runtime_settings()
         old_text = f"EMA{old}" if old is not None else "OFF"
         new_text = f"EMA{selected}" if selected is not None else "OFF"
@@ -6052,11 +6439,14 @@ class TradingEngine:
             return
         self.scan_enabled = enable
         if enable:
+            await self.ws.start()
             self._scan_trigger_now = True
             log.info("[SCAN] explicitly armed by Telegram /scan on | tf=%s | batch=%s", self.timeframe, SCAN_MAX_PAIRS_PER_CYCLE)
-            await self.reply(f"🟢 Scanner ON • Volumatic {self.timeframe} • batch {SCAN_MAX_PAIRS_PER_CYCLE}.")
+            await self.reply(f"🟢 Scanner ON • Volumatic {self.timeframe} • batch {SCAN_MAX_PAIRS_PER_CYCLE} • Mode B visual bubble / live candle.")
         else:
-            await self.reply("🟡 Scanner OFF. Posisi dan pending order tetap dimonitor; order tetap expired pada akhir candle.")
+            self._scanner_symbols.clear()
+            await self.reply("🟡 Scanner OFF. Bubble baru tidak dipindai; posisi dan pending order tetap dimonitor via WebSocket/maintenance.")
+        await self._sync_ws_symbols()
         await self._save_runtime_settings()
 
     async def _handle_max(self, text: str) -> None:
@@ -6199,7 +6589,7 @@ class TradingEngine:
 
     async def _handle_resetstats(self) -> None:
         stamp = now_local().strftime("%Y%m%d-%H%M%S")
-        archive_path = f"data/archive/trades-{stamp}.json"
+        archive_path = f"{self.session_data_dir}/archive/trades-{stamp}.json"
         archive = json.dumps(self.history_records, ensure_ascii=False, indent=2).encode()
         await self._persist_bytes(archive_path, archive, "volumatic: archive stats")
         count = len(self.history_records)
@@ -6218,7 +6608,7 @@ class TradingEngine:
         self.history_events = []
         self.notes = []
         await self._persist_history()
-        await self._persist_bytes(NOTES_PATH, b"[]", "volumatic: reset notes")
+        await self._persist_bytes(self.session_notes_path, b"[]", "volumatic: reset session notes")
         await self.reply("✅ Riwayat, event, dan catatan dikosongkan. Snapshot runtime tetap dipertahankan.")
 
     async def _show_balance(self) -> None:
@@ -6680,14 +7070,14 @@ class TradingEngine:
     async def show_help(self) -> None:
         await self.reply(
             "COMMAND VOLUMATIC TREND\n\n"
-            "/scan on|off - aktif/nonaktifkan scanner closed-candle\n"
+            "/scan on|off - aktif/nonaktifkan scanner Volumatic Mode B (bubble visual offset=-1)\n"
             "/timeframe [H4|D1] - pilih timeframe (default H4)\n"
             "/EMA [50|100|200|off] - filter arah LONG/SHORT berdasarkan EMA timeframe aktif\n"
             "/max [angka] - batas total pending + filled\n"
             "/trade - lihat pending order dan posisi aktif\n"
             "/stats - statistik trade, PnL, win rate, DD, R\n"
             "/setup - simpan snapshot trade aktif ke GitHub\n"
-            "/open - pulihkan snapshot jika belum ada trade aktif\n"
+            "/open - pulihkan snapshot secara manual (tidak otomatis saat /try)\n"
             "/del PAIR|all - batalkan pending order\n"
             "/close PAIR|all - tutup posisi atau batalkan pending\n"
             "/remove TRADE_ID|PAIR - hapus record dari statistik (event audit tetap)\n"

@@ -2,13 +2,16 @@
 """Volumatic Trend [ChartPrime] bubble engine.
 
 This module is deliberately pure: it does not access Binance, Telegram, disk,
-WebSocket, or exchange orders. main.py supplies already-closed OHLCV candles.
+WebSocket, or exchange orders. main.py supplies closed history plus the current forming candle for mode B.
 
 Trading rules implemented by main.py:
-- blue/bullish flip -> BUY LIMIT at the confirmed signal candle close;
-- red/bearish flip -> SELL LIMIT at the confirmed signal candle close;
-- the order is valid only for the immediately following candle;
-- a filled position is held until the opposite confirmed bubble.
+- Pine's bubble is visually offset one candle backwards (offset=-1).
+- Mode B detects the intrabar flip on the immediately following live candle,
+  uses the close of the candle carrying the visual bubble as LIMIT price, and
+  expires the order at the close of that adjacent live candle.
+- This intentionally accepts realtime repaint/lookahead risk inherent in
+  observing Pine's offset visual marker before the following candle closes.
+- A signal is stale once that adjacent candle has closed; never chase it.
 
 The source indicator attribution/license notice must be retained when the
 original Pine-derived implementation is redistributed: © ChartPrime, MPL-2.0.
@@ -21,7 +24,7 @@ from typing import Any, Mapping
 import numpy as np
 
 STRATEGY_NAME = "VOLUMATIC_TREND"
-STRATEGY_VERSION = "1.3.2"
+STRATEGY_VERSION = "1.4.1"
 TREND_LENGTH = 40
 ATR_LENGTH = 200
 REFERENCE_BUFFER_ATR = 0.30
@@ -420,6 +423,195 @@ def detect_signals_since(
             output.append(item)
     return output
 
+
+def prepare_live_visual_context(
+    candles: Any,
+    *,
+    symbol: str,
+    timeframe: str,
+    trend_length: int = TREND_LENGTH,
+    atr_length: int = ATR_LENGTH,
+    reference_buffer_atr: float = REFERENCE_BUFFER_ATR,
+    interval_ms: int | None = None,
+    ema_filter_length: int | None = None,
+) -> dict[str, Any] | None:
+    """Precompute the closed-candle state needed for intrabar mode-B checks.
+
+    ``candles`` includes one currently-forming last row. The function computes
+    EMA/ATR/filter once; subsequent WebSocket ticks only need a scalar EMA2
+    update, avoiding a full historical indicator recalculation per tick.
+    """
+    tf = str(timeframe).upper()
+    if tf not in TIMEFRAME_MS:
+        raise ValueError(f"Timeframe tidak didukung: {timeframe}. Gunakan H4 atau D1.")
+    span_ms = int(interval_ms or TIMEFRAME_MS[tf])
+    indicators = calculate_indicators(
+        candles, trend_length=trend_length, atr_length=atr_length,
+        ema_filter_length=ema_filter_length,
+    )
+    n = len(indicators["close"])
+    if n < 3:
+        return None
+    live_index = n - 1
+    bubble_index = live_index - 1
+    live_open_ms = int(indicators["timestamp"][live_index])
+    bubble_open_ms = int(indicators["timestamp"][bubble_index])
+    if live_open_ms != bubble_open_ms + span_ms:
+        return None
+
+    ema1_bubble = float(indicators["ema1"][bubble_index])
+    ema2_bubble = float(indicators["ema2"][bubble_index])
+    atr_bubble = float(indicators["atr"][bubble_index])
+    bubble_close = float(indicators["close"][bubble_index])
+    prior_trend = int(indicators["trend"][bubble_index])
+    if prior_trend not in (-1, 1) or not all(
+        np.isfinite(x) for x in (ema1_bubble, ema2_bubble, atr_bubble, bubble_close)
+    ) or atr_bubble <= 0 or bubble_close <= 0:
+        return None
+
+    filter_length_raw = int(indicators.get("ema_filter_length", np.asarray([0]))[0])
+    filter_length = filter_length_raw or None
+    if filter_length is None:
+        filter_value = None
+        filter_ready = True
+    else:
+        raw_filter = float(indicators["ema_filter"][bubble_index])
+        filter_ready = bool(np.isfinite(raw_filter))
+        filter_value = raw_filter if filter_ready else None
+
+    return {
+        "strategy": STRATEGY_NAME,
+        "strategy_version": STRATEGY_VERSION,
+        "symbol": str(symbol).upper(),
+        "timeframe": tf,
+        "signal_mode": "VISUAL_OFFSET_INTRABAR_B",
+        "repaint_risk": True,
+        # The signal's visual candle is the penultimate CLOSED row. Pine's
+        # offset=-1 paints the flip on that candle while the following candle
+        # is live. Mode B intentionally acts on that visual marker as it forms.
+        "signal_index": bubble_index,
+        "detection_index": live_index,
+        "signal_open_time_ms": bubble_open_ms,
+        "signal_close_time_ms": live_open_ms,
+        "bubble_visual_time_ms": bubble_open_ms,
+        "bubble_visual_close_time_ms": live_open_ms,
+        "visual_candle_open_time_ms": bubble_open_ms,
+        "visual_candle_close_time_ms": live_open_ms,
+        "entry_candle_open_time_ms": live_open_ms,
+        "entry_candle_close_time_ms": live_open_ms + span_ms,
+        "entry_window_expiry_ms": live_open_ms + span_ms,
+        "bubble_price": ema1_bubble,
+        "signal_atr": atr_bubble,
+        "close_price": bubble_close,
+        "visual_candle_close_price": bubble_close,
+        "signal_close_price": bubble_close,
+        "limit_price": bubble_close,
+        "limit_price_source": "VISUAL_BUBBLE_CANDLE_CLOSE",
+        "reference_sl": None,  # direction-specific value is populated at evaluation
+        "ema1": ema1_bubble,
+        "ema2": ema2_bubble,
+        "prior_trend": prior_trend,
+        "ema2_alpha": 2.0 / (float(trend_length) + 1.0),
+        "ema_filter_length": filter_length,
+        "ema_filter_value": filter_value,
+        "ema_filter_ready": filter_ready,
+        "ema_filter_passed": False,
+        "reference_buffer_atr": float(reference_buffer_atr),
+        "interval_ms": span_ms,
+    }
+
+
+def evaluate_live_visual_context(
+    context: Mapping[str, Any] | None,
+    live_price: float,
+    *,
+    now_ms: int,
+) -> dict[str, Any] | None:
+    """Evaluate one live price against a prepared mode-B visual bubble context."""
+    if not context:
+        return None
+    price = float(live_price)
+    if not np.isfinite(price) or price <= 0:
+        return None
+    live_open_ms = int(context["entry_candle_open_time_ms"])
+    span_ms = int(context["interval_ms"])
+    live_close_ms = live_open_ms + span_ms
+    current_ms = int(now_ms)
+    if not (live_open_ms <= current_ms < live_close_ms):
+        return None
+
+    alpha = float(context["ema2_alpha"])
+    ema2_live = alpha * price + (1.0 - alpha) * float(context["ema2"])
+    current_trend = 1 if float(context["ema1"]) < ema2_live else -1
+    prior_trend = int(context["prior_trend"])
+    if current_trend == prior_trend:
+        return None
+
+    direction = "LONG" if current_trend == 1 else "SHORT"
+    bubble_price = float(context["bubble_price"])
+    atr = float(context["signal_atr"])
+    buffer = float(context["reference_buffer_atr"])
+    reference_sl = bubble_price - buffer * atr if direction == "LONG" else bubble_price + buffer * atr
+    filter_length = context.get("ema_filter_length")
+    filter_value = context.get("ema_filter_value")
+    filter_ready = bool(context.get("ema_filter_ready", True))
+    if filter_length is None:
+        filter_passed = True
+    elif not filter_ready or filter_value is None:
+        filter_passed = False
+    else:
+        filter_passed = (
+            float(context["close_price"]) > float(filter_value)
+            if direction == "LONG"
+            else float(context["close_price"]) < float(filter_value)
+        )
+
+    result = dict(context)
+    result.update({
+        "signal": "BLUE" if current_trend == 1 else "RED",
+        "direction": direction,
+        "trend": "BULLISH" if current_trend == 1 else "BEARISH",
+        "detection_time_ms": current_ms,
+        "detection_price": price,
+        "ema2_live": ema2_live,
+        "limit_price": float(context["close_price"]),
+        "signal_close_price": float(context["close_price"]),
+        "close_price": float(context["close_price"]),
+        "limit_price_source": "VISUAL_BUBBLE_CANDLE_CLOSE",
+        "reference_sl": float(reference_sl),
+        "ema_filter_passed": bool(filter_passed),
+        "ema_filter_ready": filter_ready,
+    })
+    return result
+
+
+def detect_live_visual_signal(
+    candles: Any,
+    *,
+    symbol: str,
+    timeframe: str,
+    now_ms: int | None = None,
+    trend_length: int = TREND_LENGTH,
+    atr_length: int = ATR_LENGTH,
+    reference_buffer_atr: float = REFERENCE_BUFFER_ATR,
+    interval_ms: int | None = None,
+    ema_filter_length: int | None = None,
+) -> dict[str, Any] | None:
+    """One-shot wrapper for preparing and evaluating a live mode-B kline."""
+    context = prepare_live_visual_context(
+        candles, symbol=symbol, timeframe=timeframe,
+        trend_length=trend_length, atr_length=atr_length,
+        reference_buffer_atr=reference_buffer_atr, interval_ms=interval_ms,
+        ema_filter_length=ema_filter_length,
+    )
+    if context is None:
+        return None
+    # The last supplied row is a live/forming candle; its close is the latest
+    # Binance snapshot, used as the current-price input for the intrabar flip.
+    _ts, _o, _h, _l, closes, _v = _extract_columns(candles)
+    current_ms = int(now_ms if now_ms is not None else context["entry_candle_open_time_ms"])
+    return evaluate_live_visual_context(context, float(closes[-1]), now_ms=current_ms)
+
 def signals_since(
     candles: Any,
     *,
@@ -529,5 +721,6 @@ __all__ = [
     "REFERENCE_BUFFER_ATR", "TIMEFRAME_MS", "TIMEFRAME_INTERVALS", "SUPPORTED_TIMEFRAMES", "VolumaticSignal",
     "SUPPORTED_EMA_FILTERS", "DEFAULT_EMA_FILTER_LENGTH", "normalize_ema_filter_length",
     "calculate_indicators", "detect_latest_signal", "detect_signals_since", "signals_since", "analyze",
+    "prepare_live_visual_context", "evaluate_live_visual_context", "detect_live_visual_signal",
     "reference_risk", "trade_result_r",
 ]

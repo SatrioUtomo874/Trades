@@ -485,7 +485,12 @@ async def start_or_reset_main(chat_id: int) -> None:
         if old_module is not None and MAIN_RUNNING:
             MAIN_RUNNING = False
             try:
-                await _call_main(old_module, "on_stop", _main_context(chat_id))
+                await asyncio.wait_for(
+                    _call_main(old_module, "on_stop", _main_context(chat_id)),
+                    timeout=1.5,
+                )
+            except asyncio.TimeoutError:
+                log.error("[LAUNCHER] on_stop melampaui 1.5s saat /try reset; modul lama tetap dilepas.")
             except Exception:
                 log.exception("[LAUNCHER] on_stop main lama gagal saat /try reset.")
 
@@ -522,7 +527,13 @@ async def stop_main(chat_id: int) -> bool:
         MAIN_MODULE = None
         try:
             if module is not None:
-                await _call_main(module, "on_stop", _main_context(chat_id))
+                try:
+                    await asyncio.wait_for(
+                        _call_main(module, "on_stop", _main_context(chat_id)),
+                        timeout=1.5,
+                    )
+                except asyncio.TimeoutError:
+                    log.error("[LAUNCHER] on_stop melampaui 1.5s; engine dilepas dari launcher.")
         finally:
             sys.modules.pop("trading_main_runtime", None)
             sys.modules.pop("strategy", None)
@@ -687,7 +698,7 @@ async def route_message(message: dict, update: dict) -> None:
         try:
             stopped = await stop_main(chat_id)
             if stopped:
-                tg_send(chat_id, "■ VOLUMATIC ENGINE STOPPED\n\nMain engine dihentikan melalui on_stop().\nTelegram launcher dan Render tetap ONLINE.\nGunakan /try untuk menjalankan ulang.")
+                tg_send(chat_id, "■ VOLUMATIC ENGINE OFF\n\nEngine dihentikan segera. Tidak ada snapshot/save, cancel order, atau close posisi Binance. Telegram launcher dan Render tetap ONLINE.\nGunakan /try untuk memulai sesi fresh.")
             else:
                 tg_send(chat_id, "i VOLUMATIC ENGINE sudah STOPPED.\nTelegram launcher dan Render tetap ONLINE.\nGunakan /try untuk menjalankan ulang.")
         except Exception as exc:
