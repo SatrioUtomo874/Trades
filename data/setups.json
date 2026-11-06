@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "1.5.0",
-  "updated_at": "2026-11-06T12:36:20.861488+00:00",
+  "updated_at": "2026-11-06T12:36:30.104039+00:00",
   "active_trades": [
     {
       "trade_id": "AKTUSDT-20261106-192323-C075A4",
@@ -211,11 +211,11 @@
       "target_notional": "5.006976",
       "actual_notional": "5.006976",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_REJECTED",
       "position_side": "BOTH",
       "entry_order_id": 2408520654,
       "entry_client_order_id": "VT9ace30df97f04c65aede8f276df2",
-      "real_error": null,
+      "real_error": "HTTP 400 | code -4116 | /fapi/v1/order: ClientOrderId is duplicated.",
       "real_submit_ambiguous": false,
       "entry_executed_qty": "0",
       "entry_order_status": "NEW",
