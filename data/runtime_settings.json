@@ -537,8 +537,8 @@
     "EXCHANGE:ONEUSDT": 1793966400000
   },
   "signal_retries": {},
-  "scan_resume_cursor": 520,
-  "scan_resume_boundary_ms": 1793966400000,
+  "scan_resume_cursor": 0,
+  "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "H4",
-  "updated_at": "2026-11-06T12:38:06.005374+00:00"
+  "updated_at": "2026-11-06T12:38:10.847460+00:00"
 }
