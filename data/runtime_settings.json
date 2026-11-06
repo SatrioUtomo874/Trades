@@ -8,8 +8,8 @@
   "leverage": 10,
   "min_margin_enabled": true,
   "autostop_percent": "53",
-  "autostop_peak_equity": "8.25626119",
-  "autostop_last_equity": "8.25626119",
+  "autostop_peak_equity": "8.303611866",
+  "autostop_last_equity": "8.303611866",
   "autostop_triggered": false,
   "autostop_source": "REAL",
   "last_processed_candles": {
@@ -519,14 +519,26 @@
     "H4:ZENUSDT": 1793966400000,
     "H4:ZEREBROUSDT": 1793966400000,
     "H4:ZESTUSDT": 1793966400000,
-    "H4:ZETAUSDT": 1793966400000
+    "H4:ZETAUSDT": 1793966400000,
+    "H4:ZILUSDT": 1793966400000,
+    "H4:ZKCUSDT": 1793966400000,
+    "H4:ZKPUSDT": 1793966400000,
+    "H4:ZKUSDT": 1793966400000,
+    "H4:ZORAUSDT": 1793966400000,
+    "H4:ZROUSDT": 1793966400000,
+    "H4:ZRXUSDT": 1793966400000,
+    "H4:\u54c8\u57fa\u7c73USDT": 1793966400000,
+    "H4:\u5e01\u5b89\u4eba\u751fUSDT": 1793966400000,
+    "H4:\u6211\u8e0f\u9a6c\u6765\u4e86USDT": 1793966400000,
+    "H4:\u725b\u6765USDT": 1793966400000,
+    "H4:\u9f99\u867eUSDT": 1793966400000
   },
   "last_position_candles": {
     "EXCHANGE:ONEUSDT": 1793966400000
   },
   "signal_retries": {},
-  "scan_resume_cursor": 508,
+  "scan_resume_cursor": 520,
   "scan_resume_boundary_ms": 1793966400000,
   "scan_resume_timeframe": "H4",
-  "updated_at": "2026-11-06T12:37:42.530741+00:00"
+  "updated_at": "2026-11-06T12:38:06.005374+00:00"
 }
