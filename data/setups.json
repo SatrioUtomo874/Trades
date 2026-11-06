@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "1.5.0",
-  "updated_at": "2026-11-06T12:30:11.232733+00:00",
+  "updated_at": "2026-11-06T12:30:13.808839+00:00",
   "active_trades": [
     {
       "trade_id": "AKTUSDT-20261106-192323-C075A4",
@@ -97,7 +97,7 @@
       "target_notional": "5.1009",
       "actual_notional": "5.0547",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_SUBMITTING",
       "position_side": "BOTH",
       "entry_order_id": 2011467577,
       "entry_client_order_id": "VTf09395a5ce704454badc7fd5e941",
