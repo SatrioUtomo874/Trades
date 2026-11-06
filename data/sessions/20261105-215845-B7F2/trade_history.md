@@ -12,3 +12,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-06T12:32:14.492861+00:00 | Reason: BINANCE_REJECTED: HTTP 400 | code -4116 | /fapi/v1/order: ClientOrderId is duplicated.
+## USUALUSDT LONG — CANCELED
+- Trade ID: `USUALUSDT-20261106-193602-35A55B`
+- Timeframe: H4 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-06T12:36:38.633516+00:00 | Reason: BINANCE_REJECTED: HTTP 400 | code -4116 | /fapi/v1/order: ClientOrderId is duplicated.
