@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T17:56:36.177668+00:00",
+  "updated_at": "2026-11-07T19:07:02.565369+00:00",
   "active_trades": [
     {
       "trade_id": "CLANKERUSDT-20261107-210411-F1FB9A",
@@ -178,9 +178,9 @@
       "tp_algo_id": 4000002063815152,
       "sl_client_algo_id": "VTSLSDT-20261107-212720-D7DAFE",
       "tp_client_algo_id": "VTTPSDT-20261107-212720-D7DAFE",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "sl_algo_status": "EXPIRED",
+      "tp_algo_status": "FINISHED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
