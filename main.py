@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -117,6 +118,8 @@ RUNTIME_SETTINGS_PATH = "data/runtime_settings.json"
 REAL_GUARD_PATH = "data/real_equity_guard.json"
 DEFERRED_COMMANDS_PATH = "data/deferred_commands.json"
 BINANCE_COOLDOWN_PATH = "data/binance_cooldown_state.json"
+SIGNAL_DEDUPE_PATH = "data/volumatic_signal_dedupe.json"
+SIGNAL_DEDUPE_DB_NAME = "volumatic_signal_dedupe.sqlite3"
 
 BINANCE_USER_STREAM_KEEPALIVE_SECONDS = 45 * 60
 BINANCE_USER_STREAM_RETRY_SECONDS = 30.0
@@ -3711,6 +3714,9 @@ class TradingEngine:
         self._last_scan_boundary_ms = 0
         self._scan_cycle_lock = asyncio.Lock()
         self._trade_lock = asyncio.Lock()
+        self._signal_dedupe_lock = asyncio.Lock()
+        self._signal_dedupe_loaded = False
+        self._signal_dedupe_db_path = self._local_data_dir / SIGNAL_DEDUPE_DB_NAME
         self._history_lock = asyncio.Lock()
         self._settings_lock = asyncio.Lock()
         self._telegram_error_handler = TelegramErrorHandler(self)
@@ -5153,6 +5159,95 @@ class TradingEngine:
             if same_id:
                 self.exchange_open_orders.pop(key, None)
 
+    async def _ensure_signal_dedupe_loaded(self) -> None:
+        """Import durable consumed M15 signal keys into the local SQLite uniqueness ledger.
+
+        The SQLite UNIQUE primary key is the cross-process mutex: two engine
+        workers sharing the Render filesystem cannot both claim one signal,
+        even if Binance has already filled the first order and would allow the
+        same newClientOrderId to be reused.
+        """
+        if self._signal_dedupe_loaded:
+            return
+        async with self._signal_dedupe_lock:
+            if self._signal_dedupe_loaded:
+                return
+            self._signal_dedupe_db_path.parent.mkdir(parents=True, exist_ok=True)
+            raw = await self._remote_or_local(SIGNAL_DEDUPE_PATH)
+            imported: list[str] = []
+            if raw:
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                    values = payload.get("keys", []) if isinstance(payload, dict) else []
+                    imported = [str(x) for x in values if isinstance(x, str) and x]
+                except Exception:
+                    log.warning("[SCAN/DEDUP] persisted signal ledger invalid; SQLite/local ledger retained.")
+            db = sqlite3.connect(str(self._signal_dedupe_db_path), timeout=30)
+            try:
+                db.execute("PRAGMA busy_timeout=30000")
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS consumed_signals ("
+                    "signal_key TEXT PRIMARY KEY, claimed_at TEXT NOT NULL)"
+                )
+                db.execute("BEGIN IMMEDIATE")
+                db.executemany(
+                    "INSERT OR IGNORE INTO consumed_signals(signal_key, claimed_at) VALUES (?, ?)",
+                    [(key, iso_utc()) for key in imported],
+                )
+                db.commit()
+            finally:
+                db.close()
+            self._signal_dedupe_loaded = True
+            log.info("[SCAN/DEDUP] durable signal ledger loaded | imported=%s", len(imported))
+
+    async def _claim_m15_signal(self, signal_key: str) -> bool:
+        """Atomically reserve a pair/candle signal before any Binance order POST."""
+        await self._ensure_signal_dedupe_loaded()
+        async with self._signal_dedupe_lock:
+            db = sqlite3.connect(str(self._signal_dedupe_db_path), timeout=30)
+            try:
+                db.execute("PRAGMA busy_timeout=30000")
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS consumed_signals ("
+                    "signal_key TEXT PRIMARY KEY, claimed_at TEXT NOT NULL)"
+                )
+                db.execute("BEGIN IMMEDIATE")
+                cur = db.execute(
+                    "INSERT OR IGNORE INTO consumed_signals(signal_key, claimed_at) VALUES (?, ?)",
+                    (signal_key, iso_utc()),
+                )
+                if cur.rowcount != 1:
+                    db.rollback()
+                    return False
+                rows = db.execute(
+                    "SELECT signal_key FROM consumed_signals ORDER BY claimed_at DESC LIMIT 10000"
+                ).fetchall()
+                keys = [row[0] for row in rows]
+                payload = {
+                    "updated_at": iso_utc(),
+                    "keys": keys,
+                    "count": len(keys),
+                    "policy": "one_entry_per_symbol_per_m15_signal_candle",
+                }
+                # Persist while holding the SQLite write transaction. Another
+                # process cannot claim/overwrite a newer key until this snapshot
+                # is safely written to the local fallback and GitHub attempt ends.
+                await self._persist_bytes(
+                    SIGNAL_DEDUPE_PATH,
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                    "volumatic: reserve unique M15 signal candle",
+                )
+                db.commit()
+                return True
+            except BaseException:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                db.close()
+
     async def _handle_signal(self, signal: dict[str, Any], expiry_ms: int) -> str:
         pair = normalize_symbol(signal["symbol"])
         direction = str(signal["direction"]).upper()
@@ -5261,6 +5356,23 @@ class TradingEngine:
                 min_margin_mode=self.min_margin_enabled,
                 target_notional=self.margin_usdt * Decimal(self.leverage),
             )
+            # A signal candle is consumable only once per symbol, regardless of
+            # direction. Binance clientOrderId uniqueness ends when an order is
+            # terminal, so it cannot by itself stop a second order 10-15 seconds
+            # later after the first LIMIT has already filled.
+            signal_dedupe_key = f"{pair}|M15|{entry_open_ms}"
+            if not await self._claim_m15_signal(signal_dedupe_key):
+                await self._record_event(
+                    "M15_SIGNAL_DUPLICATE_CANDLE_BLOCKED", None,
+                    pair=pair, direction=direction,
+                    signal_key=signal_dedupe_key,
+                    signal_close_time_ms=signal_close_ms,
+                    entry_candle_open_time_ms=entry_open_ms,
+                    reason="Satu simbol hanya boleh membuat satu entry pada candle sinyal M15 yang sama.",
+                )
+                log.warning("[SCAN/DEDUP] %s duplicate signal candle blocked | key=%s", pair, signal_dedupe_key)
+                return "DUPLICATE_SIGNAL_CANDLE"
+
             if self.real_mode:
                 await self._prepare_real_limit(trade)
             else:
@@ -5376,9 +5488,9 @@ class TradingEngine:
         trade.position_side = ("LONG" if trade.direction == "LONG" else "SHORT") if dual else "BOTH"
         trade.real_enabled = True
         trade.real_state = "REAL_PREPARED"
-        # Deterministic idempotency key: the same symbol/direction/M15 signal
-        # candle must map to the same Binance clientOrderId, even if two scanner
-        # workers/processes race and both pass their local active-trade checks.
+        # Stable exchange client ID is a secondary idempotency layer. The
+        # persistent SQLite/GitHub candle ledger above is the primary guard,
+        # because Binance permits clientOrderId reuse after a prior order is terminal.
         signal_stamp = int(trade.signal_time.timestamp() * 1000)
         signal_identity = f"{trade.pair}|{trade.direction}|M15|{signal_stamp}"
         signal_digest = hashlib.sha256(signal_identity.encode("utf-8")).hexdigest()[:28]
