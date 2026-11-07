@@ -1,1 +1,1 @@
-{"updated_at":"2026-11-07T14:01:03.604188+00:00","keys":["ASRUSDT|M15|1794060000000"],"count":1,"policy":"one_entry_per_symbol_per_m15_signal_candle"}
+{"updated_at":"2026-11-07T14:04:11.603999+00:00","keys":["CLANKERUSDT|M15|1794060000000","ASRUSDT|M15|1794060000000"],"count":2,"policy":"one_entry_per_symbol_per_m15_signal_candle"}
