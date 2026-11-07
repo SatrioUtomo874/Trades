@@ -11,8 +11,8 @@
   "leverage": 10,
   "min_margin_enabled": false,
   "autostop_percent": "55",
-  "autostop_peak_equity": "8.9116111784",
-  "autostop_last_equity": "8.9116111784",
+  "autostop_peak_equity": "8.9213231996",
+  "autostop_last_equity": "8.9213231996",
   "autostop_real_equity_baseline": "8.74880238",
   "autostop_realized_pnl": "0",
   "autostop_triggered": false,
@@ -187,12 +187,19 @@
     "M15:ELSAUSDT": 1794054600000,
     "M15:ENAUSDT": 1794054600000,
     "M15:ENJUSDT": 1794054600000,
-    "M15:ENSOUSDT": 1794054600000
+    "M15:ENSOUSDT": 1794054600000,
+    "M15:ENSUSDT": 1794054600000,
+    "M15:ERAUSDT": 1794054600000,
+    "M15:ESPORTSUSDT": 1794054600000,
+    "M15:ESPUSDT": 1794054600000,
+    "M15:ETCUSDT": 1794054600000,
+    "M15:ETHFIUSDT": 1794054600000,
+    "M15:ETHWUSDT": 1794054600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 173,
+  "scan_resume_cursor": 180,
   "scan_resume_boundary_ms": 1794053700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-07T12:35:49.395280+00:00"
+  "updated_at": "2026-11-07T12:36:55.909777+00:00"
 }
