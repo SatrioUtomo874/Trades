@@ -15,11 +15,13 @@
   "autostop_last_equity": "8.64034013",
   "autostop_triggered": false,
   "autostop_source": "REAL",
-  "last_processed_candles": {},
+  "last_processed_candles": {
+    "M15:1000SATSUSDT": 1794027600000
+  },
   "last_position_candles": {},
   "signal_retries": {},
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-07T05:07:11.911646+00:00"
+  "updated_at": "2026-11-07T05:07:14.367662+00:00"
 }
