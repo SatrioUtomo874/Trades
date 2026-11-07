@@ -12,7 +12,7 @@
   "min_margin_enabled": false,
   "autostop_percent": "55",
   "autostop_peak_equity": "8.64034013",
-  "autostop_last_equity": "8.63567183",
+  "autostop_last_equity": "8.63346053",
   "autostop_triggered": false,
   "autostop_source": "REAL",
   "last_processed_candles": {
@@ -235,5 +235,5 @@
   "scan_resume_cursor": 213,
   "scan_resume_boundary_ms": 1794027600000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-07T05:17:19.161045+00:00"
+  "updated_at": "2026-11-07T05:17:26.591611+00:00"
 }
