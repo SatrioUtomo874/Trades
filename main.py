@@ -3608,6 +3608,10 @@ class GitHubStore:
 class TradingEngine:
     def __init__(self, context: dict[str, Any]) -> None:
         self.context = dict(context)
+        # Initialize the local data root before any path derived from it.
+        # Signal-dedupe DB is configured later in __init__, so this must exist first.
+        self._local_data_dir = BASE_DIR / "data"
+        self._local_data_dir.mkdir(parents=True, exist_ok=True)
         self.chat_id = int(context.get("chat_id") or ALLOWED_USER_ID)
         self.user_id = int(context.get("user_id") or ALLOWED_USER_ID)
         self.send_message = context["send_message"]
@@ -3726,8 +3730,6 @@ class TradingEngine:
         self._last_api_notice = 0.0
         self._api_recovery_until = 0.0
         self._last_universe_refresh = 0.0
-        self._local_data_dir = BASE_DIR / "data"
-        self._local_data_dir.mkdir(parents=True, exist_ok=True)
 
     # ----------------------- Telegram and persistence --------------------
     async def reply(self, message: str) -> None:
