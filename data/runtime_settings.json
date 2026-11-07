@@ -11,8 +11,8 @@
   "leverage": 10,
   "min_margin_enabled": false,
   "autostop_percent": "55",
-  "autostop_peak_equity": "9.10046677",
-  "autostop_last_equity": "9.10046677",
+  "autostop_peak_equity": "9.133508108",
+  "autostop_last_equity": "9.1091376418",
   "autostop_triggered": false,
   "autostop_source": "REAL",
   "last_processed_candles": {
@@ -198,5 +198,5 @@
   "scan_resume_cursor": 141,
   "scan_resume_boundary_ms": 1794041100000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-07T10:19:13.872113+00:00"
+  "updated_at": "2026-11-07T10:20:16.879049+00:00"
 }
