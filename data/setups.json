@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T17:54:59.387592+00:00",
+  "updated_at": "2026-11-07T17:55:02.988980+00:00",
   "active_trades": [
     {
       "trade_id": "CLANKERUSDT-20261107-210411-F1FB9A",
@@ -183,7 +183,7 @@
       "protection_state": "CANCEL_WAIT_API",
       "protection_error": "SL: REST cooldown (HTTP 429 | code -1003 | /fapi/v1/algoOrder: Binance REST sedang cooldown global (61s); request ditahan tanpa dikirim.); TP: REST cooldown (HTTP 429 | /fapi/v1/algoOrder: REST Binance sedang ditahan oleh rate-limit cooldown (61s tersisa).)",
       "protection_warning_sent": false,
-      "protection_exit_reason": null,
+      "protection_exit_reason": "EXCHANGE_POSITION_FLAT_WS",
       "sl_submit_ambiguous": false,
       "tp_submit_ambiguous": false,
       "entry": "0.017",
