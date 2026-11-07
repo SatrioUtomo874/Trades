@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T14:08:21.678668+00:00",
+  "updated_at": "2026-11-07T14:08:28.532107+00:00",
   "active_trades": [
     {
       "trade_id": "ASRUSDT-20261107-210102-28ECDA",
@@ -295,7 +295,7 @@
       "target_notional": "5",
       "actual_notional": "5.015",
       "real_enabled": true,
-      "real_state": "REAL_PENDING",
+      "real_state": "REAL_SUBMITTING",
       "position_side": "BOTH",
       "entry_order_id": 1731014222,
       "entry_client_order_id": "VTccb977d320fb739638dfaea86eb8",
