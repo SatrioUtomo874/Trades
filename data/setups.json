@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T12:36:23.560684+00:00",
+  "updated_at": "2026-11-07T12:36:25.604206+00:00",
   "active_trades": [
     {
       "trade_id": "GIGGLEUSDT-20261107-191920-B82275",
@@ -285,7 +285,7 @@
       "target_notional": "10",
       "actual_notional": "10.00008",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_SUBMITTING",
       "position_side": "BOTH",
       "entry_order_id": 8214935640,
       "entry_client_order_id": "VT88ef7f62c3fa46198719f199a55b",
