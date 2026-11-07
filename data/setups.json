@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T08:27:49.089313+00:00",
+  "updated_at": "2026-11-07T08:27:51.291989+00:00",
   "active_trades": [
     {
       "trade_id": "GIGGLEUSDT-20261107-152441-5AEEDF",
@@ -127,12 +127,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.001",
       "realized_r": null,
-      "quantity": "37",
-      "margin_usdt": "0.555",
+      "quantity": "74",
+      "margin_usdt": "1.11",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5",
-      "actual_notional": "5.55",
+      "actual_notional": "11.1",
       "real_enabled": true,
       "real_state": "REAL_FILLED",
       "position_side": "BOTH",
@@ -140,7 +140,7 @@
       "entry_client_order_id": "VT90f22ca775be4dcd8dd6472c7ab0",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "37",
+      "entry_executed_qty": "74",
       "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
