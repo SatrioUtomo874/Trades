@@ -7,7 +7,7 @@
     50
   ],
   "max_active_trades": 6,
-  "margin_usdt": "0.55",
+  "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": false,
   "last_processed_candles": {
@@ -156,12 +156,14 @@
     "M15:CUSDT": 1794060000000,
     "M15:CVCUSDT": 1794060000000,
     "M15:CVXUSDT": 1794060000000,
-    "M15:CYBERUSDT": 1794060000000
+    "M15:CYBERUSDT": 1794060000000,
+    "M15:CYSUSDT": 1794060000000,
+    "M15:DASHUSDT": 1794060000000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 147,
+  "scan_resume_cursor": 149,
   "scan_resume_boundary_ms": 1794059100000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-07T14:06:18.594002+00:00"
+  "updated_at": "2026-11-07T14:06:22.696965+00:00"
 }
