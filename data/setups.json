@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T08:34:39.438521+00:00",
+  "updated_at": "2026-11-07T08:34:44.023777+00:00",
   "active_trades": [
     {
       "trade_id": "GIGGLEUSDT-20261107-152441-5AEEDF",
@@ -244,12 +244,12 @@
       "signal_atr": "0.0009783310582397895",
       "reference_sl": "0.15649",
       "stop_loss": "0.15649",
-      "take_profit": "0.14489",
+      "take_profit": "0.14361",
       "rr_target": "3",
       "sl_algo_id": null,
       "tp_algo_id": null,
-      "sl_client_algo_id": null,
-      "tp_client_algo_id": null,
+      "sl_client_algo_id": "VTSLSDT-20261107-153411-4D9688",
+      "tp_client_algo_id": "VTTPSDT-20261107-153411-4D9688",
       "sl_algo_status": "NOT_PLACED",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
@@ -279,7 +279,7 @@
       "result_reason": null,
       "pnl_percent": null,
       "pnl_usdt": null,
-      "initial_risk": "0.0029",
+      "initial_risk": "0.00322",
       "realized_r": null,
       "quantity": "36",
       "margin_usdt": "0.552924",
