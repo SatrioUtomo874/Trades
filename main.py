@@ -5352,48 +5352,128 @@ class TradingEngine:
             raise
         except BinanceAPIError as exc:
             if exc.status_code is not None and 400 <= exc.status_code < 500 and exc.status_code not in {418, 429}:
-                trade.real_state = "REAL_REJECTED"
+                # Do not mark the local trade CANCELED from the POST error alone.
+                # Verify the exact clientOrderId first: an exchange order that was
+                # accepted but whose response was transformed/lost must remain PENDING.
+                log.warning(
+                    "[REAL/RECON] %s POST returned HTTP %s; verifying clientOrderId=%s before rejection | %s",
+                    trade.pair, exc.status_code, trade.entry_client_order_id, exc,
+                )
+                try:
+                    response = await self.real.get_order(
+                        trade.pair, client_order_id=trade.entry_client_order_id
+                    )
+                except BinanceRateLimitError as lookup_exc:
+                    trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                    trade.real_submit_ambiguous = True
+                    trade.real_error = f"POST error: {str(exc)[:220]} | verification rate-limited: {str(lookup_exc)[:220]}"
+                    await self._save_active_state()
+                    await self._notify_binance_cooldown(lookup_exc, source="REAL ORDER VERIFY AFTER POST ERROR", symbol=trade.pair)
+                    return
+                except BinanceAPIError as lookup_exc:
+                    if lookup_exc.code != -2013:
+                        trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                        trade.real_submit_ambiguous = True
+                        trade.real_error = f"POST error: {str(exc)[:220]} | clientOrderId lookup: {str(lookup_exc)[:220]}"
+                        await self._save_active_state()
+                        log.warning("[REAL/RECON] %s verification inconclusive; keep slot reserved; no repeat POST", trade.pair)
+                        return
+                    # A direct GET can briefly miss an order; verify the pair's
+                    # openOrders projection once before treating the POST as rejected.
+                    try:
+                        pair_orders = await self.real.get_open_orders(trade.pair)
+                        response = next((
+                            row for row in pair_orders
+                            if str(row.get("clientOrderId") or row.get("origClientOrderId") or "")
+                            == trade.entry_client_order_id
+                        ), None)
+                    except BinanceRateLimitError as open_exc:
+                        trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                        trade.real_submit_ambiguous = True
+                        trade.real_error = f"POST error: {str(exc)[:180]} | openOrders rate-limited: {str(open_exc)[:180]}"
+                        await self._save_active_state()
+                        await self._notify_binance_cooldown(open_exc, source="REAL ORDER VERIFY OPEN ORDERS", symbol=trade.pair)
+                        return
+                    except Exception as open_exc:
+                        trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                        trade.real_submit_ambiguous = True
+                        trade.real_error = f"POST error: {str(exc)[:180]} | order lookup: {str(lookup_exc)[:150]} | openOrders: {str(open_exc)[:150]}"
+                        await self._save_active_state()
+                        log.warning("[REAL/RECON] %s openOrders verification failed; keep slot reserved; no repeat POST", trade.pair)
+                        return
+                    if response is None:
+                        trade.entry_order_status = "REJECTED"
+                        trade.entry_order_terminal = True
+                        trade.real_state = "REAL_REJECTED"
+                        trade.real_error = str(exc)[:500]
+                        await self._save_active_state()
+                        await self._record_event(
+                            "REAL_LIMIT_REJECTED_CONFIRMED", trade,
+                            error=str(exc)[:500], lookup="-2013", pair_open_order_match=False,
+                        )
+                        await self._finalize_trade(trade, "CANCELED", None, f"BINANCE_REJECTED_CONFIRMED: {exc}")
+                        return
+                except BinanceRateLimitError as lookup_exc:
+                    trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                    trade.real_submit_ambiguous = True
+                    trade.real_error = f"POST error: {str(exc)[:220]} | verification rate-limited: {str(lookup_exc)[:220]}"
+                    await self._save_active_state()
+                    await self._notify_binance_cooldown(lookup_exc, source="REAL ORDER VERIFY AFTER POST ERROR", symbol=trade.pair)
+                    return
+                except Exception as lookup_exc:
+                    trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                    trade.real_submit_ambiguous = True
+                    trade.real_error = f"POST error: {str(exc)[:220]} | verification: {str(lookup_exc)[:220]}"
+                    await self._save_active_state()
+                    log.warning("[REAL/RECON] %s verification errored; keep slot reserved; no repeat POST | %s", trade.pair, lookup_exc)
+                    return
+                if not isinstance(response, dict):
+                    trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                    trade.real_submit_ambiguous = True
+                    trade.real_error = f"POST error: {str(exc)[:220]} | exchange lookup returned no order object"
+                    await self._save_active_state()
+                    return
+                log.warning(
+                    "[REAL/RECON] %s order FOUND after POST error; exchange status=%s; keeping exchange truth",
+                    trade.pair, response.get("status") or "UNKNOWN",
+                )
+            else:
+                # Binance documents 5xx/unknown execution results as ambiguous.
+                trade.real_state = "REAL_SUBMIT_UNKNOWN"
+                trade.real_submit_ambiguous = True
                 trade.real_error = str(exc)[:500]
                 await self._save_active_state()
-                await self._record_event("REAL_LIMIT_REJECTED", trade, error=str(exc)[:500])
-                await self._finalize_trade(trade, "CANCELED", None, f"BINANCE_REJECTED: {exc}")
-                return
-            # Binance explicitly documents 5xx/unknown execution results as ambiguous.
-            trade.real_state = "REAL_SUBMIT_UNKNOWN"
-            trade.real_submit_ambiguous = True
-            trade.real_error = str(exc)[:500]
-            await self._save_active_state()
-            log.info("[REAL/RECON] %s acknowledgement uncertain; lookup-only by clientOrderId=%s; duplicate POST disabled | %s", trade.pair, trade.entry_client_order_id, exc)
-            await self.reply(
-                "╔══ VOL / REAL ORDER RECONCILIATION ══╗\n"
-                f"PAIR      : {trade.pair} · {trade.direction}\n"
-                f"CLIENT ID : {trade.entry_client_order_id}\n"
-                "STATE     : EXCHANGE ACK NOT CONFIRMED\n"
-                "NEXT      : QUERY EXISTING CLIENT ORDER ID\n"
-                "SAFETY    : POST REPEAT DISABLED · DUPLICATE ORDER BLOCKED\n"
-                "SLOT      : RESERVED UNTIL EXCHANGE STATE IS KNOWN"
-            )
-            # Resolve a lost POST acknowledgement immediately using GET only.
-            # If Binance still cannot find the clientOrderId, retain UNKNOWN and
-            # let the normal maintenance loop repeat lookup; never POST again.
-            try:
-                response = await self.real.get_order(
-                    trade.pair, client_order_id=trade.entry_client_order_id
+                log.info("[REAL/RECON] %s acknowledgement uncertain; lookup-only by clientOrderId=%s; duplicate POST disabled | %s", trade.pair, trade.entry_client_order_id, exc)
+                await self.reply(
+                    "╔══ VOL / REAL ORDER RECONCILIATION ══╗\n"
+                    f"PAIR      : {trade.pair} · {trade.direction}\n"
+                    f"CLIENT ID : {trade.entry_client_order_id}\n"
+                    "STATE     : EXCHANGE ACK NOT CONFIRMED\n"
+                    "NEXT      : QUERY EXISTING CLIENT ORDER ID\n"
+                    "SAFETY    : POST REPEAT DISABLED · DUPLICATE ORDER BLOCKED\n"
+                    "SLOT      : RESERVED UNTIL EXCHANGE STATE IS KNOWN"
                 )
-            except BinanceRateLimitError as query_exc:
-                await self._notify_binance_cooldown(query_exc, source="REAL ORDER VERIFY", symbol=trade.pair)
-                return
-            except BinanceAPIError as query_exc:
-                if query_exc.code == -2013:
-                    trade.real_error = "Lookup awal belum menemukan clientOrderId; status UNKNOWN dipertahankan, GET akan diulang berkala."
-                else:
+                # Resolve a lost POST acknowledgement immediately using GET only.
+                # If Binance still cannot find the clientOrderId, retain UNKNOWN and
+                # let the normal maintenance loop repeat lookup; never blind-repost.
+                try:
+                    response = await self.real.get_order(
+                        trade.pair, client_order_id=trade.entry_client_order_id
+                    )
+                except BinanceRateLimitError as query_exc:
+                    await self._notify_binance_cooldown(query_exc, source="REAL ORDER VERIFY", symbol=trade.pair)
+                    return
+                except BinanceAPIError as query_exc:
+                    if query_exc.code == -2013:
+                        trade.real_error = "Lookup awal belum menemukan clientOrderId; status UNKNOWN dipertahankan, GET akan diulang berkala."
+                    else:
+                        trade.real_error = (trade.real_error + " | lookup: " + str(query_exc))[:500]
+                    await self._save_active_state()
+                    return
+                except Exception as query_exc:
                     trade.real_error = (trade.real_error + " | lookup: " + str(query_exc))[:500]
-                await self._save_active_state()
-                return
-            except Exception as query_exc:
-                trade.real_error = (trade.real_error + " | lookup: " + str(query_exc))[:500]
-                await self._save_active_state()
-                return
+                    await self._save_active_state()
+                    return
         except Exception as exc:
             # Timeouts/resets can happen after Binance accepted the POST.
             trade.real_state = "REAL_SUBMIT_UNKNOWN"
@@ -5480,6 +5560,16 @@ class TradingEngine:
         return fallback
 
     async def _mark_filled(self, trade: Trade, price: Decimal, source: str) -> None:
+        # Once Binance has confirmed both closePosition Algo Orders, protection is
+        # intentionally locked. Later cumulative-fill/account/REST events may update
+        # size and average entry for PnL, but must not reprice, reinstall, re-query,
+        # or re-notify TP/SL. This also keeps the original user-confirmed levels.
+        protection_locked = bool(
+            trade.real_enabled
+            and trade.protection_state == "ACTIVE"
+            and trade.sl_algo_id is not None
+            and trade.tp_algo_id is not None
+        )
         first_fill = trade.status == "PENDING"
         if first_fill:
             trade.status = "FILLED"
@@ -5493,49 +5583,47 @@ class TradingEngine:
         trade.actual_notional = trade.quantity * trade.fill_price
         if trade.leverage > 0:
             trade.margin_usdt = trade.actual_notional / Decimal(trade.leverage)
+
         stop = trade.reference_sl or trade.stop_loss
-        risk_decimal = None
-        if stop is not None:
-            candidate_risk = trade.fill_price - stop if trade.direction == "LONG" else stop - trade.fill_price
-            if candidate_risk > 0:
-                risk_decimal = candidate_risk
-        if risk_decimal is None:
-            trade.protection_state = "INVALID_RISK"
-            trade.protection_error = "Actual fill price and M15 Supertrend SL do not form a positive risk distance."
+        risk_decimal = trade.initial_risk if protection_locked else None
+        if protection_locked:
+            # Keep the exact Binance-confirmed SL/TP. Do not change protection_state.
+            trade.protection_state = "ACTIVE"
+            trade.protection_error = None
         else:
-            trade.initial_risk = risk_decimal
-            previous_target = trade.take_profit
-            existing_active_tp = bool(
-                trade.real_enabled and trade.tp_algo_id is not None
-                and trade.tp_algo_status.upper() not in {"CANCELED", "FINISHED", "REJECTED", "EXPIRED", "TRIGGERED"}
-            )
-            trade.stop_loss = stop
-            raw_target = trade.fill_price + (trade.initial_risk * trade.rr_target if trade.direction == "LONG" else -trade.initial_risk * trade.rr_target)
-            meta = self.symbols.get(trade.pair)
-            if meta is not None:
-                trade.stop_loss = quantized_price(stop, meta.tick_size) if trade.direction == "LONG" else quantized_price_ceiling(stop, meta.tick_size)
-                trade.take_profit = quantized_price_ceiling(raw_target, meta.tick_size) if trade.direction == "LONG" else quantized_price(raw_target, meta.tick_size)
+            if stop is not None:
+                candidate_risk = trade.fill_price - stop if trade.direction == "LONG" else stop - trade.fill_price
+                if candidate_risk > 0:
+                    risk_decimal = candidate_risk
+            if risk_decimal is None:
+                trade.protection_state = "INVALID_RISK"
+                trade.protection_error = "Actual fill price and M15 Supertrend SL do not form a positive risk distance."
             else:
-                trade.take_profit = raw_target
-            if existing_active_tp and previous_target is not None and trade.take_profit != previous_target:
-                # Preserve the protective SL and replace TP at the cumulative 3R level.
-                trade.tp_algo_status = "REPRICE_REQUIRED"
-                trade.protection_state = "PARTIAL"
-            else:
+                trade.initial_risk = risk_decimal
+                trade.stop_loss = stop
+                raw_target = trade.fill_price + (trade.initial_risk * trade.rr_target if trade.direction == "LONG" else -trade.initial_risk * trade.rr_target)
+                meta = self.symbols.get(trade.pair)
+                if meta is not None:
+                    trade.stop_loss = quantized_price(stop, meta.tick_size) if trade.direction == "LONG" else quantized_price_ceiling(stop, meta.tick_size)
+                    trade.take_profit = quantized_price_ceiling(raw_target, meta.tick_size) if trade.direction == "LONG" else quantized_price(raw_target, meta.tick_size)
+                else:
+                    trade.take_profit = raw_target
                 trade.protection_state = "WAITING_FOR_EXCHANGE" if trade.real_enabled else "PAPER_ACTIVE"
+
         trade.real_state = "REAL_FILLED" if trade.real_enabled else "PAPER_FILLED"
         await self._record_event("ORDER_FILLED" if first_fill else "ORDER_PARTIAL_FILL_UPDATED", trade,
                                  fill_price=decimal_to_str(trade.fill_price), source=source,
                                  quantity=decimal_to_str(trade.quantity), stop_loss=decimal_to_str(trade.stop_loss),
-                                 take_profit=decimal_to_str(trade.take_profit), rr_target="1:3")
+                                 take_profit=decimal_to_str(trade.take_profit), rr_target="1:3",
+                                 protection_locked=protection_locked)
         await self._save_active_state()
-        if trade.real_enabled and risk_decimal is None:
+        if trade.real_enabled and not protection_locked and risk_decimal is None:
             await self.reply(
                 f"🚨 PROTEKSI BELUM BISA DIPASANG • {trade.pair} {trade.direction}\n"
                 f"Fill: {fmt_price(trade.fill_price)} • Supertrend SL: {fmt_price(stop)}\n"
                 "Harga fill tidak lagi membentuk jarak risiko valid terhadap SL. Posisi LIVE perlu segera diperiksa."
             )
-        if trade.real_enabled and risk_decimal is not None:
+        if trade.real_enabled and not protection_locked and risk_decimal is not None:
             try:
                 await self._ensure_real_protection(trade)
             except BinanceRateLimitError as exc:
@@ -5553,13 +5641,20 @@ class TradingEngine:
                     await self.reply(f"🚨 TP/SL {trade.pair} ditolak Binance: {str(exc)[:350]}. Tidak ada retry POST otomatis; cek dan amankan posisi LIVE segera.")
                 else:
                     await self.reply(f"⚠️ TP/SL {trade.pair} belum aktif: {str(exc)[:350]}. Bot akan mencoba ulang otomatis.")
-        log.info("[TRADE] FILLED %s %s @ %s (%s) | SL=%s TP=%s protection=%s",
+        log.info("[TRADE] FILLED %s %s @ %s (%s) | SL=%s TP=%s protection=%s locked=%s",
                  trade.pair, trade.direction, trade.fill_price, source,
-                 trade.stop_loss, trade.take_profit, trade.protection_state)
+                 trade.stop_loss, trade.take_profit, trade.protection_state, protection_locked)
 
     async def _ensure_real_protection(self, trade: Trade) -> None:
-        """Install/repair closePosition SL and TP algo orders after a real fill."""
+        """Install closePosition SL/TP once; confirmed protection is left untouched."""
         if not trade.real_enabled or trade.status != "FILLED" or trade.exchange_adopted:
+            return
+        # User-requested behavior: after BOTH protection orders are confirmed,
+        # leave them on Binance. Do not poll/replace them from maintenance and do
+        # not send the success notification again. /trade shows the cached status.
+        if (trade.protection_state == "ACTIVE"
+                and trade.sl_algo_id is not None
+                and trade.tp_algo_id is not None):
             return
         if self._binance_cooldown_remaining() > 0:
             raise _local_rate_limit_error("/fapi/v1/algoOrder")
@@ -6992,6 +7087,63 @@ class TradingEngine:
             exchange_adoption_source=source,
         )
 
+    def _recover_terminal_local_order_trade(
+        self,
+        *,
+        symbol: str,
+        client_order_id: str,
+        order_id: int | None,
+        exchange_status: str,
+    ) -> Trade | None:
+        """Reopen a locally finalized bot trade when Binance proves its LIMIT is live.
+
+        Exact exchange identifiers are required. This prevents a stale local
+        CANCELED record from hiding an active order or losing its original SL/TP
+        setup when the private WebSocket event was missed.
+        """
+        if exchange_status not in {"NEW", "PARTIALLY_FILLED", "FILLED"}:
+            return None
+        for trade in self.active_trades.values():
+            if not trade.real_enabled or trade.pair != symbol:
+                continue
+            same_client = bool(client_order_id and trade.entry_client_order_id == client_order_id)
+            same_order = bool(order_id is not None and trade.entry_order_id is not None and int(trade.entry_order_id) == int(order_id))
+            if not (same_client or same_order):
+                continue
+            if trade.status in {"PENDING", "FILLED"}:
+                return trade
+
+            previous_status = trade.status
+            trade.status = "PENDING"
+            trade.result = None
+            trade.result_reason = None
+            trade.closed_at = None
+            trade.exit_price = None
+            trade.pnl_percent = None
+            trade.pnl_usdt = None
+            trade.realized_r = None
+            trade.filled_at = None
+            trade.entry_order_status = exchange_status
+            trade.entry_order_terminal = False
+            trade.pending_cancel_reason = None
+            trade.real_submit_ambiguous = False
+            trade.real_state = "REAL_PENDING"
+            trade.exchange_adopted = False
+            trade.exchange_adoption_source = None
+            # The original local setup is retained, especially Supertrend SL and
+            # RR target, so a later fill can receive the intended TP/SL protection.
+            self.history_records = [
+                record for record in self.history_records
+                if str(record.get("trade_id") or "") != trade.trade_id
+            ]
+            log.warning(
+                "[REAL/RECOVERY] Binance confirms live LIMIT; restored local trade %s %s %s from %s to PENDING | clientId=%s orderId=%s",
+                trade.pair, trade.direction, trade.trade_id, previous_status,
+                client_order_id or "-", order_id or "-",
+            )
+            return trade
+        return None
+
     async def _upsert_exchange_position(
         self, row: dict[str, Any], *, source: str, finalize_on_flat: bool = True
     ) -> Trade | None:
@@ -7140,9 +7292,19 @@ class TradingEngine:
             and (
                 (client_id and item.entry_client_order_id == client_id)
                 or (order_id is not None and item.entry_order_id == order_id)
-                or item.exchange_adopted
             )
         ), None)
+        if trade is None:
+            trade = self._recover_terminal_local_order_trade(
+                symbol=symbol, client_order_id=client_id, order_id=order_id,
+                exchange_status=status,
+            )
+        if trade is None:
+            trade = next((
+                item for item in self.active_trades.values()
+                if item.real_enabled and item.pair == symbol and item.direction == direction
+                and item.status in {"PENDING", "FILLED"} and item.exchange_adopted
+            ), None)
         if trade is None:
             trade_status = "FILLED" if executed > 0 else "PENDING"
             trade = self._new_exchange_adopted_trade(
@@ -7308,6 +7470,11 @@ class TradingEngine:
                 or (order_id is not None and item.entry_order_id == order_id)
             ) and item.status in {"PENDING", "FILLED"}
         ), None)
+        if trade is None and client_id.startswith("VT") and status in {"NEW", "PARTIALLY_FILLED", "FILLED"}:
+            trade = self._recover_terminal_local_order_trade(
+                symbol=symbol, client_order_id=client_id, order_id=order_id,
+                exchange_status=status,
+            )
         if trade is None and client_id.startswith("VT") and status in {"NEW", "PARTIALLY_FILLED"}:
             try:
                 price = Decimal(str(order.get("p") or "0"))
@@ -8058,7 +8225,48 @@ class TradingEngine:
             f"Cooldown reason: {BINANCE_COOLDOWN.reason() or '-'}\n"
         )
 
+    async def _refresh_exchange_open_orders_for_trade_view(self) -> str | None:
+        """Refresh live Binance open orders only when the user explicitly asks /trade.
+
+        The User Data WS remains the realtime path. This one-shot REST snapshot is
+        a recovery path for missed ORDER_TRADE_UPDATE events or WS reconnect gaps.
+        It deliberately skips requests during the global Binance cooldown.
+        """
+        if not getattr(self.real, "configured", False):
+            return "Binance snapshot: API belum dikonfigurasi; menampilkan cache lokal."
+        cooldown = self._binance_cooldown_remaining()
+        if cooldown > 0:
+            return f"Binance snapshot: REST cooldown {cooldown:.0f}s; menampilkan cache WebSocket/lokal."
+        try:
+            rows = await self.real.get_open_orders(None)
+        except BinanceRateLimitError as exc:
+            await self._notify_binance_cooldown(exc, source="TRADE VIEW OPEN-ORDER SYNC")
+            return f"Binance snapshot gagal karena rate limit; cache WebSocket/lokal dipakai. {str(exc)[:180]}"
+        except Exception as exc:
+            log.warning("[TRADE VIEW] openOrders snapshot gagal; fallback ke cache | %s", exc)
+            return f"Binance snapshot gagal; cache WebSocket/lokal dipakai. {str(exc)[:180]}"
+
+        live_rows = [
+            row for row in rows
+            if str(row.get("status") or row.get("X") or "NEW").upper()
+            in {"NEW", "PARTIALLY_FILLED"}
+        ]
+        # openOrders is an account-wide snapshot. Replace only the open-order
+        # projection, then reconcile/adopt each current exchange order. Existing
+        # local pending trades are retained if an order is temporarily absent.
+        self.exchange_open_orders.clear()
+        for row in live_rows:
+            await self._upsert_exchange_order_snapshot(row, source="TRADE_COMMAND_SYNC")
+        self.exchange_snapshot_at = now_utc()
+        await self._sync_ws_symbols()
+        log.info(
+            "[TRADE VIEW] Binance openOrders snapshot refreshed | active_orders=%s | adopted_cache=%s",
+            len(live_rows), len(self.exchange_open_orders),
+        )
+        return f"Binance snapshot: {len(live_rows)} open order aktif berhasil disinkronkan."
+
     async def show_trades(self) -> None:
+        snapshot_note = await self._refresh_exchange_open_orders_for_trade_view()
         raw_active = [t for t in self.active_trades.values() if t.status in {"PENDING", "FILLED"}]
         # Build per-pair exchange-order projection from WS/snapshot cache. This
         # is deliberately memory-only: /trade never makes a REST request.
@@ -8094,6 +8302,7 @@ class TradingEngine:
             f"ACTIVE TRADES • {slot_count}/{self.max_active_trades} slots\n"
             f"PENDING SLOTS: {pending_slots} • FILLED SLOTS: {filled_slots} • LIVE LIMITS: {live_limits}\n"
             f"Scanner TF: {self.timeframe} • Length: {self.trend_length} • EMA filter: {current_ema}\n"
+            + (f"{snapshot_note}\n" if snapshot_note else "")
         ]
 
         for t in sorted(active, key=lambda x: (x.status, x.pair)):
@@ -8115,6 +8324,7 @@ class TradingEngine:
                 if matching_order:
                     order_detail = (
                         f"\nBinance: {matching_order['status']} • Order ID: {matching_order['order_id'] or '-'}"
+                        f"\nClient ID: {matching_order['client_id'] or '-'}"
                         f"\nExecuted: {format_qty(matching_order['executed_qty'])} / {format_qty(matching_order['original_qty'])}"
                         f" • Remaining: {format_qty(matching_order['remaining_qty'])}"
                     )
@@ -8167,6 +8377,7 @@ class TradingEngine:
                     f"Entry: {fmt_price(entry)} | Live: {fmt_price(price)}\n"
                     f"SL M15 Supertrend: {fmt_price(t.stop_loss or t.reference_sl)} | TP 3R: {fmt_price(t.take_profit)}\n"
                     f"Protection: {t.protection_state} (SL {t.sl_algo_status} / TP {t.tp_algo_status})\n"
+                    f"Algo IDs: SL {t.sl_algo_id or '-'} / TP {t.tp_algo_id or '-'}\n"
                     f"EMA H4 at signal: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
                     f"Floating: {fmt_num(pnl_pct, 2)}% | {fmt_num(pnl_usdt, 4)} USDT\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin est.: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
