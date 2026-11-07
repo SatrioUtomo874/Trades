@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T14:01:22.396771+00:00",
+  "updated_at": "2026-11-07T14:01:23.195211+00:00",
   "active_trades": [
     {
       "trade_id": "ASRUSDT-20261107-210102-28ECDA",
@@ -20,8 +20,8 @@
       "rr_target": "3",
       "sl_algo_id": null,
       "tp_algo_id": null,
-      "sl_client_algo_id": null,
-      "tp_client_algo_id": null,
+      "sl_client_algo_id": "VTSLSDT-20261107-210102-28ECDA",
+      "tp_client_algo_id": "VTTPSDT-20261107-210102-28ECDA",
       "sl_algo_status": "NOT_PLACED",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
