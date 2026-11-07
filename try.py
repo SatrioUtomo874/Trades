@@ -272,9 +272,25 @@ def run_http_server() -> None:
 # -----------------------------------------------------------------------------
 # Load main.py without strategy-specific validation.
 # -----------------------------------------------------------------------------
-def _clear_local_imports() -> None:
-    """Forget previously imported project modules so /try loads fresh files."""
+def _clear_local_imports() -> list[str]:
+    """Remove only project-owned pure-Python modules before reloading main.py.
+
+    IMPORTANT: Never purge every module whose path happens to be below BASE_DIR.
+    Render may place the virtual environment (including NumPy's C extensions)
+    inside the project directory. Removing a loaded extension from sys.modules
+    does not unload its process-global native state; importing it again can raise
+    ``ImportError: cannot load module more than once per process``.
+
+    Only ordinary .py modules outside virtualenv/site-package/cache directories
+    are eligible. Third-party packages and native extension modules stay loaded
+    for the entire launcher process.
+    """
     root = BASE_DIR.resolve()
+    protected_parts = {
+        ".venv", "venv", "env", "site-packages", "dist-packages",
+        "__pycache__", "node_modules", ".git",
+    }
+    removed: list[str] = []
     for name, module in list(sys.modules.items()):
         if name in {"__main__", "builtins"} or module is None:
             continue
@@ -282,11 +298,22 @@ def _clear_local_imports() -> None:
         if not filename:
             continue
         try:
-            Path(filename).resolve().relative_to(root)
+            module_path = Path(filename).resolve()
+            relative = module_path.relative_to(root)
         except (OSError, ValueError):
             continue
+        # Only app-owned source files are reloaded. Compiled extensions (.so,
+        # .pyd, .dll, etc.) are process-global and must never be removed.
+        if module_path.suffix.lower() != ".py":
+            continue
+        if any(part.lower() in protected_parts for part in relative.parts):
+            continue
+        # main.py is loaded explicitly as trading_main_runtime below; strategy.py
+        # and other helper .py files are re-imported from their current source.
         sys.modules.pop(name, None)
+        removed.append(name)
     importlib.invalidate_caches()
+    return removed
 
 
 def load_engine_modules() -> ModuleType:
@@ -297,7 +324,12 @@ def load_engine_modules() -> ModuleType:
     if str(BASE_DIR) not in sys.path:
         sys.path.insert(0, str(BASE_DIR))
 
-    _clear_local_imports()
+    removed = _clear_local_imports()
+    log.info(
+        "[LAUNCHER] Reload source project: cleared %d pure-Python module(s); "
+        "kept native/third-party modules loaded. modules=%s",
+        len(removed), removed[:30],
+    )
     module_name = "trading_main_runtime"
     spec = importlib.util.spec_from_file_location(module_name, main_path)
     if spec is None or spec.loader is None:
@@ -343,7 +375,9 @@ async def start_or_reset_main(chat_id: int) -> None:
     global MAIN_MODULE, MAIN_RUNNING, GANTI_ACTIVE
     async with MAIN_LOCK:
         old_module = MAIN_MODULE
-        if old_module is not None and MAIN_RUNNING:
+        if old_module is not None:
+            # Always run cleanup for an existing module, even if its running flag
+            # is already false after a partial startup or an earlier exception.
             MAIN_RUNNING = False
             try:
                 await _call_main(old_module, "on_stop", _main_context(chat_id))
@@ -485,7 +519,13 @@ async def route_message(message: dict, update: dict) -> None:
             )
         except Exception as exc:
             log.exception("[LAUNCHER] /try gagal.")
-            tg_send(chat_id, f"✕ /try gagal\n{str(exc)[:2500]}\n\nLauncher dan polling Telegram tetap online.")
+            failing_module = getattr(exc, "name", None)
+            module_note = f"\nModule: {failing_module}" if failing_module else ""
+            tg_send(
+                chat_id,
+                f"✕ /try gagal\n{type(exc).__name__}: {str(exc)[:1800]}"
+                f"{module_note}\n\nLauncher dan polling Telegram tetap online."
+            )
         return
 
     if command == "/end":
