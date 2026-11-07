@@ -133,6 +133,7 @@ BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS = 60
 BINANCE_BAN_FALLBACK_SECONDS = 120
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_RECONCILE_INTERVAL_SECONDS = 20.0
+ENTRY_ORDER_TTL_SECONDS = 60 * 60  # LIMIT entry auto-cancels 1 hour after it is actually created
 REAL_POSITION_SETTLE_SECONDS = 15.0  # grace window after a WebSocket fill before REST position reconciliation
 POSITION_CACHE_MAX_AGE_SECONDS = 30.0
 BALANCE_STALE_SECONDS = 60.0
@@ -565,7 +566,7 @@ class Trade:
     signal_atr: Decimal | None
     reference_sl: Decimal | None      # M15 Supertrend line from confirmed signal candle
     entry: Decimal                    # LIMIT price
-    expires_at: datetime              # close of the next candle
+    expires_at: datetime              # entry order creation time + one-hour TTL
     stop_loss: Decimal | None = None
     take_profit: Decimal | None = None
     rr_target: Decimal = Decimal("3")
@@ -587,6 +588,8 @@ class Trade:
     ema_filter_passed: bool | None = None
     status: str = "PENDING"
     created_at: datetime = field(default_factory=now_utc)
+    entry_order_created_at: datetime | None = None  # actual local/Binance LIMIT creation timestamp
+    entry_window_closes_at: datetime | None = None  # next M15 candle close; deadline to CREATE the LIMIT
     filled_at: datetime | None = None
     closed_at: datetime | None = None
     fill_price: Decimal | None = None
@@ -659,6 +662,8 @@ class Trade:
             "ema_filter_passed": self.ema_filter_passed,
             "expires_at": iso_utc(self.expires_at),
             "status": self.status, "created_at": iso_utc(self.created_at),
+            "entry_order_created_at": iso_utc(self.entry_order_created_at) if self.entry_order_created_at else None,
+            "entry_window_closes_at": iso_utc(self.entry_window_closes_at) if self.entry_window_closes_at else None,
             "filled_at": iso_utc(self.filled_at) if self.filled_at else None,
             "closed_at": iso_utc(self.closed_at) if self.closed_at else None,
             "fill_price": decimal_to_str(self.fill_price), "exit_price": decimal_to_str(self.exit_price),
@@ -685,8 +690,8 @@ class Trade:
             "strategy_name": volumatic.STRATEGY_NAME, "strategy_version": volumatic.STRATEGY_VERSION,
             "entry_reason": "Confirmed M15 Volumatic bubble + H4 EMA; LIMIT at next M15 OPEN",
             "price_exp_reason": (
-                "LIMIT normally expires at the close of the next M15 candle; an already-submitted REAL GTC "
-                "is preserved if REST cooldown prevents cancellation, then reconciled after recovery."
+                "Unfilled LIMIT auto-cancels 1 hour after actual order creation. A REAL GTC is preserved "
+                "if REST cooldown prevents cancellation, then reconciled after recovery."
             ),
         }
 
@@ -706,6 +711,25 @@ class Trade:
             saved_trend_length = volumatic.normalize_trend_length(row.get("trend_length", volumatic.DEFAULT_TREND_LENGTH))
         except (TypeError, ValueError):
             saved_trend_length = volumatic.DEFAULT_TREND_LENGTH
+        saved_created_at = parse_iso(row.get("created_at")) or signal_time
+        saved_entry_window_closes_at = parse_iso(row.get("entry_window_closes_at"))
+        if saved_entry_window_closes_at is None and str(row.get("timeframe") or "M15").upper() == "M15":
+            saved_entry_window_closes_at = signal_time + timedelta(milliseconds=volumatic.TIMEFRAME_MS["M15"])
+        saved_real_enabled = bool(row.get("real_enabled"))
+        saved_real_state = str(row.get("real_state") or ("REAL_PENDING" if saved_real_enabled else "SIMULATION")).upper()
+        saved_entry_order_created_at = parse_iso(row.get("entry_order_created_at"))
+        # Backward compatibility for records written before entry_order_created_at existed.
+        # PREPARED means Binance has not accepted an order yet, so its one-hour clock
+        # must not start until _submit_real_limit actually attempts the POST.
+        if saved_entry_order_created_at is None:
+            has_submitted_order = bool(row.get("entry_order_id") or row.get("entry_client_order_id"))
+            if not saved_real_enabled or (saved_real_state != "REAL_PREPARED" and has_submitted_order):
+                saved_entry_order_created_at = saved_created_at
+        saved_expiry = (
+            saved_entry_order_created_at + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS)
+            if saved_entry_order_created_at else
+            (parse_iso(row.get("expires_at")) or saved_created_at + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS))
+        )
         return cls(
             trade_id=str(row.get("trade_id") or generate_trade_id(str(row.get("pair") or "UNKNOWN"))),
             session_id=str(row.get("session_id") or "RECOVERED"),
@@ -730,11 +754,11 @@ class Trade:
             sl_submit_ambiguous=bool(row.get("sl_submit_ambiguous", False)),
             tp_submit_ambiguous=bool(row.get("tp_submit_ambiguous", False)),
             entry=dec("entry", Decimal("0")) or Decimal("0"),
-            expires_at=parse_iso(row.get("expires_at")) or (
-                signal_time + timedelta(milliseconds=volumatic.TIMEFRAME_MS.get(str(row.get("timeframe") or "M15").upper(), volumatic.TIMEFRAME_MS["M15"]))
-            ),
+            expires_at=saved_expiry,
             status=str(row.get("status") or "PENDING").upper(),
-            created_at=parse_iso(row.get("created_at")) or signal_time,
+            created_at=saved_created_at,
+            entry_order_created_at=saved_entry_order_created_at,
+            entry_window_closes_at=saved_entry_window_closes_at,
             filled_at=parse_iso(row.get("filled_at")), closed_at=parse_iso(row.get("closed_at")),
             fill_price=dec("fill_price"), exit_price=dec("exit_price"),
             result=row.get("result"), result_reason=row.get("result_reason"),
@@ -5143,7 +5167,12 @@ class TradingEngine:
             signal_close_price = positive_decimal(signal.get("signal_close_price") or signal.get("close_price")) or entry
             bubble_price = positive_decimal(signal.get("bubble_price")) or signal_close_price
             signal_close = datetime.fromtimestamp(signal_close_ms / 1000, tz=timezone.utc)
-            expiry_dt = datetime.fromtimestamp(entry_close_ms / 1000, tz=timezone.utc)
+            trade_created_at = now_utc()
+            # PAPER LIMIT is created locally here. REAL's timer starts immediately
+            # before its first Binance POST, not while exchange preflight is running.
+            entry_order_created_at = None if self.real_mode else trade_created_at
+            entry_window_closes_at = datetime.fromtimestamp(entry_close_ms / 1000, tz=timezone.utc)
+            expiry_dt = trade_created_at + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS)
             atr_value = positive_decimal(signal.get("signal_atr"))
             trade = Trade(
                 trade_id=generate_trade_id(pair), session_id=self.session_id, pair=pair,
@@ -5152,6 +5181,8 @@ class TradingEngine:
                 signal_time=signal_close, bubble_price=bubble_price, signal_atr=atr_value,
                 reference_sl=stop, stop_loss=stop, take_profit=target, rr_target=Decimal("3"),
                 entry=entry, expires_at=expiry_dt, signal_close_price=signal_close_price,
+                created_at=trade_created_at, entry_order_created_at=entry_order_created_at,
+                entry_window_closes_at=entry_window_closes_at,
                 ema_filter_length=filter_length, ema_filter_value=filter_value,
                 ema_filter_slow_value=filter_slow_value,
                 ema_filter_passed=(filter_passed if filter_length is not None else None),
@@ -5183,11 +5214,12 @@ class TradingEngine:
                 trade.real_state = "PAPER_PENDING"
             self.active_trades[trade.trade_id] = trade
             await self._record_event(
-                "M15_LIMIT_SUBMITTED", trade, order_type="LIMIT", signal_mode="CONFIRMED_M15_NEXT_OPEN",
+                "M15_LIMIT_CREATED", trade, order_type="LIMIT", signal_mode="CONFIRMED_M15_NEXT_OPEN",
                 entry=decimal_to_str(trade.entry), stop_loss=decimal_to_str(trade.stop_loss),
                 take_profit=decimal_to_str(trade.take_profit), rr_target="1:3",
                 signal_close_time_ms=signal_close_ms, entry_candle_open_time_ms=entry_open_ms,
-                expires_at=iso_utc(trade.expires_at), real=trade.real_enabled,
+                expires_at=iso_utc(trade.expires_at), entry_order_created_at=iso_utc(trade.entry_order_created_at),
+                expiry_seconds=ENTRY_ORDER_TTL_SECONDS, real=trade.real_enabled,
                 quantity=decimal_to_str(trade.quantity), margin_usdt=decimal_to_str(trade.margin_usdt),
                 leverage=trade.leverage, min_margin_mode=trade.min_margin_mode,
             )
@@ -5213,8 +5245,12 @@ class TradingEngine:
                 f"LIMIT entry (next M15 OPEN): {fmt_price(trade.entry)}\n"
                 f"Supertrend M15 SL: {fmt_price(trade.stop_loss)}\n"
                 f"TP: {fmt_price(trade.take_profit)} • RR 1:3\n"
-                f"Valid: {format_wib(signal_close)} → {format_wib(trade.expires_at)}\n"
-                f"Margin: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
+                + (
+                    f"Auto-expire: 1 jam setelah order dibuat ({format_wib(trade.expires_at)})\n"
+                    if trade.entry_order_created_at else
+                    "Auto-expire: 1 jam setelah LIMIT diterima Binance (timer belum dimulai)\n"
+                )
+                + f"Margin: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
                 f"Sizing: {'MINIMUM AUTO' if trade.min_margin_mode else 'FIXED TARGET'} • Qty: {format_qty(trade.quantity or Decimal('0'))}\n"
                 f"Mode: {'REAL' if trade.real_enabled else 'PAPER'}"
             )
@@ -5230,8 +5266,8 @@ class TradingEngine:
             raise RuntimeError("REAL_EXECUTION_ENABLED=0; eksekusi LIVE dikunci oleh environment.")
         if not self.real.configured:
             raise RuntimeError("BINANCE_API_KEY / BINANCE_API_SECRET belum lengkap.")
-        if now_utc() >= trade.expires_at:
-            raise RuntimeError("Candle entry sudah berakhir; sinyal tidak dikejar.")
+        if trade.entry_window_closes_at and now_utc() >= trade.entry_window_closes_at:
+            raise RuntimeError("Candle M15 berikutnya sudah ditutup; sinyal tidak dikejar.")
         filters = await self.rest.get_symbol_filters(trade.pair)
         leverage_response = await self.real.set_leverage(trade.pair, trade.leverage)
         leverage_max_notional = parse_max_notional(leverage_response)
@@ -5276,15 +5312,21 @@ class TradingEngine:
         """Submit once; ambiguous transport/5xx outcomes are lookup-only, never blind-reposted."""
         if not trade.real_enabled or not trade.entry_client_order_id:
             raise RuntimeError("REAL order belum melewati preflight atau clientOrderId tidak tersedia.")
-        if now_utc() >= trade.expires_at:
-            await self._finalize_trade(trade, "EXPIRED", None, "CANDLE_EXPIRED_BEFORE_REAL_SUBMIT")
-            return
         if trade.real_submit_ambiguous or trade.real_state in {"REAL_SUBMIT_UNKNOWN", "REAL_SUBMITTING"}:
             # This clientOrderId may already identify a live or completed exchange order.
             # Never POST again until exchange state is positively resolved.
             await self._save_active_state()
             return
+        if trade.entry_window_closes_at and now_utc() >= trade.entry_window_closes_at:
+            await self._finalize_trade(trade, "EXPIRED", None, "ENTRY_WINDOW_CLOSED_BEFORE_SUBMIT")
+            return
 
+        # Start (or preserve) the one-hour timer at the first actual POST attempt.
+        # The timestamp is persisted before awaiting the request so a process crash
+        # cannot accidentally grant a fresh hour to an already-submitted order.
+        if trade.entry_order_created_at is None:
+            trade.entry_order_created_at = now_utc()
+            trade.expires_at = trade.entry_order_created_at + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS)
         trade.real_state = "REAL_SUBMITTING"
         await self._save_active_state()
         try:
@@ -5299,6 +5341,8 @@ class TradingEngine:
             # let maintenance submit the same clientOrderId after cooldown.
             if getattr(exc, "internal", False) or exc.status_code in {418, 429}:
                 trade.real_state = "REAL_PREPARED"
+                trade.entry_order_created_at = None
+                trade.expires_at = now_utc() + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS)  # dormant until the next POST
                 trade.real_error = f"Order belum diterima Binance karena rate limit: {str(exc)[:350]}"
                 trade.real_submit_ambiguous = False
                 await self._save_active_state()
@@ -6017,10 +6061,21 @@ class TradingEngine:
     async def _expire_due_pending(self) -> None:
         now = now_utc()
         for trade in list(self.active_trades.values()):
-            if trade.real_enabled and trade.preserve_gtc_after_cooldown:
-                # Already-submitted REAL GTC orders preserved during a ban are
-                # intentionally not auto-canceled after REST becomes available.
+            if trade.real_enabled and trade.status == "PENDING" and trade.real_state == "REAL_PREPARED" and trade.entry_order_created_at is None:
+                # No Binance order exists yet. The one-hour timer has not started,
+                # but the setup may only CREATE its LIMIT during the next M15 candle.
+                if trade.entry_window_closes_at and now >= trade.entry_window_closes_at:
+                    await self._finalize_trade(trade, "EXPIRED", None, "ENTRY_WINDOW_CLOSED_BEFORE_SUBMIT")
                 continue
+            if trade.real_enabled and trade.preserve_gtc_after_cooldown:
+                # Never touch a live GTC while REST is rate-limited. Once REST
+                # recovers, resume normal one-hour expiry handling for bot-tagged
+                # orders, including those adopted from the exchange snapshot.
+                if self._binance_cooldown_remaining() > 0:
+                    continue
+                trade.preserve_gtc_after_cooldown = False
+                await self._save_active_state()
+                log.info("[REAL] %s GTC REST protection cleared; one-hour expiry handling resumed", trade.pair)
 
             if trade.status == "PENDING" and now >= trade.expires_at:
                 if trade.real_enabled:
@@ -6031,39 +6086,37 @@ class TradingEngine:
                         if cooldown_active:
                             continue
                         await self._finalize_trade(
-                            trade, "EXPIRED", None, "REAL_ORDER_NEVER_SUBMITTED_BEFORE_CANDLE_EXPIRY"
+                            trade, "EXPIRED", None, "REAL_ORDER_NEVER_SUBMITTED"
                         )
                         continue
-                    expired_inside_ban = BINANCE_COOLDOWN.covered_by_last_ban(trade.expires_at.timestamp())
                     order_may_exist = bool(trade.entry_client_order_id)
-                    if order_may_exist and (cooldown_active or expired_inside_ban):
+                    if order_may_exist and cooldown_active:
                         trade.preserve_gtc_after_cooldown = True
-                        trade.pending_cancel_reason = None
+                        trade.pending_cancel_reason = "ENTRY_LIMIT_TIMEOUT_1H"
                         trade.real_state = "REAL_GTC_PRESERVED_AFTER_COOLDOWN"
                         trade.real_error = (
-                            "Order GTC dipertahankan: candle expiry terjadi selama Binance REST cooldown. "
-                            "Order tetap aktif sampai fill atau pembatalan manual; sinyal baru pada pair aktif diabaikan."
+                            "Order GTC dibiarkan tanpa perubahan selama Binance REST cooldown. "
+                            "Pembatalan karena timeout satu jam akan dilanjutkan begitu REST pulih."
                         )
                         await self._record_event(
                             "ORDER_GTC_PRESERVED_AFTER_API_COOLDOWN", trade,
                             order_status=trade.entry_order_status,
-                            expires_at=iso_utc(trade.expires_at),
+                            expires_at=iso_utc(trade.expires_at), expiry_seconds=ENTRY_ORDER_TTL_SECONDS,
                             ban_until_epoch=BINANCE_COOLDOWN._until_epoch,
                         )
                         await self._save_active_state()
-                        log.info("[REAL] GTC preserved | pair=%s | expiry during REST cooldown; order remains on Binance until fill/reversal/cancel", trade.pair)
+                        log.info("[REAL] GTC preserved | pair=%s | 1h timeout during REST cooldown; order remains on Binance until fill/reversal/cancel", trade.pair)
                         continue
-                await self._cancel_pending_trade(trade, "ORDER_EXPIRED_ONE_CANDLE")
+                await self._cancel_pending_trade(trade, "ENTRY_LIMIT_TIMEOUT_1H")
 
             elif trade.status == "FILLED" and trade.real_enabled and not trade.entry_order_terminal and now >= trade.expires_at:
                 cooldown_active = self._binance_cooldown_remaining() > 0
-                expired_inside_ban = BINANCE_COOLDOWN.covered_by_last_ban(trade.expires_at.timestamp())
-                if cooldown_active or expired_inside_ban:
+                if cooldown_active:
                     trade.preserve_gtc_after_cooldown = True
-                    trade.pending_cancel_reason = None
+                    trade.pending_cancel_reason = "ENTRY_LIMIT_TIMEOUT_1H"
                     trade.real_state = "REAL_PARTIAL_GTC_PRESERVED_AFTER_COOLDOWN"
                     trade.real_error = (
-                        "Sisa quantity LIMIT GTC dipertahankan setelah partial fill karena candle expiry "
+                        "Sisa quantity LIMIT GTC dipertahankan setelah partial fill karena batas satu jam "
                         "terjadi selama Binance REST cooldown."
                     )
                     await self._record_event(
@@ -6073,7 +6126,7 @@ class TradingEngine:
                     )
                     await self._save_active_state()
                 else:
-                    await self._cancel_real_entry_remainder(trade, "ORDER_EXPIRED_ONE_CANDLE")
+                    await self._cancel_real_entry_remainder(trade, "ENTRY_LIMIT_TIMEOUT_1H")
 
     async def _reconcile_pending_real(self, trade: Trade) -> None:
         if not trade.real_enabled or trade.status != "PENDING":
@@ -6081,11 +6134,8 @@ class TradingEngine:
         if self._binance_cooldown_remaining() > 0:
             return  # open Binance LIMIT remains untouched; private WS still reports fills.
         if trade.real_state == "REAL_PREPARED":
-            # Startup was allowed to finish during a ban; now resume the one
-            # already-persisted submission with its original clientOrderId.
-            if now_utc() >= trade.expires_at:
-                await self._finalize_trade(trade, "EXPIRED", None, "PREPARED_ORDER_WINDOW_EXPIRED_DURING_COOLDOWN")
-                return
+            # No exchange order exists yet. Resume the same clientOrderId and
+            # start the one-hour timer only when the Binance POST is attempted.
             await self._submit_real_limit(trade)
             if trade.status == "PENDING" and trade.real_state in {"REAL_FILLED", "REAL_PARTIALLY_FILLED"}:
                 await self._mark_filled(trade, trade.fill_price or trade.entry, "DEFERRED_PREPARED_SUBMISSION")
@@ -6136,13 +6186,13 @@ class TradingEngine:
                     await self._finalize_trade(trade, "EXPIRED", None, "PRESERVED_GTC_NOT_FOUND_AFTER_COOLDOWN")
                 return
             if (now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown) or trade.real_state == "REAL_CANCEL_UNKNOWN":
-                reason = "ORDER_EXPIRED_ONE_CANDLE" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
+                reason = "ENTRY_LIMIT_TIMEOUT_1H" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
                 await self._cancel_pending_trade(trade, reason)
                 return
             raise
         except Exception:
             if (now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown) or trade.real_state == "REAL_CANCEL_UNKNOWN":
-                reason = "ORDER_EXPIRED_ONE_CANDLE" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
+                reason = "ENTRY_LIMIT_TIMEOUT_1H" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
                 await self._cancel_pending_trade(trade, reason)
                 return
             raise
@@ -6159,7 +6209,7 @@ class TradingEngine:
             await self._save_active_state()
         elif status == "PARTIALLY_FILLED":
             # The filled amount is live exposure. Normally cancel the remaining
-            # LIMIT at one-candle expiry/reversal; if that expiry occurred during
+            # LIMIT at one-hour entry timeout/reversal; if that expiry occurred during
             # a REST IP ban, preserve the GTC remainder until fill/reversal/manual cancel.
             trade.entry_order_terminal = False
             if executed > 0:
@@ -6173,7 +6223,7 @@ class TradingEngine:
         ):
             # Retry a failed manual/expiry cancellation until Binance confirms
             # a terminal order state. An ambiguous order keeps its capacity slot.
-            reason = "ORDER_EXPIRED_ONE_CANDLE" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
+            reason = "ENTRY_LIMIT_TIMEOUT_1H" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
             await self._cancel_pending_trade(trade, reason)
         elif status in {"CANCELED", "EXPIRED", "REJECTED"}:
             executed = Decimal(str(order.get("executedQty") or "0"))
@@ -6186,7 +6236,7 @@ class TradingEngine:
                     None, f"BINANCE_{status}",
                 )
         elif now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown:
-            await self._cancel_pending_trade(trade, "ORDER_EXPIRED_ONE_CANDLE")
+            await self._cancel_pending_trade(trade, "ENTRY_LIMIT_TIMEOUT_1H")
 
     async def _sync_real_entry_remainder(self, trade: Trade) -> None:
         """Refresh cumulative fill/status for a still-open entry LIMIT.
@@ -6291,17 +6341,16 @@ class TradingEngine:
             await self._ensure_real_protection(trade)
         if (not trade.entry_order_terminal and trade.expires_at <= now_utc()
                 and not trade.preserve_gtc_after_cooldown):
-            await self._cancel_real_entry_remainder(trade, trade.pending_cancel_reason or "ORDER_EXPIRED_ONE_CANDLE")
+            await self._cancel_real_entry_remainder(trade, trade.pending_cancel_reason or "ENTRY_LIMIT_TIMEOUT_1H")
             if trade.status != "FILLED":
                 return
         if time.monotonic() - trade.last_real_check_monotonic < REAL_RECONCILE_INTERVAL_SECONDS:
             return
         trade.last_real_check_monotonic = time.monotonic()
 
-        # A late/partial GTC that was deliberately preserved during an API ban
-        # remains live until fill, reversal, or manual cancel. Poll its exchange
-        # status after REST recovers, but never auto-cancel it merely because the
-        # original one-candle deadline has passed.
+        # A late/partial GTC preserved during a REST ban is not canceled while
+        # the ban is active. The maintenance loop queues/resumes the timeout cancel
+        # immediately after REST recovers.
         if trade.preserve_gtc_after_cooldown and not trade.entry_order_terminal:
             if time.monotonic() - trade.last_real_order_status_check >= REAL_PENDING_POLL_SECONDS:
                 trade.last_real_order_status_check = time.monotonic()
@@ -6322,8 +6371,8 @@ class TradingEngine:
             if trade.filled_at and (now_utc() - trade.filled_at).total_seconds() < REAL_POSITION_SETTLE_SECONDS:
                 return
             if not trade.entry_order_terminal:
-                if trade.preserve_gtc_after_cooldown:
-                    # A preserved live GTC is still allowed to fill; do not
+                if trade.preserve_gtc_after_cooldown and trade.pending_cancel_reason != "ENTRY_LIMIT_TIMEOUT_1H":
+                    # A preserved/adopted live GTC is still allowed to fill; do not
                     # remove it only because the position endpoint is momentarily flat.
                     return
                 await self._cancel_real_entry_remainder(
@@ -6898,8 +6947,10 @@ class TradingEngine:
         margin_value = margin if margin is not None and margin > 0 else (
             notional / Decimal(lev) if notional > 0 else self.margin_usdt
         )
-        timeframe_ms = volumatic.TIMEFRAME_MS.get(self.timeframe, volumatic.TIMEFRAME_MS["H4"])
         direction = direction.upper()
+        order_is_still_open = status == "PENDING" or order_status in {"NEW", "PARTIALLY_FILLED"}
+        order_created_at = stamp if order_is_still_open else None
+        expiry_anchor = order_created_at or stamp
         return Trade(
             trade_id=generate_trade_id(symbol),
             session_id=self.session_id,
@@ -6913,8 +6964,9 @@ class TradingEngine:
             signal_atr=None,
             reference_sl=None,
             entry=entry,
-            expires_at=now_utc() + timedelta(milliseconds=timeframe_ms),
+            expires_at=expiry_anchor + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS),
             signal_close_price=entry,
+            entry_order_created_at=order_created_at,
             ema_filter_length=None,
             ema_filter_value=None,
             ema_filter_passed=None,
@@ -7101,7 +7153,7 @@ class TradingEngine:
                 leverage=self.leverage,
                 client_order_id=client_id or None, order_id=order_id,
                 order_status=status, executed_qty=executed,
-                preserve_gtc=True,
+                preserve_gtc=(self._binance_cooldown_remaining() > 0),
             )
             if executed > 0:
                 try:
@@ -7118,7 +7170,10 @@ class TradingEngine:
             trade.entry_order_status = status
             trade.entry_order_terminal = False
             trade.entry_executed_qty = executed
-            trade.preserve_gtc_after_cooldown = True
+            if trade.entry_order_created_at is None:
+                trade.entry_order_created_at = stamp
+                trade.expires_at = stamp + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS)
+            trade.preserve_gtc_after_cooldown = (self._binance_cooldown_remaining() > 0)
             if executed > 0:
                 trade.quantity = executed
                 try:
@@ -7272,7 +7327,7 @@ class TradingEngine:
                     signal_time=self._exchange_event_time(order),
                     client_order_id=client_id, order_id=order_id,
                     order_status=status, executed_qty=executed,
-                    preserve_gtc=True,
+                    preserve_gtc=(self._binance_cooldown_remaining() > 0),
                 )
                 self.active_trades[trade.trade_id] = trade
         elif trade is None and client_id.startswith("VT") and status in {"FILLED", "PARTIALLY_FILLED"}:
@@ -7386,6 +7441,10 @@ class TradingEngine:
             await self._sync_ws_symbols()
             return
 
+        if trade.entry_order_created_at is None:
+            trade.entry_order_created_at = self._exchange_event_time(order)
+            trade.expires_at = trade.entry_order_created_at + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS)
+
         status = str(order.get("X") or "UNKNOWN").upper()
         execution = str(order.get("x") or "UNKNOWN").upper()
         order_id = order.get("i")
@@ -7422,7 +7481,7 @@ class TradingEngine:
                 await self._record_event(
                     "LATE_FILL_DURING_API_COOLDOWN", trade,
                     order_status=status, executed_qty=decimal_to_str(cumulative),
-                    note="GTC order dibiarkan berjalan ketika REST banned; fill diterima melalui User Data WS setelah expiry one-candle.",
+                    note="GTC order dibiarkan berjalan ketika REST banned; fill diterima melalui User Data WS setelah batas waktu satu jam.",
                 )
             trade.entry_executed_qty = cumulative
             trade.quantity = cumulative
@@ -7447,7 +7506,7 @@ class TradingEngine:
             if terminal:
                 trade.pending_cancel_reason = None
             elif trade.expires_at <= now_utc() and not trade.preserve_gtc_after_cooldown:
-                trade.pending_cancel_reason = trade.pending_cancel_reason or "ORDER_EXPIRED_ONE_CANDLE"
+                trade.pending_cancel_reason = trade.pending_cancel_reason or "ENTRY_LIMIT_TIMEOUT_1H"
             await self._save_active_state()
             log.info("[USER WS] %s %s order=%s status=%s cumQty=%s avg=%s", symbol, trade.direction, order_id, status, cumulative, fill_price)
             return
@@ -8072,9 +8131,13 @@ class TradingEngine:
                         "EXCHANGE ACK UNKNOWN: verifikasi clientOrderId; POST tidak akan dikirim ulang\n"
                         if t.real_enabled and t.real_submit_ambiguous
                         else (
-                            "Validity: GTC dipertahankan sampai fill/reversal/manual cancel\n"
+                            "Validity: GTC tidak disentuh selama REST cooldown; timeout 1 jam dibatalkan setelah REST pulih\n"
                             if t.real_enabled and t.preserve_gtc_after_cooldown
-                            else f"Expires: {format_wib(t.expires_at)}\n"
+                            else (
+                                f"Expires: {format_wib(t.expires_at)}\n"
+                                if t.entry_order_created_at else
+                                "Auto-expire: 1 jam setelah Binance menerima LIMIT (timer belum dimulai)\n"
+                            )
                         )
                     )
                     + f"Mode: {'REAL' if t.real_enabled else 'PAPER'}"
