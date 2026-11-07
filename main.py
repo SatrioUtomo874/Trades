@@ -2388,13 +2388,16 @@ class BinanceRealClient:
 
     async def place_algo_order(
         self, *, symbol: str, side: str, order_type: str, trigger_price: Decimal,
-        position_side: str, client_algo_id: str,
+        position_side: str, client_algo_id: str, working_type: str = "CONTRACT_PRICE",
     ) -> dict[str, Any]:
         """Submit a close-position Futures conditional order (SL/TP)."""
+        working_type = str(working_type or "").upper()
+        if working_type not in {"MARK_PRICE", "CONTRACT_PRICE"}:
+            raise ValueError(f"working_type tidak valid: {working_type!r}")
         params: dict[str, Any] = {
             "algoType": "CONDITIONAL", "symbol": symbol, "side": side,
             "type": order_type, "triggerPrice": decimal_to_str(trigger_price),
-            "workingType": "CONTRACT_PRICE", "closePosition": "true",
+            "workingType": working_type, "closePosition": "true",
             "clientAlgoId": client_algo_id,
         }
         if position_side and position_side != "BOTH":
@@ -3645,6 +3648,14 @@ class TradingEngine:
                 log.warning("AUTOSTOP_PERCENT tidak valid; konfigurasi env diabaikan.")
         self._equity_peak: Decimal | None = None
         self._equity_last: Decimal | None = None
+        # REAL account guard uses one wallet-balance baseline captured by /real on,
+        # then applies local realized PnL plus live floating PnL. This avoids periodic
+        # balance REST snapshots and survives fresh /try engine sessions.
+        self._real_equity_baseline: Decimal | None = None
+        self._real_realized_pnl = Decimal("0")
+        self._real_account_snapshot_ready = False
+        self._autostop_wait_notice_sent = False
+        self._autostop_restore_notice_sent = False
         self._autostop_triggered = False
         self._autostop_last_check = 0.0
         self._autostop_last_persist = 0.0
@@ -3666,6 +3677,10 @@ class TradingEngine:
         self._last_user_ws_reconnect_count = 0
         self.legacy_active_snapshot_count = 0
         self.history_records: list[dict[str, Any]] = []
+        # A trade_id can surface through multiple WS/REST reconciliation paths.
+        # Keep a session-level terminal guard even when those paths hold distinct
+        # Trade object instances representing the same exchange order.
+        self._finalized_trade_ids: set[str] = set()
         self.history_events: list[dict[str, Any]] = []
         self.notes: list[dict[str, Any]] = []
         self.last_processed_candles: dict[str, int] = {}
@@ -3690,7 +3705,6 @@ class TradingEngine:
         self._was_in_binance_cooldown = self._binance_cooldown_remaining() > 0
         self._scan_interrupted_by_cooldown = False
         self._scan_capacity_paused = False
-        self._scan_pending_limit_paused = False
         self._scan_protection_paused = False
         self._last_user_stream_start_attempt = 0.0
 
@@ -3701,6 +3715,8 @@ class TradingEngine:
         self._last_scan_boundary_ms = 0
         self._scan_cycle_lock = asyncio.Lock()
         self._trade_lock = asyncio.Lock()
+        self._protection_locks: dict[str, asyncio.Lock] = {}
+        self._protection_lock_refs: dict[str, int] = {}
         self._history_lock = asyncio.Lock()
         self._settings_lock = asyncio.Lock()
         self._telegram_error_handler = TelegramErrorHandler(self)
@@ -3828,6 +3844,18 @@ class TradingEngine:
                         log.warning("Nilai autostop_percent di runtime settings tidak valid; guard OFF.")
             raw_peak = payload.get("autostop_peak_equity")
             raw_last = payload.get("autostop_last_equity")
+            raw_real_baseline = payload.get("autostop_real_equity_baseline")
+            raw_realized_pnl = payload.get("autostop_realized_pnl", "0")
+            try:
+                baseline = Decimal(str(raw_real_baseline)) if raw_real_baseline not in (None, "") else None
+                self._real_equity_baseline = baseline if baseline is not None and baseline.is_finite() and baseline > 0 else None
+            except (InvalidOperation, ValueError, TypeError):
+                self._real_equity_baseline = None
+            try:
+                realized = Decimal(str(raw_realized_pnl or "0"))
+                self._real_realized_pnl = realized if realized.is_finite() else Decimal("0")
+            except (InvalidOperation, ValueError, TypeError):
+                self._real_realized_pnl = Decimal("0")
             try:
                 peak = Decimal(str(raw_peak)) if raw_peak not in (None, "") else None
                 self._equity_peak = peak if peak is not None and peak.is_finite() and peak > 0 else None
@@ -3894,6 +3922,8 @@ class TradingEngine:
                 "autostop_percent": decimal_to_str(self.autostop_percent),
                 "autostop_peak_equity": decimal_to_str(self._equity_peak),
                 "autostop_last_equity": decimal_to_str(self._equity_last),
+                "autostop_real_equity_baseline": decimal_to_str(self._real_equity_baseline),
+                "autostop_realized_pnl": decimal_to_str(self._real_realized_pnl),
                 "autostop_triggered": self._autostop_triggered,
                 "autostop_source": self._autostop_source,
                 "last_processed_candles": dict(list(self.last_processed_candles.items())[-3000:]),
@@ -4327,9 +4357,11 @@ class TradingEngine:
         self.min_margin_enabled = False
         self.max_active_trades = MAX_ACTIVE_TRADES
         self.active_trades.clear()
+        self._finalized_trade_ids.clear()
         self.exchange_positions.clear()
         self.exchange_open_orders.clear()
         self.exchange_snapshot_at = None
+        self._real_account_snapshot_ready = False
         self._last_user_ws_reconnect_count = 0
         self.history_records.clear()
         self.history_events.clear()
@@ -4347,7 +4379,6 @@ class TradingEngine:
         self._scan_resume_trend_length = self.trend_length
         self._scan_interrupted_by_cooldown = False
         self._scan_capacity_paused = False
-        self._scan_pending_limit_paused = False
         self._scan_protection_paused = False
         self._was_in_binance_cooldown = False
         self._last_scan_boundary_ms = 0
@@ -4365,16 +4396,16 @@ class TradingEngine:
 
         # No exchangeInfo, market WS, private WS, account, or GitHub state request
         # is performed during startup. Telegram remains responsive and scanner OFF.
+        self._autostop_wait_notice_sent = False
+        self._autostop_restore_notice_sent = False
+        self._autostop_last_check = 0.0
         if self.autostop_percent is not None:
-            self._equity_peak = None
-            self._equity_last = None
-            self._autostop_triggered = False
-            self._autostop_source = None
-            self._autostop_data_hold = True
+            # Keep persisted equity peak/floor and a previously triggered lock.
+            # A fresh /try only waits for new market data; it does not rebase risk.
+            self._autostop_data_hold = not self._autostop_triggered
+            if self._autostop_triggered:
+                self.scan_enabled = False
         else:
-            self._equity_peak = None
-            self._equity_last = None
-            self._autostop_triggered = False
             self._autostop_data_hold = False
             self._autostop_source = None
 
@@ -4505,11 +4536,15 @@ class TradingEngine:
         """Telegram telemetry for every completed or interrupted logical batch."""
         ema = ema_filter_label(ema_length)
         cooldown = self._binance_cooldown_remaining()
+        used_slots, pending_only_slots, filled_slots, live_limits = self._active_slot_counts()
+        capacity_full = used_slots >= self.max_active_trades
+        pending_limit_exists = self._has_pending_entry_limit()
         state = (
             "REST COOLDOWN / PAUSED" if interrupted or cooldown > 0 else
-            "CONFIG CHANGED / RESTART" if configuration_changed else
-            "PAUSED — ENTRY LIMIT OPEN" if self._has_pending_entry_limit() else
             "PAUSED — TP/SL NOT ACTIVE" if self._has_unprotected_real_position() else
+            "PAUSED — MAX SLOT REACHED" if capacity_full else
+            "CONFIG CHANGED / RESTART" if configuration_changed else
+            "SCANNING · PENDING LIMIT RESERVED" if pending_limit_exists else
             "BATCH COMPLETE"
         )
         processed = int(stats.get("processed", 0))
@@ -4530,6 +4565,7 @@ class TradingEngine:
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
             f"STATE     : {state}",
+            f"SLOTS     : {used_slots}/{self.max_active_trades} · PENDING {pending_only_slots} · FILLED {filled_slots} · LIVE LIMITS {live_limits}",
             "──────────────────────────────",
             f"PASS      : {pass_start:04d}–{min(batch_end, pass_start + requested - 1):04d}  ({requested}/{pass_expected} requested)",
             f"ANALYZED  : {processed}  ·  SKIPPED {skipped}",
@@ -4551,18 +4587,22 @@ class TradingEngine:
             lines.append(f"GOVERNOR  : REST HOLD · {self._short_duration(cooldown)} remaining")
             lines.append(f"RESUME    : coin #{self._scan_resume_cursor + 1:04d} setelah cooldown")
             lines.append("ORDERS    : existing GTC tetap aktif · User Data WS tetap dipantau")
-        elif self._has_pending_entry_limit():
-            lines.append("PAUSE     : menunggu entry LIMIT selesai (filled / cancel / expiry); scanner tidak membuat order lain")
         elif self._has_unprotected_real_position():
             lines.append("PAUSE     : menunggu Binance TP dan SL terkonfirmasi aktif; scanner tidak membuat entry baru")
+        elif capacity_full:
+            lines.append("PAUSE     : kapasitas slot maksimum tercapai; scanner lanjut otomatis saat slot tersedia")
+            lines.append("NEXT      : menunggu slot tersedia; scanner akan resume otomatis")
         elif configuration_changed:
             lines.append("NEXT      : mengulang siklus dengan parameter terbaru dari coin #0001")
-        elif batch_end < universe_total:
-            next_start = batch_end + 1
-            next_end = min(universe_total, next_start + SCAN_MAX_PAIRS_PER_CYCLE - 1)
-            lines.append(f"NEXT      : BATCH {batch_number + 1:02d} · COIN #{next_start:04d}–#{next_end:04d}")
         else:
-            lines.append("NEXT      : menunggu close candle timeframe berikutnya")
+            if pending_limit_exists:
+                lines.append("INFO      : pending LIMIT tetap memakan slot; scanner lanjut selama masih ada kapasitas")
+            if batch_end < universe_total:
+                next_start = batch_end + 1
+                next_end = min(universe_total, next_start + SCAN_MAX_PAIRS_PER_CYCLE - 1)
+                lines.append(f"NEXT      : BATCH {batch_number + 1:02d} · COIN #{next_start:04d}–#{next_end:04d}")
+            else:
+                lines.append("NEXT      : menunggu close candle timeframe berikutnya")
         await self.reply("\n".join(lines))
 
     async def _check_scan_schedule_activation(self) -> bool:
@@ -4630,14 +4670,6 @@ class TradingEngine:
                     self._scan_interrupted_by_cooldown = False
                     self._scan_trigger_now = True
                     log.info("[SCAN] REST pulih; lanjutkan scanner dari cursor tersimpan.")
-                if self._has_pending_entry_limit():
-                    self._scan_pending_limit_paused = True
-                    await asyncio.sleep(SCAN_POLL_SECONDS)
-                    continue
-                if self._scan_pending_limit_paused:
-                    self._scan_pending_limit_paused = False
-                    self._scan_trigger_now = True
-                    log.info("[SCAN] entry LIMIT sudah terminal/filled; scanner resumed.")
                 if self._has_unprotected_real_position():
                     self._scan_protection_paused = True
                     await asyncio.sleep(SCAN_POLL_SECONDS)
@@ -4714,18 +4746,13 @@ class TradingEngine:
             await self._expire_due_pending()
             offset = self._scan_resume_cursor
             capacity_reached = False
-            pending_limit_paused = False
+            protection_paused = False
             while offset < len(universe):
                 if not self._running or not self.scan_enabled:
                     break
                 if self.trend_length != trend_length or self.ema_filter_length != ema_filter_length:
                     self._scan_resume_cursor = 0
                     self._scan_resume_boundary_ms = 0
-                    break
-                if self._has_pending_entry_limit():
-                    self._scan_pending_limit_paused = True
-                    self._scan_resume_cursor = offset
-                    pending_limit_paused = True
                     break
                 if len(self._active_slot_projection()) >= self.max_active_trades:
                     self._scan_capacity_paused = True
@@ -4766,11 +4793,6 @@ class TradingEngine:
                         self._scan_interrupted_by_cooldown = True
                         self._scan_trigger_now = True
                         self._scan_resume_cursor = absolute_index
-                        break
-                    if self._has_pending_entry_limit():
-                        self._scan_pending_limit_paused = True
-                        self._scan_resume_cursor = absolute_index
-                        pending_limit_paused = True
                         break
                     if len(self._active_slot_projection()) >= self.max_active_trades:
                         self._scan_capacity_paused = True
@@ -4850,13 +4872,12 @@ class TradingEngine:
                         stats["processed"] += 1
                         processed_total += 1
                         self._scan_resume_cursor = absolute_index + 1
-                        if self._has_pending_entry_limit():
-                            self._scan_pending_limit_paused = True
-                            pending_limit_paused = True
-                            break
+                        # A newly-created LIMIT reserves one slot but must not
+                        # stop this scan pass. The next symbol re-checks live
+                        # slot usage before it can create another order.
                         if self._has_unprotected_real_position():
                             self._scan_protection_paused = True
-                            pending_limit_paused = True
+                            protection_paused = True
                             break
                     except BinanceRateLimitError as exc:
                         stats["errors"] += 1
@@ -4892,11 +4913,8 @@ class TradingEngine:
                 if interrupted or self._binance_cooldown_remaining() > 0 or self._scan_interrupted_by_cooldown:
                     self._scan_trigger_now = True
                     break
-                if pending_limit_paused:
-                    if self._has_pending_entry_limit():
-                        log.info("[SCAN] paused: open entry LIMIT holds the scanner until fill/cancel/expiry.")
-                    elif self._has_unprotected_real_position():
-                        log.warning("[SCAN] paused: Binance TP/SL are not both confirmed active yet.")
+                if protection_paused:
+                    log.warning("[SCAN] paused: Binance TP/SL are not both confirmed active yet.")
                     break
                 if capacity_reached:
                     break
@@ -4918,7 +4936,7 @@ class TradingEngine:
             elapsed = time.monotonic() - started
             log.info(
                 "[SCAN] cycle %s | signal_tf=M15 ema_tf=H4 | processed=%s/%s | errors=%s | cursor=%s | "
-                "capacity_pause=%s pending_limit_pause=%s protection_pause=%s | duration=%.1fs",
+                "capacity_pause=%s pending_reserved=%s protection_pause=%s | duration=%.1fs",
                 "complete" if completed else "paused", processed_total, len(universe), errors_total,
                 self._scan_resume_cursor, capacity_reached, self._has_pending_entry_limit(),
                 self._has_unprotected_real_position(), elapsed,
@@ -5025,6 +5043,23 @@ class TradingEngine:
     def _has_pending_entry_limit(self) -> bool:
         """True while any local/WS projected entry LIMIT still has open quantity."""
         return any(bool(slot.get("pending")) for slot in self._active_slot_projection().values())
+
+    def _scanner_state_label(self) -> str:
+        """Return the effective scanner state; pending LIMITs reserve slots but never pause scanning."""
+        if self._autostop_triggered:
+            return "LOCKED AUTOSTOP"
+        if not self.scan_enabled:
+            return "WAITING SCHEDULE" if self.scan_schedule_waiting else "OFF"
+        if self._binance_cooldown_remaining() > 0:
+            return "PAUSED — REST COOLDOWN"
+        if self.autostop_percent is not None and self._autostop_data_hold:
+            return "PAUSED — WAITING EQUITY DATA"
+        if self._has_unprotected_real_position():
+            return "PAUSED — TP/SL BINANCE BELUM AKTIF"
+        used_slots = len(self._active_slot_projection())
+        if used_slots >= self.max_active_trades:
+            return "PAUSED — MAX SLOT TERCAPAI"
+        return "ON"
 
     def _has_unprotected_real_position(self) -> bool:
         """Hold new scans while a bot-managed LIVE position lacks confirmed TP+SL."""
@@ -5596,8 +5631,12 @@ class TradingEngine:
                 if candidate_risk > 0:
                     risk_decimal = candidate_risk
             if risk_decimal is None:
-                trade.protection_state = "INVALID_RISK"
-                trade.protection_error = "Actual fill price and M15 Supertrend SL do not form a positive risk distance."
+                trade.protection_state = "WAITING_FOR_POSITION" if trade.real_enabled else "INVALID_RISK"
+                trade.protection_error = (
+                    "Menunggu konfirmasi exposure sebelum menilai SL."
+                    if trade.real_enabled else
+                    "Actual fill price and M15 Supertrend SL do not form a positive risk distance."
+                )
             else:
                 trade.initial_risk = risk_decimal
                 trade.stop_loss = stop
@@ -5617,14 +5656,10 @@ class TradingEngine:
                                  take_profit=decimal_to_str(trade.take_profit), rr_target="1:3",
                                  protection_locked=protection_locked)
         await self._save_active_state()
-        if trade.real_enabled and not protection_locked and risk_decimal is None:
-            await self.reply(
-                f"🚨 PROTEKSI BELUM BISA DIPASANG • {trade.pair} {trade.direction}\n"
-                f"Fill: {fmt_price(trade.fill_price)} • Supertrend SL: {fmt_price(stop)}\n"
-                "Harga fill tidak lagi membentuk jarak risiko valid terhadap SL. Posisi LIVE perlu segera diperiksa."
-            )
-        if trade.real_enabled and not protection_locked and risk_decimal is not None:
+        if trade.real_enabled and not protection_locked:
             try:
+                # The protection routine first verifies the exact exchange side.
+                # It reports INVALID_RISK only when that exposure is still live.
                 await self._ensure_real_protection(trade)
             except BinanceRateLimitError as exc:
                 trade.protection_state = "WAIT_API_COOLDOWN"
@@ -5645,8 +5680,26 @@ class TradingEngine:
                  trade.pair, trade.direction, trade.fill_price, source,
                  trade.stop_loss, trade.take_profit, trade.protection_state, protection_locked)
 
-    async def _ensure_real_protection(self, trade: Trade) -> None:
-        """Install closePosition SL/TP once; confirmed protection is left untouched."""
+    async def _ensure_real_protection(self, trade: Trade, *, position_confirmed: bool = False) -> None:
+        """Serialize protection installation per trade to prevent duplicate Algo POSTs."""
+        key = trade.trade_id
+        lock = self._protection_locks.setdefault(key, asyncio.Lock())
+        self._protection_lock_refs[key] = self._protection_lock_refs.get(key, 0) + 1
+        try:
+            async with lock:
+                return await self._ensure_real_protection_locked(
+                    trade, position_confirmed=position_confirmed
+                )
+        finally:
+            remaining = self._protection_lock_refs.get(key, 1) - 1
+            if remaining <= 0 and not lock.locked():
+                self._protection_lock_refs.pop(key, None)
+                self._protection_locks.pop(key, None)
+            else:
+                self._protection_lock_refs[key] = remaining
+
+    async def _ensure_real_protection_locked(self, trade: Trade, *, position_confirmed: bool = False) -> None:
+        """Install closePosition SL/TP only after Binance confirms this side is open."""
         if not trade.real_enabled or trade.status != "FILLED" or trade.exchange_adopted:
             return
         # User-requested behavior: after BOTH protection orders are confirmed,
@@ -5658,12 +5711,39 @@ class TradingEngine:
             return
         if self._binance_cooldown_remaining() > 0:
             raise _local_rate_limit_error("/fapi/v1/algoOrder")
+        # A fill event can arrive before the corresponding ACCOUNT_UPDATE, or
+        # after the position has already closed. Never POST an Algo SL/TP until
+        # Binance confirms the exact LONG/SHORT side still has non-zero exposure.
+        if not position_confirmed:
+            live_position = await self.real.get_position(trade.pair, trade.entry_side)
+            # A WS close can win the race while get_position is in flight.
+            # Never continue into SL/TP validation or POST once that happened.
+            if trade.status != "FILLED":
+                return
+            if live_position is None:
+                trade.protection_state = "WAITING_FOR_POSITION"
+                trade.protection_error = "Menunggu konfirmasi exposure Binance; Algo SL/TP belum dikirim."
+                await self._save_active_state()
+                log.info("[PROTECTION] %s %s waits for confirmed Binance exposure; no Algo POST sent.",
+                         trade.pair, trade.direction)
+                return
         if trade.fill_price is None or trade.reference_sl is None:
-            raise RuntimeError("Fill/SL reference belum tersedia untuk proteksi.")
-        risk_decimal = (trade.fill_price - trade.reference_sl if trade.direction == "LONG"
-                        else trade.reference_sl - trade.fill_price)
-        if risk_decimal <= 0:
-            raise RuntimeError("SL Supertrend tidak berada di sisi protektif dari harga fill; proteksi ditolak.")
+            risk_decimal = None
+        else:
+            risk_decimal = (trade.fill_price - trade.reference_sl if trade.direction == "LONG"
+                            else trade.reference_sl - trade.fill_price)
+        if risk_decimal is None or risk_decimal <= 0:
+            was_invalid = trade.protection_state == "INVALID_RISK"
+            trade.protection_state = "INVALID_RISK"
+            trade.protection_error = "Supertrend SL tidak tersedia atau tidak lagi membentuk jarak risiko positif dari fill."
+            await self._save_active_state()
+            if not was_invalid and trade.status == "FILLED":
+                await self.reply(
+                    f"🚨 PROTEKSI BELUM BISA DIPASANG • {trade.pair} {trade.direction}\n"
+                    f"Fill: {fmt_price(trade.fill_price)} • Supertrend SL: {fmt_price(trade.reference_sl)}\n"
+                    "Binance mengonfirmasi posisi masih terbuka, tetapi SL tidak membentuk jarak risiko valid. Periksa posisi LIVE."
+                )
+            return
         trade.initial_risk = risk_decimal
         meta = self.symbols.get(trade.pair)
         if meta is None:
@@ -5791,15 +5871,33 @@ class TradingEngine:
                 raise RuntimeError(trade.protection_error)
             if getattr(trade, ambiguous_attr):
                 raise RuntimeError(f"{kind} Algo Order berstatus submit ambiguous; tidak akan POST ulang.")
+            if trade.status != "FILLED":
+                return None, "TRADE_CLOSED"
+            # Binance trigger source follows the user's requested TP/SL split:
+            # TP triggers from Mark Price; SL triggers from Last/Contract Price.
+            working_type = "MARK_PRICE" if kind == "TP" else "CONTRACT_PRICE"
             try:
                 response = await self.real.place_algo_order(
                     symbol=trade.pair, side=close_side, order_type=order_type,
                     trigger_price=trigger, position_side=trade.position_side or "BOTH",
-                    client_algo_id=client_id,
+                    client_algo_id=client_id, working_type=working_type,
                 )
             except BinanceRateLimitError:
                 raise
             except BinanceAPIError as submit_exc:
+                if submit_exc.code == -4509:
+                    # Binance rejects closePosition/TIF when that direction no
+                    # longer has exposure. Re-check the exact side; if flat, treat
+                    # this as a close race, not as a failed protection to alert/retry.
+                    live_position = await self.real.get_position(trade.pair, trade.entry_side)
+                    if live_position is None:
+                        setattr(trade, status_attr, "NOT_PLACED")
+                        trade.protection_state = "WAITING_FOR_POSITION"
+                        trade.protection_error = "Binance confirmed Algo close order has no matching live exposure; awaiting close reconciliation."
+                        await self._save_active_state()
+                        log.info("[PROTECTION] %s %s Algo %s skipped after -4509; matching side is flat.",
+                                 trade.pair, trade.direction, kind)
+                        return getattr(trade, id_attr), "NO_POSITION"
                 if submit_exc.status_code is not None and 400 <= submit_exc.status_code < 500 and submit_exc.status_code not in {418, 429}:
                     setattr(trade, status_attr, "REJECTED")
                     trade.protection_state = "ERROR_REJECTED"
@@ -5842,15 +5940,25 @@ class TradingEngine:
             setattr(trade, ambiguous_attr, False)
             status = str(response.get("algoStatus") or "NEW").upper()
             setattr(trade, status_attr, status)
+            if trade.status != "FILLED":
+                # The position closed while the Algo POST was in flight. Best-effort
+                # cleanup prevents a late protective order from being orphaned.
+                await self._save_active_state()
+                await self._cancel_real_protections(trade)
+                return getattr(trade, id_attr), "TRADE_CLOSED"
             return getattr(trade, id_attr), status
 
         # SL first: protection is never intentionally left with TP only.
         if trade.sl_algo_id is None or trade.sl_algo_status.upper() in {"CANCELED", "FINISHED", "REJECTED", "EXPIRED", "TRIGGERED", "NOT_PLACED"}:
-            await ensure_one("SL", "STOP_MARKET", stop)
+            _sl_id, sl_status = await ensure_one("SL", "STOP_MARKET", stop)
             await self._save_active_state()
+            if sl_status in {"NO_POSITION", "TRADE_CLOSED"}:
+                return
         if trade.tp_algo_id is None or trade.tp_algo_status.upper() in {"CANCELED", "FINISHED", "REJECTED", "EXPIRED", "TRIGGERED", "NOT_PLACED", "REPRICE_REQUIRED"}:
-            await ensure_one("TP", "TAKE_PROFIT_MARKET", target)
+            _tp_id, tp_status = await ensure_one("TP", "TAKE_PROFIT_MARKET", target)
             await self._save_active_state()
+            if tp_status in {"NO_POSITION", "TRADE_CLOSED"}:
+                return
         # Recheck position after submitting closePosition protections; if it's already flat,
         # the ACCOUNT_UPDATE/User WS or next reconciliation will finalize it.
         trade.protection_state = "ACTIVE" if trade.sl_algo_id is not None and trade.tp_algo_id is not None else "PARTIAL"
@@ -5858,13 +5966,16 @@ class TradingEngine:
         await self._record_event("REAL_TP_SL_PROTECTION_ACTIVE", trade,
                                  sl=decimal_to_str(stop), tp=decimal_to_str(target),
                                  sl_algo_id=trade.sl_algo_id, tp_algo_id=trade.tp_algo_id,
-                                 working_type="CONTRACT_PRICE", close_position=True)
+                                 sl_working_type="CONTRACT_PRICE",
+                                 tp_working_type="MARK_PRICE", close_position=True)
         await self._save_active_state()
         if trade.protection_state == "ACTIVE":
             await self.reply(
                 f"🛡️ BINANCE TP/SL AKTIF • {trade.pair} {trade.direction}\n"
                 f"Entry avg: {fmt_price(trade.fill_price)}\nSL Supertrend M15: {fmt_price(trade.stop_loss)}\n"
-                f"TP RR 1:3: {fmt_price(trade.take_profit)}\nMode: closePosition Algo Orders"
+                f"TP RR 1:3: {fmt_price(trade.take_profit)}\n"
+                f"Trigger: SL Last Price / TP Mark Price\n"
+                "Mode: closePosition Algo Orders"
             )
 
     async def _cancel_real_protections(self, trade: Trade, *, keep_triggered: str | None = None) -> bool:
@@ -6098,6 +6209,21 @@ class TradingEngine:
         await self._finalize_trade(trade, "CLOSED", exit_price, reason)
 
     async def _finalize_trade(self, trade: Trade, result: str, exit_price: Decimal | None, reason: str) -> None:
+        # WebSocket flat events and REST reconciliation can report the same close
+        # within one event-loop turn. The first caller marks the object terminal
+        # before any await; every later caller becomes a no-op.
+        trade_id = str(trade.trade_id or "")
+        if trade_id and trade_id in self._finalized_trade_ids:
+            log.debug("[TRADE] duplicate finalization ignored by trade_id | %s %s id=%s reason=%s",
+                      trade.pair, trade.direction, trade_id, reason)
+            return
+        if trade.status not in {"PENDING", "FILLED"}:
+            log.debug("[TRADE] duplicate finalization ignored | %s %s status=%s reason=%s",
+                      trade.pair, trade.direction, trade.status, reason)
+            return
+        if trade_id:
+            # Set before the first await: every WS/REST route now observes terminal.
+            self._finalized_trade_ids.add(trade_id)
         trade.status = "CLOSED" if result == "CLOSED" else result
         trade.closed_at = now_utc()
         trade.result = result
@@ -6109,14 +6235,33 @@ class TradingEngine:
             trade.pnl_usdt = move * (trade.quantity or Decimal("0"))
             if trade.initial_risk is not None and trade.initial_risk > 0:
                 trade.realized_r = move / trade.initial_risk
+            if trade.real_enabled and trade.pnl_usdt is not None and trade.pnl_usdt.is_finite():
+                self._real_realized_pnl += trade.pnl_usdt
+                self._autostop_dirty = True
         self.active_trades.pop(trade.trade_id, None)
         # The local/exchange ledger must converge immediately after a confirmed
         # terminal order or confirmed flat position; otherwise stale cache rows
         # would reserve /max slots or reappear in /trade.
         self._remove_exchange_order_cache(trade)
         if trade.real_enabled and result == "CLOSED":
-            for position_key in list(self.exchange_positions):
-                if position_key[0] == trade.pair:
+            # Hedge Mode can hold LONG and SHORT on the same symbol. Closing one
+            # ledger must never erase the opposite live exposure from the cache.
+            for position_key, position_row in list(self.exchange_positions.items()):
+                if position_key[0] != trade.pair:
+                    continue
+                cached_side = str(position_key[1] or "BOTH").upper()
+                if trade.position_side in {"LONG", "SHORT"}:
+                    belongs_to_trade = cached_side == trade.position_side
+                else:
+                    raw_amount = position_row.get("_position_amount_decimal", position_row.get("positionAmt", "0")) if isinstance(position_row, dict) else "0"
+                    try:
+                        cached_direction = self._exchange_position_direction(
+                            position_row, raw_amount if isinstance(raw_amount, Decimal) else parse_signed_decimal(str(raw_amount or "0"))
+                        )
+                    except (InvalidOperation, ValueError, TypeError):
+                        cached_direction = None
+                    belongs_to_trade = cached_direction == trade.direction
+                if belongs_to_trade:
                     self.exchange_positions.pop(position_key, None)
             self._refresh_real_position_cache(trade.pair)
         record = trade.to_record()
@@ -6124,8 +6269,13 @@ class TradingEngine:
         await self._record_event("POSITION_CLOSED" if result == "CLOSED" else f"ORDER_{result}", trade, reason=reason, exit_price=decimal_to_str(exit_price))
         await self._persist_markdown_trade(record)
         await self._save_active_state()
+        if trade.real_enabled and result == "CLOSED":
+            await self._save_runtime_settings()
+            self._autostop_dirty = False
+            self._autostop_last_persist = time.monotonic()
         await self._sync_ws_symbols()
-        log.info("[TRADE] %s %s %s reason=%s pnl=%s", result, trade.pair, trade.direction, reason, decimal_to_str(trade.pnl_usdt))
+        log.info("[TRADE] %s %s %s reason=%s pnl=%s local_realized=%s", result, trade.pair, trade.direction,
+                 reason, decimal_to_str(trade.pnl_usdt), decimal_to_str(self._real_realized_pnl))
         if result == "CLOSED":
             await self.reply(
                 f"✅ POSITION CLOSED • {trade.pair} {trade.direction}\n"
@@ -6415,37 +6565,18 @@ class TradingEngine:
             return
         if self._binance_cooldown_remaining() > 0:
             return
-        if trade.protection_state == "CANCEL_WAIT_API":
-            remaining_now = await self.real.get_positions(trade.pair)
-            if not remaining_now:
-                keep = "SL" if trade.protection_exit_reason == "STOP_LOSS" else "TP" if trade.protection_exit_reason == "TAKE_PROFIT" else None
-                if await self._cancel_real_protections(trade, keep_triggered=keep):
-                    price = self._current_price(trade.pair) or trade.fill_price or trade.entry
-                    reason = trade.protection_exit_reason or "EXCHANGE_POSITION_FLAT_WS"
-                    await self._finalize_trade(trade, "CLOSED", price, reason)
-                return
-            # Position still exists. Rebuild any protection that had to be canceled
-            # for a manual close that did not reach the exchange.
-            trade.protection_state = "PARTIAL"
-            await self._save_active_state()
-        if trade.pending_cancel_reason == "PROTECTION_EXIT_CANCEL_ENTRY_REMAINDER" and not trade.entry_order_terminal:
-            await self._cancel_real_entry_remainder(trade, "PROTECTION_EXIT_CANCEL_ENTRY_REMAINDER")
-            if trade.status != "FILLED":
-                return
-        if trade.protection_state not in {"ACTIVE", "INVALID_RISK", "ERROR_REJECTED"}:
-            await self._ensure_real_protection(trade)
-        if (not trade.entry_order_terminal and trade.expires_at <= now_utc()
-                and not trade.preserve_gtc_after_cooldown):
-            await self._cancel_real_entry_remainder(trade, trade.pending_cancel_reason or "ENTRY_LIMIT_TIMEOUT_1H")
-            if trade.status != "FILLED":
-                return
+
         if time.monotonic() - trade.last_real_check_monotonic < REAL_RECONCILE_INTERVAL_SECONDS:
             return
         trade.last_real_check_monotonic = time.monotonic()
 
-        # A late/partial GTC preserved during a REST ban is not canceled while
-        # the ban is active. The maintenance loop queues/resumes the timeout cancel
-        # immediately after REST recovers.
+        if trade.pending_cancel_reason == "PROTECTION_EXIT_CANCEL_ENTRY_REMAINDER" and not trade.entry_order_terminal:
+            await self._cancel_real_entry_remainder(trade, "PROTECTION_EXIT_CANCEL_ENTRY_REMAINDER")
+            if trade.status != "FILLED":
+                return
+
+        # When a GTC remainder was deliberately preserved during REST cooldown,
+        # confirm its order state before interpreting a temporarily flat position.
         if trade.preserve_gtc_after_cooldown and not trade.entry_order_terminal:
             if time.monotonic() - trade.last_real_order_status_check >= REAL_PENDING_POLL_SECONDS:
                 trade.last_real_order_status_check = time.monotonic()
@@ -6453,35 +6584,52 @@ class TradingEngine:
                 if trade.status != "FILLED":
                     return
                 if not trade.entry_order_terminal and trade.entry_order_status in {"NEW", "PARTIALLY_FILLED", "UNKNOWN"}:
-                    # It is intentionally still a live GTC. A missing position
-                    # snapshot must not cause a cancel that violates preservation.
                     position = await self.real.get_position(trade.pair, trade.entry_side)
                     if position is None:
                         return
 
+        # Check the exact direction/positionSide before trying to install or repair
+        # protection. The opposite Hedge-Mode side must not keep this trade alive.
         position = await self.real.get_position(trade.pair, trade.entry_side)
         if position is None:
-            # Give the exchange a brief settlement window after a WS fill before
-            # treating a temporarily invisible position as externally closed.
             if trade.filled_at and (now_utc() - trade.filled_at).total_seconds() < REAL_POSITION_SETTLE_SECONDS:
                 return
             if not trade.entry_order_terminal:
                 if trade.preserve_gtc_after_cooldown and trade.pending_cancel_reason != "ENTRY_LIMIT_TIMEOUT_1H":
-                    # A preserved/adopted live GTC is still allowed to fill; do not
-                    # remove it only because the position endpoint is momentarily flat.
                     return
                 await self._cancel_real_entry_remainder(
                     trade, "EXTERNAL_POSITION_MISSING_CANCEL_ENTRY_REMAINDER"
                 )
-            remaining = await self.real.get_positions(trade.pair)
-            if not remaining:
-                price = self._current_price(trade.pair) or trade.fill_price or trade.entry
-                log.warning("[REAL] %s %s exposure hilang di Binance; menutup ledger sebagai external close.", trade.pair, trade.direction)
-                reason = trade.protection_exit_reason or ("TP_SL_EXIT_RECONCILED" if trade.protection_state == "ACTIVE" else "EXTERNAL_CLOSE_RECONCILED")
-                if not await self._cancel_real_protections(trade, keep_triggered=("SL" if reason == "STOP_LOSS" else "TP" if reason == "TAKE_PROFIT" else None)):
-                    trade.protection_exit_reason = reason
+                if trade.status != "FILLED" or not trade.entry_order_terminal:
                     return
-                await self._finalize_trade(trade, "CLOSED", price, reason)
+            close_price = self._current_price(trade.pair) or trade.fill_price or trade.entry
+            log.warning("[REAL] %s %s side exposure flat/missing di Binance; closing matching ledger only.",
+                        trade.pair, trade.direction)
+            reason = trade.protection_exit_reason or (
+                "TP_SL_EXIT_RECONCILED" if trade.protection_state == "ACTIVE" else "EXTERNAL_CLOSE_RECONCILED"
+            )
+            if not await self._cancel_real_protections(
+                trade,
+                keep_triggered=("SL" if reason == "STOP_LOSS" else "TP" if reason == "TAKE_PROFIT" else None),
+            ):
+                trade.protection_exit_reason = reason
+                return
+            await self._finalize_trade(trade, "CLOSED", close_price, reason)
+            return
+
+        # Exposure is confirmed open. A pending cancel handshake may now be reset
+        # to PARTIAL and re-established safely; ACTIVE protection remains untouched.
+        if trade.protection_state == "CANCEL_WAIT_API":
+            trade.protection_state = "PARTIAL"
+            await self._save_active_state()
+        if trade.protection_state not in {"ACTIVE", "INVALID_RISK", "ERROR_REJECTED"}:
+            await self._ensure_real_protection(trade, position_confirmed=True)
+
+        if (not trade.entry_order_terminal and trade.expires_at <= now_utc()
+                and not trade.preserve_gtc_after_cooldown):
+            await self._cancel_real_entry_remainder(trade, trade.pending_cancel_reason or "ENTRY_LIMIT_TIMEOUT_1H")
+            if trade.status != "FILLED":
+                return
 
     async def _reconcile_restored_trades(self) -> None:
         if self._binance_cooldown_remaining() > 0:
@@ -6644,26 +6792,9 @@ class TradingEngine:
                         except Exception:
                             log.exception("[USER WS] start/reconnect ditunda")
 
-                # Refresh the REAL wallet snapshot at a low cadence. Autostop itself
-                # never calls REST and therefore remains live during an IP cooldown.
-                has_real_exposure = self.real_mode or any(
-                    t.real_enabled and t.status in {"PENDING", "FILLED"}
-                    for t in self.active_trades.values()
-                )
-                balance_age = (
-                    time.monotonic() - self.real.last_balance_at
-                    if self.real.last_balance_at is not None else float("inf")
-                )
-                if has_real_exposure and balance_age >= AUTOSTOP_BALANCE_REFRESH_SECONDS:
-                    try:
-                        await self.real.get_futures_balance()
-                        await self._autostop_check(force=True)
-                    except BinanceRateLimitError as exc:
-                        # Cached equity + WebSocket prices continue while REST is held.
-                        self._was_in_binance_cooldown = True
-                        await self._notify_binance_cooldown(exc, source="AUTOSTOP / BALANCE")
-                    except Exception as exc:
-                        log.info("[AUTOSTOP] balance snapshot refresh ditunda; guard tetap armed: %s", exc)
+                # REAL wallet balance is sampled only by explicit /real on.
+                # Thereafter the guard uses its persisted local baseline + realized
+                # PnL ledger + fresh floating PnL from current positions/prices.
 
                 # Commands are FIFO and only one API-dependent command per pass. /real off
                 # remains immediate and can cancel a queued /real on.
@@ -6789,7 +6920,7 @@ class TradingEngine:
         if self._binance_cooldown_remaining() > 0:
             return
         for trade in list(self.active_trades.values()):
-            if trade.real_enabled and trade.status == "FILLED" and trade.protection_state not in {"ACTIVE", "INVALID_RISK", "ERROR_REJECTED", "CANCEL_WAIT_API"}:
+            if trade.real_enabled and trade.status == "FILLED" and trade.protection_state not in {"ACTIVE", "INVALID_RISK", "ERROR_REJECTED", "CANCEL_WAIT_API", "WAITING_FOR_POSITION"}:
                 try:
                     await self._ensure_real_protection(trade)
                 except BinanceRateLimitError:
@@ -7136,6 +7267,9 @@ class TradingEngine:
                 record for record in self.history_records
                 if str(record.get("trade_id") or "") != trade.trade_id
             ]
+            # The exchange has proven that the same original LIMIT is live again;
+            # allow its recovered lifecycle to terminate once more.
+            self._finalized_trade_ids.discard(trade.trade_id)
             log.warning(
                 "[REAL/RECOVERY] Binance confirms live LIMIT; restored local trade %s %s %s from %s to PENDING | clientId=%s orderId=%s",
                 trade.pair, trade.direction, trade.trade_id, previous_status,
@@ -7406,7 +7540,10 @@ class TradingEngine:
             if old_direction is None:
                 matching = [t for t in self.active_trades.values()
                             if t.real_enabled and t.status == "FILLED" and t.pair == symbol
-                            and (t.position_side in {None, "BOTH", side} or side == "BOTH")]
+                            and (
+                                (side in {"LONG", "SHORT"} and t.direction == side)
+                                or (side == "BOTH" and t.position_side in {None, "BOTH"})
+                            )]
                 if len(matching) == 1:
                     old_direction = matching[0].direction
             if old_direction:
@@ -7707,6 +7844,41 @@ class TradingEngine:
                 self._live_signal_seen.pop(key, None)
 
     # ------------------------- Telegram commands -------------------------
+    def _initialize_real_equity_accounting(self) -> tuple[str, Decimal | None]:
+        """Seed or reconcile persisted local REAL wallet accounting from /real on.
+
+        The exchange wallet snapshot excludes unrealized PnL. If this is a restart
+        with an existing baseline, any wallet delta accumulated while the process
+        was offline is folded into the local realized/adjustment ledger rather than
+        resetting the high-water mark.
+        """
+        row = self.real.cached_usdt_balance()
+        if not isinstance(row, dict):
+            return "missing", None
+        try:
+            wallet = Decimal(str(row.get("balance")))
+        except (InvalidOperation, TypeError, ValueError):
+            return "invalid", None
+        if not wallet.is_finite() or wallet <= 0:
+            return "invalid", None
+        if self._real_equity_baseline is None:
+            self._real_equity_baseline = wallet
+            self._real_realized_pnl = Decimal("0")
+            # Previous peak may come from the old exchange-snapshot formula.
+            # Establish a clean first REAL peak from the new local accounting basis.
+            if not self._autostop_triggered:
+                self._equity_peak = None
+                self._equity_last = None
+            self._autostop_source = "REAL"
+            self._autostop_data_hold = True
+            return "initialized", wallet
+        expected_wallet = self._real_equity_baseline + self._real_realized_pnl
+        delta = wallet - expected_wallet
+        if delta.is_finite() and abs(delta) > Decimal("0.00000001"):
+            self._real_realized_pnl += delta
+            return "reconciled", delta
+        return "unchanged", Decimal("0")
+
     async def _set_real(self, command: str) -> None:
         arg = command.split(maxsplit=1)[1].strip().lower() if len(command.split(maxsplit=1)) > 1 else ""
         if arg == "on":
@@ -7723,20 +7895,31 @@ class TradingEngine:
             all_open_orders = await self.real.get_open_orders(None)
             await self.real.get_account_config()
             await self.real.get_futures_balance()
+            balance_action, balance_delta = self._initialize_real_equity_accounting()
             adopted_positions, adopted_orders = await self._adopt_exchange_snapshot(
                 account_snapshot, all_open_orders, source="REAL_ON_ACCOUNT_SNAPSHOT"
             )
+            self._real_account_snapshot_ready = True
             # Private stream becomes the live source of incremental order/position
             # updates. No REST request is made by /trade after this point.
             await self.user_ws.start()
             self._last_user_ws_reconnect_count = self.user_ws.reconnect_count
             self.real_mode = True
+            if balance_action in {"initialized", "reconciled"}:
+                await self._save_runtime_settings()
             if self.autostop_percent is not None and self._equity_peak is None:
                 await self._autostop_check(force=True)
+            balance_note = (
+                f"\nLocal equity baseline: {fmt_num(self._real_equity_baseline, 4)} USDT · "
+                f"ledger adjustment: {fmt_num(self._real_realized_pnl, 4)} USDT ({balance_action})."
+                if self._real_equity_baseline is not None else
+                "\nLocal equity baseline belum valid; Account Guard akan menunggu snapshot balance yang benar."
+            )
             await self.reply(
                 "🟢 REAL ON. Order baru akan dikirim ke Binance USD-M Futures LIVE.\n"
                 f"Live snapshot : {adopted_positions} posisi · {adopted_orders} open order dimuat dari Binance (tanpa restore file lama).\n"
-                f"Private User Data WS: {self.user_ws.status}. ORDER_TRADE_UPDATE + ACCOUNT_UPDATE menjaga /trade realtime; /trade tidak memanggil REST.\n"
+                f"Private User Data WS: {self.user_ws.status}. ORDER_TRADE_UPDATE + ACCOUNT_UPDATE menjaga /trade realtime; /trade tidak memanggil REST."
+                f"{balance_note}\n"
                 "Posisi/order yang sudah ada tetap dikelola walaupun /real off."
             )
         elif arg == "off":
@@ -7878,24 +8061,14 @@ class TradingEngine:
             slots = self._active_slot_projection()
             pending = sum(1 for item in slots.values() if item.get("pending"))
             filled = sum(1 for item in slots.values() if item.get("filled"))
-            if self._autostop_triggered:
-                state = "LOCKED AUTOSTOP"
-            elif not self.scan_enabled:
-                state = "WAITING SCHEDULE" if self.scan_schedule_waiting else "OFF"
-            elif self._has_pending_entry_limit():
-                state = "PAUSED — ENTRY LIMIT MASIH TERBUKA"
-            elif self._has_unprotected_real_position():
-                state = "PAUSED — TP/SL BINANCE BELUM AKTIF"
-            elif len(slots) >= self.max_active_trades:
-                state = "PAUSED — MAX SLOT TERCAPAI"
-            else:
-                state = "ON"
+            state = self._scanner_state_label()
             await self.reply(
                 "VOLUMATIC SCAN STATUS\n\n"
                 f"State: {state}\n"
                 f"Signal: M15 Volumatic + H4 EMA + M15 Supertrend\n"
                 f"Pending entry LIMIT: {pending}\nFilled positions: {filled}\n"
                 f"Slots: {len(slots)}/{self.max_active_trades}\n"
+                "Rule: pending LIMIT memakai slot, bukan alasan pause scanner.\n"
                 f"Schedule: {', '.join(self.scan_schedule_slots) if self.scan_schedule_slots else '-'}"
             )
             return
@@ -7913,7 +8086,7 @@ class TradingEngine:
                     lines.append(f"{number}. {hhmm} WIB{selected}")
                 lines += [
                     "──────────────────────────────────",
-                    f"SCANNER  : {'PAUSED (LIMIT)' if self.scan_enabled and self._has_pending_entry_limit() else ('PAUSED (TP/SL)' if self.scan_enabled and self._has_unprotected_real_position() else ('ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')))}",
+                    f"SCANNER  : {self._scanner_state_label()}",
                     f"SELECTED : {', '.join(self.scan_schedule_slots) if self.scan_schedule_slots else '-'}",
                     "PILIH    : /scan schedule 1,3,6",
                     "CANCEL   : /scan schedule off",
@@ -8457,6 +8630,8 @@ class TradingEngine:
         """
         if self.real_mode:
             return "REAL"
+        if self._real_equity_baseline is not None and self._autostop_source == "REAL":
+            return "REAL"
         if any(
             trade.real_enabled and trade.status in {"PENDING", "FILLED"}
             for trade in self.active_trades.values()
@@ -8490,19 +8665,15 @@ class TradingEngine:
         source = self._autostop_source_name()
         equity: Decimal
         if source == "REAL":
-            balance_row = self.real.cached_usdt_balance()
-            balance_at = self.real.last_balance_at
-            if not isinstance(balance_row, dict) or balance_at is None:
+            if (not self._real_account_snapshot_ready
+                    or self._real_equity_baseline is None
+                    or not self._real_equity_baseline.is_finite()):
                 return None
-            if time.monotonic() - float(balance_at) > BALANCE_STALE_SECONDS:
+            # The baseline is the one-time Futures wallet balance sampled by /real on.
+            # Closed bot-trade PnL is appended exactly once by _finalize_trade.
+            equity = self._real_equity_baseline + self._real_realized_pnl
+            if not equity.is_finite() or equity <= 0:
                 return None
-            try:
-                wallet_balance = Decimal(str(balance_row.get("balance")))
-            except (InvalidOperation, TypeError, ValueError):
-                return None
-            if not wallet_balance.is_finite() or wallet_balance < 0:
-                return None
-            equity = wallet_balance
             represented: set[tuple[str, str]] = set()
 
             for position in self.exchange_positions.values():
@@ -8625,39 +8796,43 @@ class TradingEngine:
         equity = self._autostop_equity()
         if equity is None or not equity.is_finite() or equity <= 0:
             self._autostop_data_hold = True
-            if now_mono - self._autostop_missing_price_notice_at >= 300.0:
-                self._autostop_missing_price_notice_at = now_mono
+            if not self._autostop_wait_notice_sent:
+                self._autostop_wait_notice_sent = True
                 source = self._autostop_source_name()
-                if source == "REAL" and self.real.cached_usdt_balance() is None:
-                    detail = "wallet balance belum tersedia dari REST atau ACCOUNT_UPDATE"
+                if source == "REAL" and self._real_equity_baseline is None:
+                    detail = "baseline wallet belum tersedia; gunakan /real on untuk mengambil snapshot awal"
                 else:
                     missing = [
                         t.pair for t in self.active_trades.values()
                         if t.status == "FILLED" and t.real_enabled == (source == "REAL")
                         and (self.prices.get(t.pair) is None or not self.prices[t.pair].live)
                     ]
-                    detail = "mark price belum fresh: " + ", ".join(missing[:6]) if missing else "snapshot equity belum lengkap"
-                log.info("[AUTOSTOP] snapshot WAIT; guard remains ARMED | source=%s | %s", source, detail)
+                    detail = "harga live belum fresh: " + ", ".join(missing[:6]) if missing else "equity lokal belum lengkap"
+                log.info("[AUTOSTOP] snapshot WAIT; one notice until data recovers | source=%s | %s", source, detail)
                 await self.reply(
                     "╔══ ACCOUNT GUARD / SNAPSHOT ══╗\n"
                     "STATE   : ARMED · WAITING DATA\n"
                     f"SOURCE  : {source}\n"
                     f"DETAIL  : {detail}\n"
-                    "ACTION  : tidak mengubah peak/floor dan tidak membuka entry baru dari guard\n"
-                    "GUARD   : tetap aktif; evaluasi dilanjutkan otomatis ketika data fresh"
+                    "ACTION  : peak/floor tidak diubah; entry baru tetap ditahan\n"
+                    "GUARD   : tetap aktif; pesan berikutnya hanya saat data pulih"
                 )
             return
 
         if self._autostop_data_hold:
             self._autostop_data_hold = False
             self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
-            await self.reply(
-                "╔══ ACCOUNT GUARD / DATA RESTORED ══╗\n"
-                "STATE   : ARMED · EQUITY FRESH\n"
-                "ACTION  : pemantauan drawdown aktif kembali\n"
-                f"SCANNER : {'RESUME QUEUED' if self._scan_trigger_now else 'UNCHANGED'}"
-            )
-            log.info("[AUTOSTOP] equity snapshot fresh; entry scanner hold released.")
+            # At most one WAITING and one RESTORED notice per engine session.
+            # Repeated brief WS price gaps no longer create Telegram spam.
+            if self._autostop_wait_notice_sent and not self._autostop_restore_notice_sent:
+                await self.reply(
+                    "╔══ ACCOUNT GUARD / DATA RESTORED ══╗\n"
+                    "STATE   : ARMED · EQUITY FRESH\n"
+                    "ACTION  : pemantauan drawdown aktif kembali\n"
+                    f"SCANNER : {'RESUME QUEUED' if self._scan_trigger_now else 'UNCHANGED'}"
+                )
+                self._autostop_restore_notice_sent = True
+            log.info("[AUTOSTOP] local equity fresh; entry scanner hold released.")
 
         current_source = self._autostop_source_name()
         source_changed = self._autostop_source is not None and self._autostop_source != current_source
@@ -8728,6 +8903,8 @@ class TradingEngine:
         arg = parts[1].lower()
         if arg == "off":
             self.autostop_percent = None
+            self._autostop_wait_notice_sent = False
+            self._autostop_restore_notice_sent = False
             self._autostop_data_hold = False
             self._autostop_triggered = False
             self._equity_peak = None
@@ -8742,6 +8919,8 @@ class TradingEngine:
             return
 
         if arg == "reset":
+            self._autostop_wait_notice_sent = False
+            self._autostop_restore_notice_sent = False
             equity = self._autostop_equity()
             self._equity_peak = equity if equity is not None and equity > 0 else None
             self._equity_last = equity if equity is not None and equity > 0 else None
@@ -8768,6 +8947,9 @@ class TradingEngine:
 
         was_off = self.autostop_percent is None
         self.autostop_percent = value
+        if was_off:
+            self._autostop_wait_notice_sent = False
+            self._autostop_restore_notice_sent = False
         if was_off or self._autostop_triggered or self._equity_peak is None:
             equity = self._autostop_equity()
             self._equity_peak = equity if equity is not None and equity > 0 else None
@@ -8883,7 +9065,7 @@ class TradingEngine:
             f"AUTOSTOP     {guard_state}",
             f"EQUITY       {fmt_num(self._equity_last, 4) if self._equity_last is not None else '—'} USDT",
             f"PEAK / FLOOR {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '—'} / {fmt_num(self._autostop_floor(), 4) if self._autostop_floor() is not None else '—'} USDT",
-            f"SCANNER      {'LOCKED' if self._autostop_triggered else ('PAUSED LIMIT' if self.scan_enabled and self._has_pending_entry_limit() else ('PAUSED TP/SL' if self.scan_enabled and self._has_unprotected_real_position() else ('ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF'))))}",
+            f"SCANNER      {self._scanner_state_label()}",
             f"SCAN SCHEDULE {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}",
             "────────────────────────────────",
             "PnL belum termasuk seluruh fee/funding aktual. R = jarak entry aktual ke SL Supertrend M15; TP = 3R.",
