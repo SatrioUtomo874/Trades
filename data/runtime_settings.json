@@ -16,12 +16,19 @@
   "autostop_triggered": false,
   "autostop_source": null,
   "last_processed_candles": {
-    "M15:0GUSDT": 1794039300000
+    "M15:0GUSDT": 1794039300000,
+    "M15:1000000MOGUSDT": 1794039300000,
+    "M15:1000BONKUSDT": 1794039300000,
+    "M15:1000CATUSDT": 1794039300000,
+    "M15:1000CHEEMSUSDT": 1794039300000,
+    "M15:1000FLOKIUSDT": 1794039300000,
+    "M15:1000LUNCUSDT": 1794039300000,
+    "M15:1000PEPEUSDT": 1794039300000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 1,
+  "scan_resume_cursor": 8,
   "scan_resume_boundary_ms": 1794039300000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-07T08:27:21.315648+00:00"
+  "updated_at": "2026-11-07T08:27:53.488487+00:00"
 }
