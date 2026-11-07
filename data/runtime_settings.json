@@ -2,7 +2,10 @@
   "strategy": "VOLUMATIC_TREND",
   "timeframe": "M15",
   "trend_length": 100,
-  "ema_filter_length": 100,
+  "ema_filter_length": [
+    9,
+    21
+  ],
   "max_active_trades": 6,
   "margin_usdt": "0.55",
   "leverage": 10,
@@ -13,5 +16,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-07T13:12:47.408625+00:00"
+  "updated_at": "2026-11-07T13:12:50.032618+00:00"
 }
