@@ -10,11 +10,13 @@
   "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": false,
-  "last_processed_candles": {},
+  "last_processed_candles": {
+    "M15:FHEUSDT": 1794060000000
+  },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 0,
+  "scan_resume_cursor": 186,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-07T14:08:25.738195+00:00"
+  "updated_at": "2026-11-07T14:08:49.676309+00:00"
 }
