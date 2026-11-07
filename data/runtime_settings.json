@@ -10,11 +10,11 @@
   "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": false,
-  "autostop_percent": null,
-  "autostop_peak_equity": null,
-  "autostop_last_equity": null,
+  "autostop_percent": "55",
+  "autostop_peak_equity": "8.5280156646",
+  "autostop_last_equity": "8.5280156646",
   "autostop_triggered": false,
-  "autostop_source": null,
+  "autostop_source": "REAL",
   "last_processed_candles": {
     "M15:0GUSDT": 1794041100000,
     "M15:1000000MOGUSDT": 1794041100000,
@@ -198,5 +198,5 @@
   "scan_resume_cursor": 141,
   "scan_resume_boundary_ms": 1794041100000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-07T09:14:35.206271+00:00"
+  "updated_at": "2026-11-07T09:26:09.744738+00:00"
 }
