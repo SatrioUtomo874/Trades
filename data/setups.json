@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T14:05:27.198405+00:00",
+  "updated_at": "2026-11-07T14:05:31.786863+00:00",
   "active_trades": [
     {
       "trade_id": "ASRUSDT-20261107-210102-28ECDA",
@@ -217,14 +217,14 @@
       "target_notional": "5.08473",
       "actual_notional": "5.08473",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_PENDING",
       "position_side": "BOTH",
-      "entry_order_id": null,
+      "entry_order_id": 1238679834,
       "entry_client_order_id": "VT3497d9c000be9e918010b7796a3b",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": null,
-      "entry_order_status": "UNKNOWN",
+      "entry_executed_qty": "0",
+      "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
       "last_ws_event_key": null,
