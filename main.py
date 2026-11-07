@@ -133,6 +133,7 @@ BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS = 60
 BINANCE_BAN_FALLBACK_SECONDS = 120
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_RECONCILE_INTERVAL_SECONDS = 20.0
+REAL_POSITION_SETTLE_SECONDS = 15.0  # grace window after a WebSocket fill before REST position reconciliation
 POSITION_CACHE_MAX_AGE_SECONDS = 30.0
 BALANCE_STALE_SECONDS = 60.0
 WS_RECONNECT_MIN = 2
@@ -3144,30 +3145,10 @@ class BinanceUserDataWebSocket:
         self.last_keepalive_monotonic = time.monotonic()
         log.info("[USER WS] listenKey renewed")
 
-    async def _handle_market_event(self, data: dict[str, Any]) -> None:
-        event_type = str(data.get("e") or "")
-        if event_type not in {"aggTrade", "markPriceUpdate"}:
-            return
-        symbol = normalize_symbol(str(data.get("s") or ""))
-        price_raw = str(data.get("p") or "")
-        event_time_ms = int(data.get("E") or data.get("T") or int(time.time() * 1000))
-        try:
-            aggregate_trade_id = int(data.get("a")) if event_type == "aggTrade" else -1
-        except (TypeError, ValueError):
-            aggregate_trade_id = -1
-        if not symbol or not price_raw:
-            return
-        event_key = (event_time_ms, aggregate_trade_id)
-        last_key = self._last_market_event_key.get(symbol)
-        if last_key is not None and event_key <= last_key:
-            return
-        self._last_market_event_key[symbol] = event_key
-        try:
-            price = parse_decimal(price_raw)
-        except ValueError:
-            log.warning("Harga WebSocket tidak valid: %s", price_raw)
-            return
-        await self.on_price(symbol, price, event_time_ms, aggregate_trade_id)
+    # The private stream carries only ORDER_TRADE_UPDATE / ACCOUNT_UPDATE /
+    # ALGO_UPDATE events. Market ticks are handled exclusively by the public
+    # BinanceWebSocket class; keeping a duplicate market handler here would
+    # reference callbacks/state that this private-stream class does not own.
 
     async def _run(self) -> None:
         backoff = WS_RECONNECT_MIN
@@ -4463,11 +4444,6 @@ class TradingEngine:
             self.rest._session.close()
         except Exception:
             pass
-        try:
-            self.real._session.close()
-        except Exception:
-            pass
-
         self.active_trades.clear()
         self.prices.clear()
         self._live_signal_candles.clear()
@@ -6603,8 +6579,11 @@ class TradingEngine:
                 await self._notify_binance_cooldown(exc, source="MAINTENANCE")
                 log.info("[MAINTENANCE] REST maintenance paused by shared rate governor.")
                 await asyncio.sleep(3.0)
-            except Exception:
-                log.exception("[MAINTENANCE] loop error")
+            except Exception as exc:
+                # Include the exception message in the Telegram-forwarded log
+                # record so a future maintenance failure is diagnosable without
+                # SSH access; the full traceback remains in Render logs.
+                log.exception("[MAINTENANCE] loop error: %s", exc)
                 await asyncio.sleep(3)
 
     def _kline_history_limit(self, trend_length: int | None = None) -> int:
@@ -8195,6 +8174,172 @@ class TradingEngine:
             await self.reply("Tidak ada pending order atau posisi aktif.")
             return
         await self.reply("\n\n".join(lines) + "\n\nSL: M15 Supertrend • TP: RR 1:3 • REAL: Binance closePosition Algo Orders")
+
+    def _autostop_source_name(self) -> str:
+        """Select the equity account the guard must monitor.
+
+        Existing REAL exposure remains REAL even after `/real off`; PAPER is
+        used only when no live REAL entry mode or exchange position is present.
+        """
+        if self.real_mode:
+            return "REAL"
+        if any(
+            trade.real_enabled and trade.status in {"PENDING", "FILLED"}
+            for trade in self.active_trades.values()
+        ):
+            return "REAL"
+        for position in self.exchange_positions.values():
+            if not isinstance(position, dict):
+                continue
+            raw_amount = position.get("_position_amount_decimal", position.get("positionAmt", "0"))
+            try:
+                if parse_signed_decimal(str(raw_amount or "0")) != 0:
+                    return "REAL"
+            except (InvalidOperation, ValueError, TypeError):
+                # An unreadable non-empty exchange position must not silently
+                # switch the guard to PAPER while live risk may still exist.
+                if raw_amount not in (None, "", "0", 0):
+                    return "REAL"
+        return "PAPER"
+
+    def _autostop_equity(self) -> Decimal | None:
+        """Return current account equity from cached data only; never calls REST.
+
+        REAL equity = cached USDT wallet balance + unrealized PnL recomputed
+        from fresh WebSocket prices for every known exchange position. If an
+        exposed position cannot be priced, return None so the scanner remains
+        held instead of evaluating an incomplete equity snapshot.
+
+        PAPER equity = configured starting balance + closed PAPER PnL + live
+        floating PnL for filled PAPER trades.
+        """
+        source = self._autostop_source_name()
+        equity: Decimal
+        if source == "REAL":
+            balance_row = self.real.cached_usdt_balance()
+            balance_at = self.real.last_balance_at
+            if not isinstance(balance_row, dict) or balance_at is None:
+                return None
+            if time.monotonic() - float(balance_at) > BALANCE_STALE_SECONDS:
+                return None
+            try:
+                wallet_balance = Decimal(str(balance_row.get("balance")))
+            except (InvalidOperation, TypeError, ValueError):
+                return None
+            if not wallet_balance.is_finite() or wallet_balance < 0:
+                return None
+            equity = wallet_balance
+            represented: set[tuple[str, str]] = set()
+
+            for position in self.exchange_positions.values():
+                if not isinstance(position, dict):
+                    continue
+                symbol = normalize_symbol(str(position.get("symbol") or ""))
+                raw_amount = position.get("_position_amount_decimal", position.get("positionAmt", "0"))
+                try:
+                    amount = raw_amount if isinstance(raw_amount, Decimal) else parse_signed_decimal(str(raw_amount or "0"))
+                except (InvalidOperation, TypeError, ValueError):
+                    return None
+                if amount == 0:
+                    continue
+                try:
+                    entry = Decimal(str(position.get("entryPrice") or position.get("ep") or "0"))
+                except (InvalidOperation, TypeError, ValueError):
+                    return None
+                if not symbol or not entry.is_finite() or entry <= 0:
+                    return None
+                mark = self._current_price(symbol)
+                if mark is None or not mark.is_finite() or mark <= 0:
+                    return None
+                # Signed position amount naturally handles LONG (+) and SHORT (-).
+                equity += (mark - entry) * amount
+                represented.add((symbol, "LONG" if amount > 0 else "SHORT"))
+
+            # Bridge the short WS ordering window: a fill can enter the trade
+            # ledger before ACCOUNT_UPDATE has populated exchange_positions.
+            for trade in self.active_trades.values():
+                if not trade.real_enabled or trade.status not in {"PENDING", "FILLED"}:
+                    continue
+                qty = trade.entry_executed_qty or (trade.quantity if trade.status == "FILLED" else None)
+                if qty is None or qty <= 0 or (trade.pair, trade.direction) in represented:
+                    continue
+                entry = trade.fill_price or trade.entry
+                mark = self._current_price(trade.pair)
+                if entry is None or entry <= 0 or mark is None or mark <= 0:
+                    return None
+                signed_qty = qty if trade.direction == "LONG" else -qty
+                equity += (mark - entry) * signed_qty
+
+        else:
+            realized = Decimal("0")
+            for row in self.history_records:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("strategy_name") != volumatic.STRATEGY_NAME or bool(row.get("real_enabled")):
+                    continue
+                try:
+                    pnl = Decimal(str(row.get("pnl_usdt") or "0"))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+                if pnl.is_finite():
+                    realized += pnl
+            equity = SIM_START_BALANCE + realized
+            for trade in self.active_trades.values():
+                if trade.real_enabled or trade.status not in {"PENDING", "FILLED"}:
+                    continue
+                qty = trade.entry_executed_qty or (trade.quantity if trade.status == "FILLED" else None)
+                if qty is None or qty <= 0:
+                    continue
+                entry = trade.fill_price or trade.entry
+                mark = self._current_price(trade.pair)
+                if entry is None or entry <= 0 or mark is None or mark <= 0:
+                    return None
+                signed_qty = qty if trade.direction == "LONG" else -qty
+                equity += (mark - entry) * signed_qty
+
+        return equity if equity.is_finite() and equity > 0 else None
+
+    def _autostop_floor(self) -> Decimal | None:
+        """Calculate the trailing equity floor from the high-water mark."""
+        if self.autostop_percent is None or self._equity_peak is None:
+            return None
+        if not self.autostop_percent.is_finite() or not self._equity_peak.is_finite():
+            return None
+        if self.autostop_percent <= 0 or self._equity_peak <= 0:
+            return None
+        return self._equity_peak * (Decimal("1") - self.autostop_percent / Decimal("100"))
+
+    def _autostop_status_text(self) -> str:
+        """Human-readable `/autostop` status with no exchange/network calls."""
+        if self.autostop_percent is None:
+            state = "OFF"
+            source = "—"
+        elif self._autostop_triggered:
+            state = "TRIGGERED"
+            source = self._autostop_source or self._autostop_source_name()
+        elif self._autostop_data_hold:
+            state = "ARMED · WAITING DATA"
+            source = self._autostop_source or self._autostop_source_name()
+        else:
+            state = f"ARMED · {decimal_to_str(self.autostop_percent)}%"
+            source = self._autostop_source or self._autostop_source_name()
+        floor = self._autostop_floor()
+        scanner = (
+            "LOCKED BY AUTOSTOP" if self._autostop_triggered else
+            "PAUSED — WAITING EQUITY DATA" if self.autostop_percent is not None and self._autostop_data_hold else
+            "ON" if self.scan_enabled else "OFF"
+        )
+        return (
+            "╔══ ACCOUNT DRAWDOWN GUARD ══╗\n"
+            f"STATE   : {state}\n"
+            f"SOURCE  : {source}\n"
+            f"EQUITY  : {fmt_num(self._equity_last, 4) if self._equity_last is not None else '—'} USDT\n"
+            f"PEAK    : {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '—'} USDT\n"
+            f"FLOOR   : {fmt_num(floor, 4) if floor is not None else '—'} USDT\n"
+            f"SCANNER : {scanner}\n\n"
+            "Guard hanya menghentikan entry/scanner baru. Posisi dan order yang sudah ada tidak ditutup otomatis.\n"
+            "Perintah: /autostop <persen> | /autostop reset | /autostop off"
+        )
 
     async def _autostop_check(self, force: bool = False) -> None:
         if self.autostop_percent is None or self._autostop_triggered:
