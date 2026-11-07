@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T08:27:01.893893+00:00",
+  "updated_at": "2026-11-07T08:27:03.727010+00:00",
   "active_trades": [
     {
       "trade_id": "GIGGLEUSDT-20261107-152441-5AEEDF",
@@ -125,7 +125,7 @@
       "result_reason": null,
       "pnl_percent": null,
       "pnl_usdt": null,
-      "initial_risk": "0.0009",
+      "initial_risk": "0.001",
       "realized_r": null,
       "quantity": "37",
       "margin_usdt": "0.555",
