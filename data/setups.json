@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-07T13:18:22.587047+00:00",
+  "updated_at": "2026-11-07T13:18:34.589873+00:00",
   "active_trades": [
     {
       "trade_id": "GIGGLEUSDT-20261107-201233-B1CC49",
@@ -172,9 +172,9 @@
       "tp_algo_id": 4000002063418738,
       "sl_client_algo_id": "VTSLSDT-20261107-201309-9CFE0C",
       "tp_client_algo_id": "VTTPSDT-20261107-201309-9CFE0C",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "sl_algo_status": "FINISHED",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
