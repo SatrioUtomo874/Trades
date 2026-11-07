@@ -1,1 +1,1 @@
-{"updated_at":"2026-11-07T14:05:14.790627+00:00","keys":["CROSSUSDT|M15|1794060000000","CLANKERUSDT|M15|1794060000000","ASRUSDT|M15|1794060000000"],"count":3,"policy":"one_entry_per_symbol_per_m15_signal_candle"}
+{"updated_at":"2026-11-07T14:08:05.892169+00:00","keys":["FHEUSDT|M15|1794060000000","CROSSUSDT|M15|1794060000000","CLANKERUSDT|M15|1794060000000","ASRUSDT|M15|1794060000000"],"count":4,"policy":"one_entry_per_symbol_per_m15_signal_candle"}
