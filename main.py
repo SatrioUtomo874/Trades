@@ -9,7 +9,9 @@ Contract for try.py:
     async def on_stop(context)
 
 The strategy combines confirmed M15 Volumatic bubble flips, the latest
-closed H4 EMA direction filter, and M15 Supertrend SL with fixed 3R TP.
+closed H4 EMA direction filter, and M15 Supertrend SL. TP starts at the
+configurable RR_MIN, then extends to the furthest unmitigated Volume Liquidity
+Trend pool no farther than the configurable RR_MAX.
 Entries are MARKET-on-touch: a signal stores its entry level locally, the
 market WebSocket watches it, and one MARKET order is sent when price touches
 the level; closePosition TP/SL are installed right after the fill.
@@ -71,15 +73,22 @@ if not isinstance(getattr(volumatic, "TIMEFRAME_MS", None), dict) or not {"M15",
     raise RuntimeError("strategy module mismatch: TIMEFRAME_MS M15/H4 tidak tersedia. Pastikan try.py dan STRATEGY_FILE satu versi.")
 if not isinstance(getattr(volumatic, "TIMEFRAME_INTERVALS", None), dict) or not {"M15", "H4"}.issubset(volumatic.TIMEFRAME_INTERVALS):
     raise RuntimeError("strategy module mismatch: TIMEFRAME_INTERVALS M15/H4 tidak tersedia.")
+if str(getattr(volumatic, "STRATEGY_VERSION", "")) != "2.4.0":
+    raise RuntimeError(
+        "strategy module mismatch: dibutuhkan STRATEGY_VERSION 2.4.0 "
+        "dengan RR_MIN/RR_MAX configurable dan Volume Liquidity TP. Sinkronkan main.py dan strategy.py."
+    )
 if (
     not callable(getattr(volumatic, "normalize_trend_length", None))
     or not hasattr(volumatic, "DEFAULT_TREND_LENGTH")
     or int(getattr(volumatic, "DEFAULT_TREND_LENGTH", 0)) != 100
     or not callable(getattr(volumatic, "normalize_supertrend_atr_length", None))
     or not callable(getattr(volumatic, "normalize_supertrend_factor", None))
+    or not callable(getattr(volumatic, "normalize_rr_value", None))
+    or not callable(getattr(volumatic, "normalize_rr_range", None))
 ):
     raise RuntimeError(
-        "strategy module mismatch: API /length atau SuperTrend ATR/Factor tidak tersedia. "
+        "strategy module mismatch: API /length, SuperTrend ATR/Factor, atau RR_MIN/RR_MAX tidak tersedia. "
         "Sinkronkan main.py dan strategy.py dengan versi Volumatic configurable SuperTrend."
     )
 
@@ -194,6 +203,7 @@ KLINE_HISTORY = max(400, min(499, int(os.getenv("VOLUMATIC_KLINE_HISTORY", "499"
 EXCLUDED_SYMBOLS = {
     x.strip().upper() for x in (os.getenv("EXCLUDED_SYMBOLS", "BTCUSDT,ETHUSDT") or "").split(",") if x.strip()
 }
+BTC_EMA_FILTER_SYMBOL = "BTCUSDT"  # TradingView BTCUSDT.P USD-M perpetual reference
 
 REAL_PRIORITY: contextvars.ContextVar[bool] = contextvars.ContextVar("real_priority", default=False)
 REAL_EARLY: contextvars.ContextVar[bool] = contextvars.ContextVar("real_early", default=False)
@@ -344,6 +354,36 @@ def fmt_num(value: Any, digits: int = 2) -> str:
         return str(Decimal(str(value)).quantize(Decimal("1").scaleb(-digits)))
     except (InvalidOperation, ValueError, TypeError):
         return "-" if value is None else str(value)
+
+
+def directional_reward_r(
+    direction: str, entry: Decimal, target: Decimal, risk: Decimal
+) -> Decimal | None:
+    """Calculate the direction-adjusted reward multiple for a candidate TP."""
+    if risk is None or risk <= 0:
+        return None
+    side = Decimal("1") if str(direction).upper() == "LONG" else (
+        Decimal("-1") if str(direction).upper() == "SHORT" else Decimal("0")
+    )
+    if side == 0:
+        return None
+    value = ((target - entry) * side) / risk
+    return value if value.is_finite() else None
+
+
+def is_valid_liquidity_reward_r(
+    value: Decimal | None,
+    rr_min: Decimal = Decimal("3"),
+    rr_max: Decimal = Decimal("4"),
+) -> bool:
+    """A liquidity TP must remain inside the trade's configured RR band."""
+    if value is None:
+        return False
+    try:
+        low, high = Decimal(str(rr_min)), Decimal(str(rr_max))
+        return value.is_finite() and low.is_finite() and high.is_finite() and low <= value <= high
+    except (InvalidOperation, TypeError, ValueError):
+        return False
 
 
 def as_decimal_number(value: Any, field_name: str = "nilai") -> Decimal:
@@ -586,7 +626,12 @@ class Trade:
     expires_at: datetime              # entry order creation time + one-hour TTL
     stop_loss: Decimal | None = None
     take_profit: Decimal | None = None
-    rr_target: Decimal = Decimal("3")
+    rr_target: Decimal = Decimal("3")  # legacy alias; always equals this trade's RR_MIN
+    rr_min: Decimal = Decimal("3")
+    rr_max: Decimal = Decimal("4")
+    take_profit_source: str = "RR_MIN_BASE"
+    take_profit_rr: Decimal = Decimal("3")
+    liquidity_pool_price: Decimal | None = None
     supertrend_atr_length: int = volumatic.SUPERTREND_ATR_LENGTH
     supertrend_factor: float = volumatic.SUPERTREND_FACTOR
     sl_algo_id: int | None = None
@@ -676,6 +721,11 @@ class Trade:
             "reference_sl": decimal_to_str(self.reference_sl),
             "stop_loss": decimal_to_str(self.stop_loss), "take_profit": decimal_to_str(self.take_profit),
             "rr_target": decimal_to_str(self.rr_target),
+            "rr_min": decimal_to_str(self.rr_min),
+            "rr_max": decimal_to_str(self.rr_max),
+            "take_profit_source": self.take_profit_source,
+            "take_profit_rr": decimal_to_str(self.take_profit_rr),
+            "liquidity_pool_price": decimal_to_str(self.liquidity_pool_price),
             "supertrend_atr_length": self.supertrend_atr_length,
             "supertrend_factor": self.supertrend_factor,
             "sl_algo_id": self.sl_algo_id, "tp_algo_id": self.tp_algo_id,
@@ -721,7 +771,7 @@ class Trade:
             "entry_triggered_at": iso_utc(self.entry_triggered_at) if self.entry_triggered_at else None,
             "entry_trigger_price": decimal_to_str(self.entry_trigger_price),
             "strategy_name": volumatic.STRATEGY_NAME, "strategy_version": volumatic.STRATEGY_VERSION,
-            "entry_reason": "Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN, MARKET order when price touches it",
+            "entry_reason": f"Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN; TP baseline {self.rr_min}R with farthest unmitigated Volume Liquidity Trend pool extension up to {self.rr_max}R",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
             ),
@@ -786,7 +836,12 @@ class Trade:
             bubble_price=dec("bubble_price", dec("entry", Decimal("0"))) or Decimal("0"),
             signal_atr=dec("signal_atr"), reference_sl=dec("reference_sl"),
             stop_loss=dec("stop_loss", dec("reference_sl")), take_profit=dec("take_profit"),
-            rr_target=dec("rr_target", Decimal("3")) or Decimal("3"),
+            rr_target=dec("rr_target", dec("rr_min", Decimal("3"))) or Decimal("3"),
+            rr_min=dec("rr_min", dec("rr_target", Decimal("3"))) or Decimal("3"),
+            rr_max=dec("rr_max", Decimal("4")) or Decimal("4"),
+            take_profit_source=str(row.get("take_profit_source") or "RR_MIN_BASE").upper(),
+            take_profit_rr=dec("take_profit_rr", dec("rr_min", Decimal("3"))) or Decimal("3"),
+            liquidity_pool_price=dec("liquidity_pool_price"),
             supertrend_atr_length=saved_supertrend_atr_length,
             supertrend_factor=saved_supertrend_factor,
             sl_algo_id=int(row["sl_algo_id"]) if row.get("sl_algo_id") not in (None, "") else None,
@@ -3690,6 +3745,8 @@ class TradingEngine:
         self.ema_filter_length: int | tuple[int, int] | None = volumatic.DEFAULT_EMA_FILTER_LENGTH
         self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
         self.supertrend_factor = volumatic.SUPERTREND_FACTOR
+        self.rr_min = Decimal(str(volumatic.RR_MIN))
+        self.rr_max = Decimal(str(volumatic.RR_MAX))
         self.scan_enabled = False
         # Session-only delayed scanner activation. It is deliberately not
         # persisted: every fresh /try starts with scanner OFF and no schedule.
@@ -3895,6 +3952,17 @@ class TradingEngine:
             except (TypeError, ValueError):
                 self.supertrend_factor = volumatic.SUPERTREND_FACTOR
                 log.warning("supertrend_factor tidak valid; default %s dipakai.", self.supertrend_factor)
+            try:
+                loaded_rr_min, loaded_rr_max = volumatic.normalize_rr_range(
+                    payload.get("rr_min", volumatic.RR_MIN),
+                    payload.get("rr_max", volumatic.RR_MAX),
+                )
+                self.rr_min = Decimal(str(loaded_rr_min))
+                self.rr_max = Decimal(str(loaded_rr_max))
+            except (TypeError, ValueError):
+                self.rr_min = Decimal(str(volumatic.RR_MIN))
+                self.rr_max = Decimal(str(volumatic.RR_MAX))
+                log.warning("RR_MIN/RR_MAX runtime tidak valid; default RR 1:%s–1:%s dipakai.", self.rr_min, self.rr_max)
             # Scanner arming is intentionally SESSION-ONLY. A fresh /try (or
             # Render restart) must never resume a previous scan automatically.
             # The only way to arm scanning is an explicit Telegram `/scan on`.
@@ -4039,6 +4107,8 @@ class TradingEngine:
                 "ema_filter_length": list(self.ema_filter_length) if isinstance(self.ema_filter_length, tuple) else self.ema_filter_length,
                 "supertrend_atr_length": self.supertrend_atr_length,
                 "supertrend_factor": self.supertrend_factor,
+                "rr_min": decimal_to_str(self.rr_min),
+                "rr_max": decimal_to_str(self.rr_max),
                 # Deliberately do not persist scan_enabled. Scanner requires an
                 # explicit `/scan on` in every fresh engine session.
                 "max_active_trades": self.max_active_trades,
@@ -4656,6 +4726,7 @@ class TradingEngine:
         batch_start: int, batch_end: int, universe_total: int,
         stats: dict[str, Any], elapsed: float, interrupted: bool = False,
         supertrend_atr_length: int, supertrend_factor: float,
+        rr_min: Decimal, rr_max: Decimal,
         configuration_changed: bool = False, pass_start: int | None = None,
     ) -> None:
         """Telegram telemetry for every completed or interrupted logical batch."""
@@ -4686,7 +4757,8 @@ class TradingEngine:
         unknown = int(stats.get("unknown", 0))
         lines = [
             "╔══ VOL / SCAN BATCH REPORT ══╗",
-            f"ENGINE    : M15 VOLUMATIC · H4 EMA · M15 SUPERTREND · LEN{trend_length} · {ema} · ATR{supertrend_atr_length} · FACTOR{supertrend_factor:g}",
+            f"ENGINE    : M15 VOLUMATIC · H4 EMA ALT+BTC · M15 SUPERTREND · LEN{trend_length} · {ema} · ATR{supertrend_atr_length} · FACTOR{supertrend_factor:g}",
+            f"TP RULE   : BASE RR 1:{fmt_num(rr_min, 3)} · LIQUIDITY RANGE 1:{fmt_num(rr_min, 3)}–1:{fmt_num(rr_max, 3)}",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
             f"STATE     : {state}",
@@ -4696,7 +4768,8 @@ class TradingEngine:
             f"ANALYZED  : {processed}  ·  SKIPPED {skipped}",
             f"BUBBLES   : BLUE {blue}  ·  RED {red}  ·  NONE {no_signal}",
             f"EXECUTION : NEW {created}  ·  FILLED {filled}  ·  DEFERRED {deferred}  ·  UNKNOWN {unknown}",
-            f"FILTER    : EMA BLOCK {int(stats.get('ema_blocked', 0))}  ·  MAX BLOCK {int(stats.get('max_blocked', 0))}",
+            f"BTC FILTER: {stats.get('btc_filter_status', 'UNKNOWN')}",
+            f"FILTER    : ALT EMA BLOCK {int(stats.get('ema_blocked', 0))}  ·  BTC EMA BLOCK {int(stats.get('btc_ema_blocked', 0))}  ·  MAX BLOCK {int(stats.get('max_blocked', 0))}",
             f"OTHER     : DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
             f"DURATION  : {elapsed:.1f}s",
         ]
@@ -4844,6 +4917,8 @@ class TradingEngine:
             ema_filter_length = self.ema_filter_length
             supertrend_atr_length = self.supertrend_atr_length
             supertrend_factor = self.supertrend_factor
+            rr_min = self.rr_min
+            rr_max = self.rr_max
             interval_ms = volumatic.TIMEFRAME_MS["M15"]
             universe = await self._universe()
             self._scanner_symbols = set(universe) if self.scan_enabled else set()
@@ -4870,6 +4945,51 @@ class TradingEngine:
                 trend_length, ema_filter_label(ema_filter_length), supertrend_atr_length, supertrend_factor, len(universe),
                 SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
             )
+            # The BTC H4 reference is fetched once per scan cycle, not once per
+            # altcoin. A dual /EMA pair is required because this market-regime
+            # gate is mandatory even when the per-altcoin filter is single/OFF.
+            btc_h4_closed = None
+            btc_filter_status = "NEED /EMA FAST SLOW"
+            if isinstance(ema_filter_length, tuple):
+                try:
+                    btc_h4_closed = await self.rest.get_klines(
+                        BTC_EMA_FILTER_SYMBOL,
+                        "4h",
+                        self._h4_ema_history_limit(ema_filter_length),
+                        volumatic.TIMEFRAME_MS["H4"],
+                        force_refresh=True,
+                    )
+                    if btc_h4_closed is None or len(btc_h4_closed) < 3:
+                        raise RuntimeError("Riwayat H4 BTC tidak cukup.")
+                    required_bars = max(ema_filter_length)
+                    if len(btc_h4_closed) < required_bars:
+                        btc_filter_status = f"WARMUP {len(btc_h4_closed)}/{required_bars} H4"
+                    else:
+                        btc_filter_status = (
+                            f"EMA{ema_filter_length[0]}/EMA{ema_filter_length[1]} DATA READY"
+                        )
+                    log.info(
+                        "[BTC EMA] H4 reference loaded once | symbol=%s | periods=%s/%s | candles=%s | status=%s",
+                        BTC_EMA_FILTER_SYMBOL, ema_filter_length[0], ema_filter_length[1],
+                        len(btc_h4_closed), btc_filter_status,
+                    )
+                except BinanceRateLimitError as exc:
+                    self._scan_interrupted_by_cooldown = True
+                    self._scan_trigger_now = True
+                    await self._notify_binance_cooldown(
+                        exc, source="BTC H4 EMA REFERENCE", symbol=BTC_EMA_FILTER_SYMBOL
+                    )
+                    return
+                except Exception as exc:
+                    btc_h4_closed = None
+                    btc_filter_status = f"DATA UNAVAILABLE: {str(exc)[:90]}"
+                    log.exception("[BTC EMA] mandatory BTC H4 filter data unavailable; all new signals will fail closed.")
+            else:
+                log.warning(
+                    "[BTC EMA] new entries are blocked until /EMA FAST SLOW is configured; current=%s",
+                    ema_filter_label(ema_filter_length),
+                )
+
             await self._expire_due_pending()
             offset = self._scan_resume_cursor
             capacity_reached = False
@@ -4877,7 +4997,12 @@ class TradingEngine:
             while offset < len(universe):
                 if not self._running or not self.scan_enabled:
                     break
-                if self.trend_length != trend_length or self.ema_filter_length != ema_filter_length:
+                if (
+                    self.trend_length != trend_length
+                    or self.ema_filter_length != ema_filter_length
+                    or self.rr_min != rr_min
+                    or self.rr_max != rr_max
+                ):
                     self._scan_resume_cursor = 0
                     self._scan_resume_boundary_ms = 0
                     break
@@ -4898,7 +5023,8 @@ class TradingEngine:
                     "requested": 0, "processed": 0, "already_seen": 0, "warmup": 0,
                     "stale": 0, "no_signal": 0, "blue": 0, "red": 0,
                     "orders": 0, "filled": 0, "deferred": 0, "unknown": 0,
-                    "ema_blocked": 0, "max_blocked": 0, "duplicate": 0,
+                    "ema_blocked": 0, "btc_ema_blocked": 0, "max_blocked": 0, "duplicate": 0,
+                    "btc_filter_status": btc_filter_status,
                     "errors": 0, "details": [],
                 }
                 interrupted = False
@@ -4915,6 +5041,8 @@ class TradingEngine:
                         or self.ema_filter_length != ema_filter_length
                         or self.supertrend_atr_length != supertrend_atr_length
                         or self.supertrend_factor != supertrend_factor
+                        or self.rr_min != rr_min
+                        or self.rr_max != rr_max
                     ):
                         configuration_changed = True
                         self._scan_resume_cursor = 0
@@ -4945,6 +5073,8 @@ class TradingEngine:
                             or self.ema_filter_length != ema_filter_length
                             or self.supertrend_atr_length != supertrend_atr_length
                             or self.supertrend_factor != supertrend_factor
+                            or self.rr_min != rr_min
+                            or self.rr_max != rr_max
                         ):
                             configuration_changed = True
                             self._scan_resume_cursor = 0
@@ -4972,9 +5102,11 @@ class TradingEngine:
                         signal = volumatic.detect_backtest_signal(
                             m15, h4, symbol=symbol, trend_length=trend_length,
                             ema_filter_length=ema_filter_length,
+                            btc_h4_closed=btc_h4_closed,
                             supertrend_atr_length=supertrend_atr_length,
                             supertrend_factor=supertrend_factor,
-                            rr_target=volumatic.RR_TARGET,
+                            rr_min=float(rr_min),
+                            rr_max=float(rr_max),
                         )
                         if signal is None:
                             stats["no_signal"] += 1
@@ -5001,12 +5133,17 @@ class TradingEngine:
                         elif outcome == "ORDER_DEFERRED": stats["deferred"] += 1
                         elif outcome == "ORDER_UNKNOWN": stats["unknown"] += 1
                         elif outcome == "EMA_BLOCKED": stats["ema_blocked"] += 1
+                        elif outcome == "BTC_EMA_BLOCKED": stats["btc_ema_blocked"] += 1
                         elif outcome == "MAX_BLOCKED": stats["max_blocked"] += 1
                         elif outcome in {"DUPLICATE", "IGNORED_TIMEFRAME", "EXCHANGE_SLOT_EXISTS"}: stats["duplicate"] += 1
                         stats["details"].append(
                             f"#{absolute_index+1:04d} {symbol} {bubble}/{direction} M15LEN{trend_length} "
                             f"H4EMA={ema_filter_values_label(ema_filter_length, signal.get('ema_filter_value'), signal.get('ema_filter_slow_value'))} "
-                            f"ENTRY={signal.get('entry_price')} SL={signal.get('stop_loss')} TP={signal.get('take_profit')} {outcome}"[:190]
+                            f"BTCEMA={signal.get('btc_ema_fast_value')}/{signal.get('btc_ema_slow_value')} "
+                            f"BTC={signal.get('btc_ema_filter_reason', 'UNKNOWN')} "
+                            f"ENTRY={signal.get('entry_price')} SL={signal.get('stop_loss')} "
+                            f"TP={signal.get('take_profit')} RR={signal.get('take_profit_rr')} "
+                            f"SRC={signal.get('take_profit_source')} {outcome}"[:230]
                         )
                         self.last_processed_candles[key] = entry_open_ms
                         if outcome != "ERROR_RETRY":
@@ -5042,8 +5179,8 @@ class TradingEngine:
                 await self._send_scan_batch_report(
                     timeframe="M15 (EMA H4)", trend_length=trend_length,
                     ema_length=ema_filter_length, supertrend_atr_length=supertrend_atr_length,
-                    supertrend_factor=supertrend_factor, batch_number=batch_number,
-                    batch_start=batch_start, batch_end=batch_end,
+                    supertrend_factor=supertrend_factor, rr_min=rr_min, rr_max=rr_max,
+                    batch_number=batch_number, batch_start=batch_start, batch_end=batch_end,
                     universe_total=len(universe), stats=stats,
                     elapsed=time.monotonic()-batch_started, interrupted=interrupted,
                     configuration_changed=configuration_changed, pass_start=pass_start,
@@ -5078,9 +5215,9 @@ class TradingEngine:
                 self._scan_trigger_now = True
             elapsed = time.monotonic() - started
             log.info(
-                "[SCAN] cycle %s | signal_tf=M15 ema_tf=H4 | processed=%s/%s | errors=%s | cursor=%s | "
+                "[SCAN] cycle %s | signal_tf=M15 ema_tf=H4 btc_filter=%s | processed=%s/%s | errors=%s | cursor=%s | "
                 "capacity_pause=%s pending_reserved=%s protection_pause=%s | duration=%.1fs",
-                "complete" if completed else "paused", processed_total, len(universe), errors_total,
+                "complete" if completed else "paused", btc_filter_status, processed_total, len(universe), errors_total,
                 self._scan_resume_cursor, capacity_reached, self._has_pending_entry_limit(),
                 self._has_unprotected_real_position(), elapsed,
             )
@@ -5413,6 +5550,49 @@ class TradingEngine:
                 )
                 return "EMA_BLOCKED"
 
+            btc_filter_length_raw = signal.get("btc_ema_filter_length")
+            try:
+                btc_filter_length = volumatic.normalize_ema_filter_length(btc_filter_length_raw)
+            except (TypeError, ValueError):
+                btc_filter_length = None
+            btc_fast_value = positive_decimal(signal.get("btc_ema_fast_value"))
+            btc_slow_value = positive_decimal(signal.get("btc_ema_slow_value"))
+            btc_filter_ready = bool(signal.get("btc_ema_filter_ready", False))
+            btc_filter_passed = bool(signal.get("btc_ema_filter_passed", False))
+            if not isinstance(filter_length, tuple):
+                btc_reason = "BTC_EMA_REQUIRES_DUAL_EMA_CONFIG"
+            elif btc_filter_length != filter_length:
+                btc_reason = "BTC_EMA_CONFIG_MISMATCH"
+            elif not btc_filter_ready or btc_fast_value is None or btc_slow_value is None:
+                btc_reason = str(signal.get("btc_ema_filter_reason") or "BTC_H4_EMA_NOT_READY")
+            elif not btc_filter_passed:
+                btc_reason = str(signal.get("btc_ema_filter_reason") or "BTC_H4_EMA_DIRECTION_NOT_ALIGNED")
+            else:
+                btc_reason = "OK"
+            if btc_reason != "OK":
+                await self._record_event(
+                    "SIGNAL_REJECTED_BY_BTC_H4_EMA", None,
+                    pair=pair, direction=direction,
+                    btc_ema_filter_length=(list(btc_filter_length) if isinstance(btc_filter_length, tuple) else None),
+                    btc_ema_fast_value=decimal_to_str(btc_fast_value),
+                    btc_ema_slow_value=decimal_to_str(btc_slow_value),
+                    btc_ema_filter_ready=btc_filter_ready,
+                    btc_ema_filter_passed=btc_filter_passed,
+                    btc_ema_h4_open_time_ms=signal.get("btc_ema_h4_open_time_ms"),
+                    reason=btc_reason,
+                )
+                btc_label = (
+                    f"EMA{filter_length[0]}/EMA{filter_length[1]}"
+                    if isinstance(filter_length, tuple) else "DUAL EMA NOT CONFIGURED"
+                )
+                await self.reply(
+                    f"⛔ SINYAL {direction} DIBLOKIR BTC H4 EMA • {pair}\n"
+                    f"Filter BTCUSDT.P: {btc_label}\n"
+                    f"Fast: {fmt_price(btc_fast_value)} · Slow: {fmt_price(btc_slow_value)}\n"
+                    f"Alasan: {btc_reason}. Tidak ada order yang dibuat."
+                )
+                return "BTC_EMA_BLOCKED"
+
             meta = self.symbols.get(pair)
             if meta is None:
                 raise ValueError(f"Metadata Binance untuk {pair} tidak ditemukan.")
@@ -5427,10 +5607,56 @@ class TradingEngine:
                 await self._record_event("SIGNAL_REJECTED_INVALID_SUPERTREND_SL", None, pair=pair,
                                          direction=direction, entry=decimal_to_str(entry), stop=decimal_to_str(stop))
                 return "INVALID_SL"
-            target_raw = entry + (Decimal("3") * risk if direction == "LONG" else -Decimal("3") * risk)
-            target = quantized_price_ceiling(target_raw, meta.tick_size) if direction == "LONG" else quantized_price(target_raw, meta.tick_size)
+            # RR settings are snapshotted in the signal/trade. Later command
+            # changes apply only to future signals and never rewrite active targets.
+            try:
+                signal_rr_min = Decimal(str(signal.get("rr_min", self.rr_min)))
+                signal_rr_max = Decimal(str(signal.get("rr_max", self.rr_max)))
+                normalized_rr_min, normalized_rr_max = volumatic.normalize_rr_range(
+                    signal_rr_min, signal_rr_max
+                )
+                signal_rr_min = Decimal(str(normalized_rr_min))
+                signal_rr_max = Decimal(str(normalized_rr_max))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                await self._record_event(
+                    "SIGNAL_REJECTED_INVALID_RR_CONFIG", None, pair=pair, direction=direction,
+                    rr_min=str(signal.get("rr_min")), rr_max=str(signal.get("rr_max")), reason=str(exc),
+                )
+                return "RR_CONFIG_INVALID"
+            base_target_raw = entry + (
+                signal_rr_min * risk if direction == "LONG" else -signal_rr_min * risk
+            )
+            base_target = (
+                quantized_price_ceiling(base_target_raw, meta.tick_size)
+                if direction == "LONG" else quantized_price(base_target_raw, meta.tick_size)
+            )
+            target_source = str(signal.get("take_profit_source") or "RR_MIN_BASE").upper()
+            liquidity_pool_raw = positive_decimal(
+                signal.get("liquidity_pool_price") or signal.get("take_profit")
+            )
+            target = base_target
+            liquidity_pool_price = None
+            if target_source == "VOLUME_LIQUIDITY" and liquidity_pool_raw is not None:
+                # Round a pool toward entry so the target never overshoots
+                # the structural level or crosses this trade's configured RR_MAX.
+                candidate_target = (
+                    quantized_price(liquidity_pool_raw, meta.tick_size)
+                    if direction == "LONG" else quantized_price_ceiling(liquidity_pool_raw, meta.tick_size)
+                )
+                candidate_rr = directional_reward_r(direction, entry, candidate_target, risk)
+                if (
+                    is_valid_liquidity_reward_r(candidate_rr, signal_rr_min, signal_rr_max)
+                    and (candidate_target > entry if direction == "LONG" else candidate_target < entry)
+                ):
+                    target = candidate_target
+                    liquidity_pool_price = candidate_target
+                else:
+                    target_source = "RR_MIN_BASE"
+            else:
+                target_source = "RR_MIN_BASE"
+            target_rr = directional_reward_r(direction, entry, target, risk) or signal_rr_min
             if target <= 0:
-                raise ValueError("Target RR 1:3 tidak valid setelah tick-size rounding.")
+                raise ValueError("Target TP tidak valid setelah tick-size rounding.")
             signal_close_price = positive_decimal(signal.get("signal_close_price") or signal.get("close_price")) or entry
             bubble_price = positive_decimal(signal.get("bubble_price")) or signal_close_price
             signal_close = datetime.fromtimestamp(signal_close_ms / 1000, tz=timezone.utc)
@@ -5446,7 +5672,10 @@ class TradingEngine:
                 direction=direction, timeframe="M15", trend_length=volumatic.normalize_trend_length(signal.get("trend_length", self.trend_length)),
                 signal=str(signal.get("signal") or ("BLUE" if direction == "LONG" else "RED")),
                 signal_time=signal_close, bubble_price=bubble_price, signal_atr=atr_value,
-                reference_sl=stop, stop_loss=stop, take_profit=target, rr_target=Decimal("3"),
+                reference_sl=stop, stop_loss=stop, take_profit=target, rr_target=signal_rr_min,
+                rr_min=signal_rr_min, rr_max=signal_rr_max,
+                take_profit_source=target_source, take_profit_rr=target_rr,
+                liquidity_pool_price=liquidity_pool_price,
                 supertrend_atr_length=volumatic.normalize_supertrend_atr_length(
                     signal.get("supertrend_atr_length", self.supertrend_atr_length)
                 ),
@@ -5526,7 +5755,11 @@ class TradingEngine:
                     order_type="MARKET_ON_TOUCH" if trade.real_intent else "PAPER_TOUCH",
                     signal_mode="CONFIRMED_M15_NEXT_OPEN",
                     entry=decimal_to_str(trade.entry), stop_loss=decimal_to_str(trade.stop_loss),
-                    take_profit=decimal_to_str(trade.take_profit), rr_target="1:3",
+                    take_profit=decimal_to_str(trade.take_profit),
+                    rr_target=f"1:{decimal_to_str(trade.take_profit_rr)}",
+                    rr_min=decimal_to_str(trade.rr_min), rr_max=decimal_to_str(trade.rr_max),
+                    take_profit_source=trade.take_profit_source,
+                    liquidity_pool_price=decimal_to_str(trade.liquidity_pool_price),
                     signal_close_time_ms=signal_close_ms, entry_candle_open_time_ms=entry_open_ms,
                     expires_at=iso_utc(trade.expires_at), expiry_seconds=ENTRY_ORDER_TTL_SECONDS,
                     real=trade.real_intent, quantity=decimal_to_str(trade.quantity),
@@ -5543,7 +5776,8 @@ class TradingEngine:
                     f"Entry level (next M15 OPEN): {fmt_price(trade.entry)}\n"
                     f"Eksekusi: {'MARKET saat harga menyentuh level (dipantau WebSocket)' if trade.real_intent else 'PAPER saat harga menyentuh level'}\n"
                     f"Supertrend M15 SL: {fmt_price(trade.stop_loss)} • ATR {trade.supertrend_atr_length} / Factor {trade.supertrend_factor:g}\n"
-                    f"TP: {fmt_price(trade.take_profit)} • RR 1:3 (dihitung ulang dari harga fill)\n"
+                    f"TP: {fmt_price(trade.take_profit)} • RR 1:{fmt_num(trade.take_profit_rr, 2)} "
+                    f"({'Volume Liquidity Trend' if trade.take_profit_source == 'VOLUME_LIQUIDITY' else f'baseline {trade.rr_min}R'})\n"
                     f"Auto-expire: 1 jam ({format_wib(trade.expires_at)})\n"
                     f"Margin target: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
                     + (
@@ -5962,14 +6196,60 @@ class TradingEngine:
                 trade.protection_error = "Actual fill price and M15 Supertrend SL do not form a positive risk distance."
             else:
                 trade.initial_risk = risk_decimal
-                trade.stop_loss = stop
-                raw_target = trade.fill_price + (trade.initial_risk * trade.rr_target if trade.direction == "LONG" else -trade.initial_risk * trade.rr_target)
                 meta = self.symbols.get(trade.pair)
+                tick_size = meta.tick_size if meta is not None else Decimal("0")
                 if meta is not None:
-                    trade.stop_loss = quantized_price(stop, meta.tick_size) if trade.direction == "LONG" else quantized_price_ceiling(stop, meta.tick_size)
-                    trade.take_profit = quantized_price_ceiling(raw_target, meta.tick_size) if trade.direction == "LONG" else quantized_price(raw_target, meta.tick_size)
+                    trade.stop_loss = (
+                        quantized_price(stop, tick_size)
+                        if trade.direction == "LONG"
+                        else quantized_price_ceiling(stop, tick_size)
+                    )
                 else:
-                    trade.take_profit = raw_target
+                    trade.stop_loss = stop
+
+                raw_base_target = trade.fill_price + (
+                    trade.initial_risk * trade.rr_target
+                    if trade.direction == "LONG"
+                    else -trade.initial_risk * trade.rr_target
+                )
+                base_target = (
+                    quantized_price_ceiling(raw_base_target, tick_size)
+                    if meta is not None and trade.direction == "LONG"
+                    else (
+                        quantized_price(raw_base_target, tick_size)
+                        if meta is not None else raw_base_target
+                    )
+                )
+
+                # A selected pool is an absolute structural price. Keep it only
+                # when the actual/cumulative fill still places it inside this
+                # trade's saved RR_MIN..RR_MAX band; otherwise use RR_MIN fallback.
+                candidate_pool = trade.liquidity_pool_price or trade.take_profit
+                pool_rr = (
+                    directional_reward_r(trade.direction, trade.fill_price, candidate_pool, trade.initial_risk)
+                    if candidate_pool is not None else None
+                )
+                pool_still_valid = (
+                    trade.take_profit_source == "VOLUME_LIQUIDITY"
+                    and candidate_pool is not None
+                    and is_valid_liquidity_reward_r(pool_rr, trade.rr_min, trade.rr_max)
+                    and (
+                        candidate_pool > trade.fill_price
+                        if trade.direction == "LONG"
+                        else candidate_pool < trade.fill_price
+                    )
+                )
+                if pool_still_valid:
+                    trade.take_profit = candidate_pool
+                    trade.take_profit_rr = pool_rr or trade.rr_min
+                else:
+                    trade.take_profit = base_target
+                    trade.take_profit_rr = (
+                        directional_reward_r(trade.direction, trade.fill_price, base_target, trade.initial_risk)
+                        or trade.rr_min
+                    )
+                    if trade.take_profit_source == "VOLUME_LIQUIDITY":
+                        trade.take_profit_source = "RR_MIN_FALLBACK_AFTER_FILL"
                 trade.protection_state = "WAITING_FOR_EXCHANGE" if trade.real_enabled else "PAPER_ACTIVE"
 
         trade.real_state = "REAL_FILLED" if trade.real_enabled else "PAPER_FILLED"
@@ -5977,7 +6257,11 @@ class TradingEngine:
         event_extra = dict(
             fill_price=decimal_to_str(trade.fill_price), source=source,
             quantity=decimal_to_str(trade.quantity), stop_loss=decimal_to_str(trade.stop_loss),
-            take_profit=decimal_to_str(trade.take_profit), rr_target="1:3",
+            take_profit=decimal_to_str(trade.take_profit),
+            rr_target=f"1:{decimal_to_str(trade.take_profit_rr)}",
+            rr_min=decimal_to_str(trade.rr_min), rr_max=decimal_to_str(trade.rr_max),
+            take_profit_source=trade.take_profit_source,
+            liquidity_pool_price=decimal_to_str(trade.liquidity_pool_price),
             protection_locked=protection_locked,
         )
         if defer_persist:
@@ -6031,16 +6315,46 @@ class TradingEngine:
         if trade.direction == "LONG":
             stop = quantized_price(trade.reference_sl, tick_size)
             raw_tp = trade.fill_price + trade.initial_risk * trade.rr_target
-            target = trade.take_profit if tp_still_working and trade.take_profit is not None else quantized_price_ceiling(raw_tp, tick_size)
+            base_target = quantized_price_ceiling(raw_tp, tick_size)
             close_side = "SELL"
         else:
             stop = quantized_price_ceiling(trade.reference_sl, tick_size)
             raw_tp = trade.fill_price - trade.initial_risk * trade.rr_target
-            target = trade.take_profit if tp_still_working and trade.take_profit is not None else quantized_price(raw_tp, tick_size)
+            base_target = quantized_price(raw_tp, tick_size)
             close_side = "BUY"
+
+        target = base_target
+        if tp_still_working and trade.take_profit is not None:
+            # Never alter an already-working Binance TP protection.
+            target = trade.take_profit
+        elif trade.take_profit_source == "VOLUME_LIQUIDITY":
+            candidate_pool = trade.liquidity_pool_price or trade.take_profit
+            pool_rr = (
+                directional_reward_r(trade.direction, trade.fill_price, candidate_pool, trade.initial_risk)
+                if candidate_pool is not None else None
+            )
+            if (
+                candidate_pool is not None
+                and is_valid_liquidity_reward_r(pool_rr, trade.rr_min, trade.rr_max)
+                and (candidate_pool > trade.fill_price if trade.direction == "LONG" else candidate_pool < trade.fill_price)
+            ):
+                target = candidate_pool
+                trade.take_profit_rr = pool_rr or trade.rr_min
+            else:
+                trade.take_profit_source = "RR_MIN_FALLBACK_AFTER_FILL"
+                trade.take_profit_rr = directional_reward_r(
+                    trade.direction, trade.fill_price, base_target, trade.initial_risk
+                ) or trade.rr_min
+        else:
+            trade.take_profit_rr = directional_reward_r(
+                trade.direction, trade.fill_price, base_target, trade.initial_risk
+            ) or trade.rr_min
         if stop <= 0 or target <= 0 or (trade.direction == "LONG" and not stop < trade.fill_price < target) or (trade.direction == "SHORT" and not target < trade.fill_price < stop):
             raise RuntimeError("Level TP/SL tidak valid pada harga fill aktual.")
         trade.stop_loss, trade.take_profit = stop, target
+        trade.take_profit_rr = directional_reward_r(
+            trade.direction, trade.fill_price, target, trade.initial_risk
+        ) or trade.take_profit_rr
         base = re.sub(r"[^A-Za-z0-9_-]", "", trade.trade_id.upper())[-26:]
         trade.sl_client_algo_id = trade.sl_client_algo_id or f"VTSL{base}"[:36]
         trade.tp_client_algo_id = trade.tp_client_algo_id or f"VTTP{base}"[:36]
@@ -6227,6 +6541,9 @@ class TradingEngine:
         trade.protection_error = None if trade.protection_state == "ACTIVE" else "One protective Algo Order is not yet confirmed."
         await self._record_event("REAL_TP_SL_PROTECTION_ACTIVE", trade,
                                  sl=decimal_to_str(stop), tp=decimal_to_str(target),
+                                 rr_target=f"1:{decimal_to_str(trade.take_profit_rr)}",
+                                 take_profit_source=trade.take_profit_source,
+                                 liquidity_pool_price=decimal_to_str(trade.liquidity_pool_price),
                                  sl_algo_id=trade.sl_algo_id, tp_algo_id=trade.tp_algo_id,
                                  sl_working_type="CONTRACT_PRICE",
                                  tp_working_type="MARK_PRICE", close_position=True)
@@ -6235,7 +6552,9 @@ class TradingEngine:
             await self.reply(
                 f"🛡️ BINANCE TP/SL AKTIF • {trade.pair} {trade.direction}\n"
                 f"Entry avg: {fmt_price(trade.fill_price)}\nSL Supertrend M15: {fmt_price(trade.stop_loss)}\n"
-                f"TP RR 1:3: {fmt_price(trade.take_profit)}\n"
+                f"TP RR 1:{fmt_num(trade.take_profit_rr, 2)} "
+                f"({'Volume Liquidity Trend' if trade.take_profit_source == 'VOLUME_LIQUIDITY' else 'RR baseline'}): "
+                f"{fmt_price(trade.take_profit)}\n"
                 f"Trigger: SL Last Price / TP Mark Price\n"
                 "Mode: closePosition Algo Orders"
             )
@@ -6781,7 +7100,7 @@ class TradingEngine:
             # A REST reconciliation can discover additional GTC fills while the
             # private stream was disconnected. Route every cumulative-size/avg-price
             # change through _mark_filled so the fixed Supertrend SL remains intact
-            # and the RR 1:3 TP is repriced from the new cumulative average.
+            # and the TP is revalidated against the new cumulative average using the trade's saved RR band.
             if trade.status != "FILLED" or executed != previous_executed or avg != (trade.fill_price or trade.entry):
                 await self._mark_filled(trade, avg, "BINANCE_REST_CUMULATIVE_FILL_RECONCILIATION")
             else:
@@ -8239,7 +8558,9 @@ class TradingEngine:
                 "Pair yang masih punya posisi/order aktif diabaikan sampai SL/TP atau close manual.\n\n"
                 "Single: /EMA 89 (close H4 dibandingkan EMA89) atau /EMA off.\n"
                 "Dual: /EMA 89 95 (LONG jika EMA89 > EMA95; SHORT jika EMA89 < EMA95).\n"
-                "Dua angka otomatis diurutkan: periode lebih kecil menjadi EMA fast, lebih besar menjadi EMA slow."
+                "Dua angka otomatis diurutkan: periode lebih kecil menjadi EMA fast, lebih besar menjadi EMA slow.\n\n"
+                "BTCUSDT.P H4 juga menjadi filter wajib: LONG hanya jika BTC EMA fast > slow; SHORT hanya jika fast < slow. "
+                "Filter BTC memakai periode dual /EMA yang sama. Mode single atau OFF tidak dapat membentuk pasangan BTC fast/slow, sehingga entry baru diblokir."
             )
             return
         if len(parts) not in (2, 3):
@@ -8253,6 +8574,8 @@ class TradingEngine:
             return
         old = self.ema_filter_length
         self.ema_filter_length = selected
+        # Queued signals carry their old EMA snapshot; discard them when periods change.
+        self._signal_retries.clear()
         # A new EMA configuration invalidates cached signal and scan cursors.
         self._live_signal_candles.clear()
         self._live_signal_last_eval.clear()
@@ -8278,9 +8601,16 @@ class TradingEngine:
                 f"SHORT hanya jika close candle H4 terakhir < EMA{selected}.\n"
                 "Close tepat pada EMA menolak entry baru."
             )
+        btc_rule = (
+            f"BTCUSDT.P H4: LONG jika EMA{selected[0]} > EMA{selected[1]}; "
+            f"SHORT jika EMA{selected[0]} < EMA{selected[1]}."
+            if isinstance(selected, tuple)
+            else "BTCUSDT.P H4: filter wajib membutuhkan /EMA FAST SLOW. Mode single/OFF akan memblokir entry baru."
+        )
         await self.reply(
             f"✅ EMA FILTER UPDATED\n\nPrevious : {old_text}\nCurrent  : {new_text}\n\n{rule}\n"
-            "Filter diterapkan pada candle H4 terakhir yang sudah close.\n"
+            f"{btc_rule}\n"
+            "Kedua filter H4 memakai candle yang sudah ditutup.\n"
             "Sinyal ketika pair masih memiliki posisi/order aktif diabaikan sampai SL/TP atau close manual."
         )
         log.info("[CONFIG] EMA directional filter: %s -> %s", old_text, new_text)
@@ -8294,6 +8624,93 @@ class TradingEngine:
         self._scan_resume_cursor = 0
         self._scan_resume_boundary_ms = 0
         self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+
+    def _reset_scan_after_rr_change(self) -> None:
+        """Discard only unsubmitted signal contexts; active trades keep saved RR bounds."""
+        self._live_signal_candles.clear()
+        self._live_signal_last_eval.clear()
+        self._live_signal_seen.clear()
+        self._signal_retries.clear()
+        self.last_processed_candles.clear()
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+
+    async def _handle_rr_min(self, text: str) -> None:
+        parts = str(text or "").split()
+        if len(parts) == 1:
+            await self.reply(
+                f"RR_MIN: {self.rr_min}R\nRR_MAX: {self.rr_max}R\n\n"
+                "RR_MIN adalah TP dasar/fallback dan batas bawah pencarian liquidity pool.\n"
+                "Gunakan /RR_MIN <angka>, contoh /RR_MIN 3 atau /RR_MIN 2.5.\n"
+                f"Nilai harus > 0 dan tidak boleh melebihi RR_MAX ({self.rr_max}).\n"
+                "Perubahan berlaku untuk sinyal baru; pending/filled trade yang sudah ada tetap memakai RR saat dibuat."
+            )
+            return
+        if len(parts) != 2:
+            await self.reply("Gunakan /RR_MIN <angka>, contoh /RR_MIN 3 atau /RR_MIN 2.5.")
+            return
+        try:
+            selected = Decimal(str(volumatic.normalize_rr_value(parts[1], "RR_MIN")))
+        except ValueError as exc:
+            await self.reply(f"❌ {exc}")
+            return
+        if selected > self.rr_max:
+            await self.reply(f"❌ RR_MIN {selected} tidak boleh lebih besar dari RR_MAX {self.rr_max}.")
+            return
+        old = self.rr_min
+        if selected == old:
+            await self.reply(f"RR_MIN sudah {selected}R.")
+            return
+        self.rr_min = selected
+        self._reset_scan_after_rr_change()
+        await self._save_runtime_settings()
+        await self.reply(
+            f"✅ RR_MIN UPDATED\n\nPrevious: {old}R\nCurrent : {self.rr_min}R\n"
+            f"RR_MAX  : {self.rr_max}R\n\n"
+            f"TP dasar/fallback sekarang 1:{self.rr_min}. Liquidity pool dicari pada rentang "
+            f"1:{self.rr_min} sampai 1:{self.rr_max}, lalu dipilih pool paling jauh yang masih masuk batas.\n"
+            "Trade yang sudah dibuat tidak berubah."
+        )
+        log.info("[CONFIG] RR_MIN changed: %s -> %s | RR_MAX=%s", old, self.rr_min, self.rr_max)
+
+    async def _handle_rr_max(self, text: str) -> None:
+        parts = str(text or "").split()
+        if len(parts) == 1:
+            await self.reply(
+                f"RR_MIN: {self.rr_min}R\nRR_MAX: {self.rr_max}R\n\n"
+                "RR_MAX adalah batas maksimal reward untuk memperpanjang TP ke liquidity pool.\n"
+                "Gunakan /RR_MAX <angka>, contoh /RR_MAX 4 atau /RR_MAX 4.5.\n"
+                f"Nilai harus >= RR_MIN ({self.rr_min}) dan maksimal {volumatic.MAX_RR_VALUE:g}.\n"
+                "Perubahan berlaku untuk sinyal baru; pending/filled trade yang sudah ada tetap memakai RR saat dibuat."
+            )
+            return
+        if len(parts) != 2:
+            await self.reply("Gunakan /RR_MAX <angka>, contoh /RR_MAX 4 atau /RR_MAX 4.5.")
+            return
+        try:
+            selected = Decimal(str(volumatic.normalize_rr_value(parts[1], "RR_MAX")))
+        except ValueError as exc:
+            await self.reply(f"❌ {exc}")
+            return
+        if selected < self.rr_min:
+            await self.reply(f"❌ RR_MAX {selected} tidak boleh lebih kecil dari RR_MIN {self.rr_min}.")
+            return
+        old = self.rr_max
+        if selected == old:
+            await self.reply(f"RR_MAX sudah {selected}R.")
+            return
+        self.rr_max = selected
+        self._reset_scan_after_rr_change()
+        await self._save_runtime_settings()
+        await self.reply(
+            f"✅ RR_MAX UPDATED\n\nPrevious: {old}R\nCurrent : {self.rr_max}R\n"
+            f"RR_MIN  : {self.rr_min}R\n\n"
+            f"TP dasar/fallback tetap 1:{self.rr_min}. Liquidity pool dapat memperpanjang TP hingga "
+            f"maksimal 1:{self.rr_max}; dipilih pool paling jauh yang masih masuk rentang.\n"
+            "Trade yang sudah dibuat tidak berubah."
+        )
+        log.info("[CONFIG] RR_MAX changed: %s -> %s | RR_MIN=%s", old, self.rr_max, self.rr_min)
 
     async def _handle_atr(self, text: str) -> None:
         parts = str(text or "").split()
@@ -8384,6 +8801,7 @@ class TradingEngine:
                 f"Signal: M15 Volumatic + H4 EMA + M15 Supertrend\n"
                 f"Pending entry LIMIT: {pending}\nFilled positions: {filled}\n"
                 f"Slots: {len(slots)}/{self.max_active_trades}\n"
+                f"TP RR: base 1:{self.rr_min} · liquidity cap 1:{self.rr_max}\n"
                 "Rule: pending LIMIT memakai slot, bukan alasan pause scanner.\n"
                 f"Schedule: {', '.join(self.scan_schedule_slots) if self.scan_schedule_slots else '-'}"
             )
@@ -8506,7 +8924,7 @@ class TradingEngine:
             log.info("[SCAN] explicitly armed by Telegram /scan on | tf=%s | batch=%s", self.timeframe, SCAN_MAX_PAIRS_PER_CYCLE)
             await self.reply(
                 f"🟢 Scanner ON • M15 Volumatic / H4 EMA • batch {SCAN_MAX_PAIRS_PER_CYCLE} "
-                "• Confirmed M15 Volumatic bubble + H4 EMA + M15 Supertrend SL / 3R TP. Scanner jeda selama entry LIMIT masih terbuka."
+                f"• Confirmed M15 Volumatic bubble + H4 EMA + M15 Supertrend SL / TP liquidity {self.rr_min}R-{self.rr_max}R. Scanner jeda selama entry LIMIT masih terbuka."
             )
         else:
             self._scanner_symbols.clear()
@@ -8792,6 +9210,7 @@ class TradingEngine:
             f"PENDING SLOTS: {pending_slots} • FILLED SLOTS: {filled_slots} • LIVE LIMITS: {live_limits}\n"
             f"Scanner TF: {self.timeframe} • Length: {self.trend_length} • EMA filter: {current_ema}\n"
             f"SuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
+            f"TP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\n"
             + (f"{snapshot_note}\n" if snapshot_note else "")
         ]
 
@@ -8825,7 +9244,8 @@ class TradingEngine:
                 lines.append(
                     f"⏳ {t.pair} • PENDING {t.direction} ({t.timeframe} • LEN {t.trend_length})\n"
                     f"Signal: {t.signal} | Signal close: {fmt_price(t.signal_close_price or t.entry)} | Entry level (next M15 open): {fmt_price(t.entry)}\n"
-                    f"Planned SL: {fmt_price(t.stop_loss or t.reference_sl)} | Planned TP: {fmt_price(t.take_profit)} (RR 1:3; installed after fill)\n"
+                    f"Planned SL: {fmt_price(t.stop_loss or t.reference_sl)} | Planned TP: {fmt_price(t.take_profit)} "
+                    f"(RR 1:{fmt_num(t.take_profit_rr, 2)}; {t.take_profit_source}; band {t.rr_min}-{t.rr_max}R; installed after fill)\n"
                     f"SuperTrend source: ATR {t.supertrend_atr_length} • Factor {t.supertrend_factor:g}\n"
                     f"EMA H4 at signal: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
@@ -8868,7 +9288,8 @@ class TradingEngine:
                 lines.append(
                     f"{'🟢' if t.direction == 'LONG' else '🔴'} {t.pair} • {t.direction} FILLED ({t.timeframe} • LEN {t.trend_length})\n"
                     f"Entry: {fmt_price(entry)} | Live: {fmt_price(price)}\n"
-                    f"SL M15 Supertrend: {fmt_price(t.stop_loss or t.reference_sl)} | TP 3R: {fmt_price(t.take_profit)}\n"
+                    f"SL M15 Supertrend: {fmt_price(t.stop_loss or t.reference_sl)} | "
+                    f"TP {fmt_num(t.take_profit_rr, 2)}R: {fmt_price(t.take_profit)} ({t.take_profit_source}; band {t.rr_min}-{t.rr_max}R)\n"
                     f"SuperTrend source: ATR {t.supertrend_atr_length} • Factor {t.supertrend_factor:g}\n"
                     f"Protection: {t.protection_state} (SL {t.sl_algo_status} / TP {t.tp_algo_status})\n"
                     f"Algo IDs: SL {t.sl_algo_id or '-'} / TP {t.tp_algo_id or '-'}\n"
@@ -8941,7 +9362,10 @@ class TradingEngine:
         if not active and not orders_by_pair_direction and exchange_position_rows == 0:
             await self.reply("Tidak ada pending order atau posisi aktif.")
             return
-        await self.reply("\n\n".join(lines) + "\n\nSL: M15 Supertrend • TP: RR 1:3 • REAL: Binance closePosition Algo Orders")
+        await self.reply(
+            "\n\n".join(lines)
+            + f"\n\nSL: M15 Supertrend • new-trade TP baseline {self.rr_min}R, liquidity extension up to {self.rr_max}R • REAL: Binance closePosition Algo Orders"
+        )
 
     def _autostop_source_name(self) -> str:
         """Select the equity account the guard must monitor.
@@ -9393,7 +9817,7 @@ class TradingEngine:
             f"SCANNER      {self._scanner_state_label()}",
             f"SCAN SCHEDULE {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}",
             "────────────────────────────────",
-            "PnL belum termasuk seluruh fee/funding aktual. R = jarak entry aktual ke SL Supertrend M15; TP = 3R.",
+            f"PnL belum termasuk seluruh fee/funding aktual. R = jarak entry aktual ke SL Supertrend M15; TP baseline {self.rr_min}R dengan ekstensi liquidity maksimal {self.rr_max}R.",
         ]
         await self.reply("\n".join(lines))
 
@@ -9404,7 +9828,7 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nSuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
+            f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nSuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\nTP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
             f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending slots: {pending} | Filled slots: {filled} | Live LIMITs: {live_limits} | Max: {self.max_active_trades}\n"
@@ -9425,6 +9849,8 @@ class TradingEngine:
             "/EMA <angka|off> atau /EMA <angka1> <angka2> - filter EMA single/dual bebas\n"
             f"/ATR <angka> - atur SuperTrend M15 ATR Length (default {volumatic.SUPERTREND_ATR_LENGTH})\n"
             f"/Factor <angka> - atur SuperTrend M15 Factor (default {volumatic.SUPERTREND_FACTOR:g})\n"
+            f"/RR_MIN <angka> - RR dasar/fallback dan batas bawah liquidity (default {volumatic.RR_MIN:g})\n"
+            f"/RR_MAX <angka> - batas atas TP liquidity (default {volumatic.RR_MAX:g})\n"
             "/max [angka] - batas total pending + filled\n"
             "/trade - lihat pending order dan posisi aktif\n"
             "/stats - statistik trade, PnL, win rate, DD, R\n"
@@ -9444,7 +9870,7 @@ class TradingEngine:
             "/resetstats - arsipkan lalu reset statistik trade\n"
             "/reset CONFIRM - reset history/event/catatan (tanpa mengubah posisi)\n"
             "/status - status sistem\n/help - bantuan\n\n"
-            "Aturan: BLUE=LONG, RED=SHORT; bubble M15 confirmed + filter EMA H4; level entry = OPEN M15 berikutnya dipantau WebSocket, MARKET order saat tersentuh; TP/SL langsung dipasang; SL Supertrend M15; TP RR 1:3; posisi tidak reversal oleh bubble lawan."
+            f"Aturan: BLUE=LONG, RED=SHORT; bubble M15 confirmed + filter EMA H4 + BTC H4; entry pada OPEN M15 berikutnya; SL Supertrend M15; TP dasar RR_MIN {self.rr_min}R, diperpanjang ke liquidity pool belum termitigasi paling jauh hingga RR_MAX {self.rr_max}R; posisi tidak reversal oleh bubble lawan."
         )
 
     async def _dispatch_command(self, text: str) -> None:
@@ -9460,6 +9886,8 @@ class TradingEngine:
         elif command == "/ema": await self._handle_ema(text)
         elif command == "/atr": await self._handle_atr(text)
         elif command == "/factor": await self._handle_factor(text)
+        elif command == "/rr_min": await self._handle_rr_min(text)
+        elif command == "/rr_max": await self._handle_rr_max(text)
         elif command == "/scan": await self._handle_scan(text)
         elif command == "/max": await self._handle_max(text)
         elif command == "/margin": await self._handle_margin(text)
