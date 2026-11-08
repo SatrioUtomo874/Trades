@@ -17,7 +17,7 @@ from typing import Any, Mapping
 import numpy as np
 
 STRATEGY_NAME = "VOLUMATIC_TREND"
-STRATEGY_VERSION = "2.0.0"
+STRATEGY_VERSION = "2.1.0"
 DEFAULT_TREND_LENGTH = 100
 TREND_LENGTH = DEFAULT_TREND_LENGTH  # backward-compatible public default
 MIN_TREND_LENGTH = 1
@@ -35,7 +35,45 @@ EMA_TIMEFRAME = "H4"
 SIGNAL_TIMEFRAME = "M15"
 SUPERTREND_ATR_LENGTH = 10
 SUPERTREND_FACTOR = 3.0
+MIN_SUPERTREND_ATR_LENGTH = 1
+# Binance Futures returns at most 1,500 klines per request; reserve 20 bars
+# beyond the configured ATR window for adjacent indicator calculations.
+MAX_SUPERTREND_ATR_LENGTH = 1480
+MAX_SUPERTREND_FACTOR = 1000.0
 RR_TARGET = 3.0
+
+
+def normalize_supertrend_atr_length(value: Any) -> int:
+    """Validate the configurable M15 Supertrend ATR period."""
+    if isinstance(value, bool):
+        raise ValueError("SuperTrend ATR Length harus berupa bilangan bulat positif.")
+    raw = str(value).strip()
+    try:
+        length = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("SuperTrend ATR Length harus berupa bilangan bulat positif.") from exc
+    if raw not in {str(length), f"+{length}"}:
+        raise ValueError("SuperTrend ATR Length harus berupa bilangan bulat positif.")
+    if not MIN_SUPERTREND_ATR_LENGTH <= length <= MAX_SUPERTREND_ATR_LENGTH:
+        raise ValueError(
+            f"SuperTrend ATR Length harus antara {MIN_SUPERTREND_ATR_LENGTH} "
+            f"dan {MAX_SUPERTREND_ATR_LENGTH} (batas history Binance 1.500 candle)."
+        )
+    return length
+
+
+def normalize_supertrend_factor(value: Any) -> float:
+    """Validate a finite positive Supertrend multiplier, including decimal commas."""
+    if isinstance(value, bool):
+        raise ValueError("SuperTrend Factor harus berupa angka positif.")
+    raw = str(value).strip().replace(",", ".")
+    try:
+        factor = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("SuperTrend Factor harus berupa angka positif.") from exc
+    if not np.isfinite(factor) or factor <= 0 or factor > MAX_SUPERTREND_FACTOR:
+        raise ValueError(f"SuperTrend Factor harus lebih besar dari 0 dan maksimal {MAX_SUPERTREND_FACTOR:g}.")
+    return factor
 
 
 @dataclass(frozen=True, slots=True)
@@ -850,6 +888,8 @@ __all__ = [
     "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "DEFAULT_TREND_LENGTH",
     "EMA_TIMEFRAME", "SIGNAL_TIMEFRAME", "SUPERTREND_ATR_LENGTH", "SUPERTREND_FACTOR", "RR_TARGET", "detect_backtest_signal",
     "MIN_TREND_LENGTH", "MAX_TREND_LENGTH", "normalize_trend_length", "ATR_LENGTH",
+    "MIN_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_FACTOR",
+    "normalize_supertrend_atr_length", "normalize_supertrend_factor",
     "REFERENCE_BUFFER_ATR", "TIMEFRAME_MS", "TIMEFRAME_INTERVALS", "SUPPORTED_TIMEFRAMES", "VolumaticSignal",
     "SUPPORTED_EMA_FILTERS", "MIN_EMA_FILTER_LENGTH", "MAX_EMA_FILTER_LENGTH", "DEFAULT_EMA_FILTER_LENGTH", "normalize_ema_filter_length", "format_ema_filter_length", "ema_filter_lengths",
     "calculate_indicators", "detect_latest_signal", "detect_signals_since", "signals_since", "analyze",
@@ -1017,6 +1057,8 @@ def detect_backtest_signal(
     """
     length = normalize_trend_length(trend_length)
     filter_config = normalize_ema_filter_length(ema_filter_length)
+    supertrend_atr_length = normalize_supertrend_atr_length(supertrend_atr_length)
+    supertrend_factor = normalize_supertrend_factor(supertrend_factor)
     mt, mo, mh, ml, mc, _mv = _extract_columns(m15_with_forming)
     ht, ho, hh, hl, hc, _hv = _extract_columns(h4_closed)
     if len(mt) < max(12, length + 8) or len(ht) < 3:
