@@ -16,12 +16,14 @@
   "min_margin_enabled": false,
   "last_processed_candles": {
     "M15:1000000MOGUSDT": 1794160800000,
-    "M15:0GUSDT": 1794161700000
+    "M15:0GUSDT": 1794161700000,
+    "M15:1000BONKUSDT": 1794161700000,
+    "M15:1000CATUSDT": 1794161700000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 2,
+  "scan_resume_cursor": 5,
   "scan_resume_boundary_ms": 1794161700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-08T18:16:11.796958+00:00"
+  "updated_at": "2026-11-08T18:20:06.018408+00:00"
 }
