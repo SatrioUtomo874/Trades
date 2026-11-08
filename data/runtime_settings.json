@@ -15,12 +15,13 @@
   "leverage": 10,
   "min_margin_enabled": false,
   "last_processed_candles": {
-    "M15:1000000MOGUSDT": 1794160800000
+    "M15:1000000MOGUSDT": 1794160800000,
+    "M15:0GUSDT": 1794161700000
   },
   "last_position_candles": {},
   "signal_retries": {},
   "scan_resume_cursor": 2,
-  "scan_resume_boundary_ms": 1794160800000,
+  "scan_resume_boundary_ms": 1794161700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-08T18:10:21.435705+00:00"
+  "updated_at": "2026-11-08T18:16:04.987188+00:00"
 }
