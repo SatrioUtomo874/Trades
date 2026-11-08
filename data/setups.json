@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-08T05:26:48.975505+00:00",
+  "updated_at": "2026-11-08T05:26:58.968198+00:00",
   "active_trades": [
     {
       "trade_id": "GRASSUSDT-20261108-090739-C08839",
@@ -913,9 +913,9 @@
       "tp_algo_id": 4000002068415505,
       "sl_client_algo_id": "VTSLSDT-20261108-122038-CF19B6",
       "tp_client_algo_id": "VTTPSDT-20261108-122038-CF19B6",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "sl_algo_status": "FINISHED",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
@@ -1043,7 +1043,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "2587297103:NEW:NEW:0:0",
+      "last_ws_event_key": "2587297103:TRADE:FILLED:3.8:287435215",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
