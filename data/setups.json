@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-08T02:58:09.787414+00:00",
+  "updated_at": "2026-11-08T02:58:18.365815+00:00",
   "active_trades": [
     {
       "trade_id": "BNBUSDT-20261108-090008-B73EAF",
@@ -591,7 +591,7 @@
       "tp_client_algo_id": "VTTPSDT-20261108-095726-842304",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
