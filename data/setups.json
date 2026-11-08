@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.1.0",
-  "updated_at": "2026-11-08T08:38:46.352224+00:00",
+  "updated_at": "2026-11-08T08:38:52.589361+00:00",
   "active_trades": [
     {
       "trade_id": "ESPORTSUSDT-20261108-130839-2CE7BF",
@@ -830,11 +830,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002069297643,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002069298296,
       "sl_client_algo_id": "VTSLSDT-20261108-153814-E57149",
       "tp_client_algo_id": "VTTPSDT-20261108-153814-E57149",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
@@ -882,7 +882,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "34401738969:NEW:NEW:0:0",
+      "last_ws_event_key": "34401738969:TRADE:FILLED:6.2:1222958234",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
