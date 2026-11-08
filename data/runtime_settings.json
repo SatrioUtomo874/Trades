@@ -6,7 +6,7 @@
     9,
     21
   ],
-  "max_active_trades": 8,
+  "max_active_trades": 13,
   "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": true,
@@ -536,5 +536,5 @@
   "scan_resume_cursor": 217,
   "scan_resume_boundary_ms": 1794110400000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-08T04:17:16.400485+00:00"
+  "updated_at": "2026-11-08T04:41:10.194602+00:00"
 }
