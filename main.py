@@ -75,10 +75,12 @@ if (
     not callable(getattr(volumatic, "normalize_trend_length", None))
     or not hasattr(volumatic, "DEFAULT_TREND_LENGTH")
     or int(getattr(volumatic, "DEFAULT_TREND_LENGTH", 0)) != 100
+    or not callable(getattr(volumatic, "normalize_supertrend_atr_length", None))
+    or not callable(getattr(volumatic, "normalize_supertrend_factor", None))
 ):
     raise RuntimeError(
-        "strategy module mismatch: API /length tidak tersedia atau default Trend Length bukan 100. "
-        "Sinkronkan main.py dan strategy.py dengan versi Volumatic adjustable length."
+        "strategy module mismatch: API /length atau SuperTrend ATR/Factor tidak tersedia. "
+        "Sinkronkan main.py dan strategy.py dengan versi Volumatic configurable SuperTrend."
     )
 
 # ---------------------------------------------------------------------------
@@ -157,8 +159,11 @@ DEFAULT_MARGIN_USDT = Decimal(os.getenv("DEFAULT_MARGIN_USDT", "0.5") or "0.5")
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "10") or "10")
 SIM_START_BALANCE = Decimal(os.getenv("SIM_START_BALANCE", "100") or "100")
 CONFIG_AUTOSTOP = (os.getenv("AUTOSTOP_PERCENT") or "").strip()
-REAL_NOTIONAL_MIN_RATIO = Decimal("0.90")
-REAL_NOTIONAL_MAX_RATIO = Decimal("1.10")
+# Fixed-margin sizing must stay close to the requested margin. Binance LOT_SIZE
+# rounding that cannot fit inside this +/-5% band is rejected, never rounded up
+# into a materially larger position. Market-fill slippage can still move final margin.
+REAL_NOTIONAL_MIN_RATIO = Decimal("0.95")
+REAL_NOTIONAL_MAX_RATIO = Decimal("1.05")
 REAL_FEE_BUFFER = Decimal("0.001")
 
 
@@ -466,8 +471,8 @@ def compute_quantity(entry: Decimal, margin: Decimal, leverage: int, filters: di
     if step <= 0:
         return None, "INVALID_STEP_SIZE"
     target = margin_d * lev
-    lo = max(target * Decimal("0.90") / price, min_qty)
-    hi = target * Decimal("1.10") / price
+    lo = max(target * REAL_NOTIONAL_MIN_RATIO / price, min_qty)
+    hi = target * REAL_NOTIONAL_MAX_RATIO / price
     if max_qty > 0: hi = min(hi, max_qty)
     if min_notional > 0: lo = max(lo, min_notional / price)
     if max_notional > 0: hi = min(hi, max_notional / price)
@@ -482,7 +487,7 @@ def compute_quantity(entry: Decimal, margin: Decimal, leverage: int, filters: di
         return None, "NO_VALID_QUANTITY"
     qty = min(valid, key=lambda q: abs(q * price - target))
     notional = qty * price
-    if not (target * Decimal("0.90") <= notional <= target * Decimal("1.10")):
+    if not (target * REAL_NOTIONAL_MIN_RATIO <= notional <= target * REAL_NOTIONAL_MAX_RATIO):
         return None, "MARGIN_DEVIATION_OUT_OF_BOUND"
     required_margin = notional / lev
     if available_balance is not None and required_margin + notional * REAL_FEE_BUFFER > available_balance:
@@ -582,6 +587,8 @@ class Trade:
     stop_loss: Decimal | None = None
     take_profit: Decimal | None = None
     rr_target: Decimal = Decimal("3")
+    supertrend_atr_length: int = volumatic.SUPERTREND_ATR_LENGTH
+    supertrend_factor: float = volumatic.SUPERTREND_FACTOR
     sl_algo_id: int | None = None
     tp_algo_id: int | None = None
     sl_client_algo_id: str | None = None
@@ -669,6 +676,8 @@ class Trade:
             "reference_sl": decimal_to_str(self.reference_sl),
             "stop_loss": decimal_to_str(self.stop_loss), "take_profit": decimal_to_str(self.take_profit),
             "rr_target": decimal_to_str(self.rr_target),
+            "supertrend_atr_length": self.supertrend_atr_length,
+            "supertrend_factor": self.supertrend_factor,
             "sl_algo_id": self.sl_algo_id, "tp_algo_id": self.tp_algo_id,
             "sl_client_algo_id": self.sl_client_algo_id, "tp_client_algo_id": self.tp_client_algo_id,
             "sl_algo_status": self.sl_algo_status, "tp_algo_status": self.tp_algo_status,
@@ -734,6 +743,18 @@ class Trade:
             saved_trend_length = volumatic.normalize_trend_length(row.get("trend_length", volumatic.DEFAULT_TREND_LENGTH))
         except (TypeError, ValueError):
             saved_trend_length = volumatic.DEFAULT_TREND_LENGTH
+        try:
+            saved_supertrend_atr_length = volumatic.normalize_supertrend_atr_length(
+                row.get("supertrend_atr_length", volumatic.SUPERTREND_ATR_LENGTH)
+            )
+        except (TypeError, ValueError):
+            saved_supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
+        try:
+            saved_supertrend_factor = volumatic.normalize_supertrend_factor(
+                row.get("supertrend_factor", volumatic.SUPERTREND_FACTOR)
+            )
+        except (TypeError, ValueError):
+            saved_supertrend_factor = volumatic.SUPERTREND_FACTOR
         saved_created_at = parse_iso(row.get("created_at")) or signal_time
         saved_entry_window_closes_at = parse_iso(row.get("entry_window_closes_at"))
         if saved_entry_window_closes_at is None and str(row.get("timeframe") or "M15").upper() == "M15":
@@ -766,6 +787,8 @@ class Trade:
             signal_atr=dec("signal_atr"), reference_sl=dec("reference_sl"),
             stop_loss=dec("stop_loss", dec("reference_sl")), take_profit=dec("take_profit"),
             rr_target=dec("rr_target", Decimal("3")) or Decimal("3"),
+            supertrend_atr_length=saved_supertrend_atr_length,
+            supertrend_factor=saved_supertrend_factor,
             sl_algo_id=int(row["sl_algo_id"]) if row.get("sl_algo_id") not in (None, "") else None,
             tp_algo_id=int(row["tp_algo_id"]) if row.get("tp_algo_id") not in (None, "") else None,
             sl_client_algo_id=row.get("sl_client_algo_id"), tp_client_algo_id=row.get("tp_client_algo_id"),
@@ -3665,6 +3688,8 @@ class TradingEngine:
         self.timeframe = "M15"
         self.trend_length = volumatic.DEFAULT_TREND_LENGTH
         self.ema_filter_length: int | tuple[int, int] | None = volumatic.DEFAULT_EMA_FILTER_LENGTH
+        self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
+        self.supertrend_factor = volumatic.SUPERTREND_FACTOR
         self.scan_enabled = False
         # Session-only delayed scanner activation. It is deliberately not
         # persisted: every fresh /try starts with scanner OFF and no schedule.
@@ -3856,6 +3881,20 @@ class TradingEngine:
             except ValueError:
                 self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
                 log.warning("ema_filter_length tidak valid; default EMA %s dipakai.", self.ema_filter_length)
+            try:
+                self.supertrend_atr_length = volumatic.normalize_supertrend_atr_length(
+                    payload.get("supertrend_atr_length", volumatic.SUPERTREND_ATR_LENGTH)
+                )
+            except (TypeError, ValueError):
+                self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
+                log.warning("supertrend_atr_length tidak valid; default %s dipakai.", self.supertrend_atr_length)
+            try:
+                self.supertrend_factor = volumatic.normalize_supertrend_factor(
+                    payload.get("supertrend_factor", volumatic.SUPERTREND_FACTOR)
+                )
+            except (TypeError, ValueError):
+                self.supertrend_factor = volumatic.SUPERTREND_FACTOR
+                log.warning("supertrend_factor tidak valid; default %s dipakai.", self.supertrend_factor)
             # Scanner arming is intentionally SESSION-ONLY. A fresh /try (or
             # Render restart) must never resume a previous scan automatically.
             # The only way to arm scanning is an explicit Telegram `/scan on`.
@@ -3998,6 +4037,8 @@ class TradingEngine:
                 "timeframe": self.timeframe,
                 "trend_length": self.trend_length,
                 "ema_filter_length": list(self.ema_filter_length) if isinstance(self.ema_filter_length, tuple) else self.ema_filter_length,
+                "supertrend_atr_length": self.supertrend_atr_length,
+                "supertrend_factor": self.supertrend_factor,
                 # Deliberately do not persist scan_enabled. Scanner requires an
                 # explicit `/scan on` in every fresh engine session.
                 "max_active_trades": self.max_active_trades,
@@ -4430,6 +4471,8 @@ class TradingEngine:
         self.timeframe = "M15"
         self.trend_length = volumatic.DEFAULT_TREND_LENGTH
         self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
+        self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
+        self.supertrend_factor = volumatic.SUPERTREND_FACTOR
         self.margin_usdt = DEFAULT_MARGIN_USDT
         self.leverage = DEFAULT_LEVERAGE
         self.min_margin_enabled = False
@@ -4503,6 +4546,7 @@ class TradingEngine:
             "Signal TF     : M15\nEMA Trend TF  : H4\n"
             f"Trend length  : {self.trend_length} (default {volumatic.DEFAULT_TREND_LENGTH})\n"
             f"EMA filter    : {ema_filter_label(self.ema_filter_length)}\n"
+            f"SuperTrend    : ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
             f"Max positions : {self.max_active_trades}\n"
             "Scanner       : OFF — menunggu /scan on atau /scan schedule\n"
             "REAL          : OFF — menunggu /real on\n"
@@ -4611,6 +4655,7 @@ class TradingEngine:
         self, *, timeframe: str, trend_length: int, ema_length: int | tuple[int, int] | None, batch_number: int,
         batch_start: int, batch_end: int, universe_total: int,
         stats: dict[str, Any], elapsed: float, interrupted: bool = False,
+        supertrend_atr_length: int, supertrend_factor: float,
         configuration_changed: bool = False, pass_start: int | None = None,
     ) -> None:
         """Telegram telemetry for every completed or interrupted logical batch."""
@@ -4641,7 +4686,7 @@ class TradingEngine:
         unknown = int(stats.get("unknown", 0))
         lines = [
             "╔══ VOL / SCAN BATCH REPORT ══╗",
-            f"ENGINE    : M15 VOLUMATIC · H4 EMA · M15 SUPERTREND · LEN{trend_length} · {ema}",
+            f"ENGINE    : M15 VOLUMATIC · H4 EMA · M15 SUPERTREND · LEN{trend_length} · {ema} · ATR{supertrend_atr_length} · FACTOR{supertrend_factor:g}",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
             f"STATE     : {state}",
@@ -4797,6 +4842,8 @@ class TradingEngine:
             timeframe = "M15"
             trend_length = self.trend_length
             ema_filter_length = self.ema_filter_length
+            supertrend_atr_length = self.supertrend_atr_length
+            supertrend_factor = self.supertrend_factor
             interval_ms = volumatic.TIMEFRAME_MS["M15"]
             universe = await self._universe()
             self._scanner_symbols = set(universe) if self.scan_enabled else set()
@@ -4819,8 +4866,8 @@ class TradingEngine:
                 return
 
             log.info(
-                "[SCAN] MTF cycle start | signal_tf=M15 | ema_tf=H4 | length=%s | ema=%s | pairs=%s | batch_size=%s | cursor=%s",
-                trend_length, ema_filter_label(ema_filter_length), len(universe),
+                "[SCAN] MTF cycle start | signal_tf=M15 | ema_tf=H4 | length=%s | ema=%s | ST_ATR=%s | ST_FACTOR=%s | pairs=%s | batch_size=%s | cursor=%s",
+                trend_length, ema_filter_label(ema_filter_length), supertrend_atr_length, supertrend_factor, len(universe),
                 SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
             )
             await self._expire_due_pending()
@@ -4863,7 +4910,12 @@ class TradingEngine:
                 )
                 for local_index, symbol in enumerate(batch):
                     absolute_index = offset + local_index
-                    if self.trend_length != trend_length or self.ema_filter_length != ema_filter_length:
+                    if (
+                        self.trend_length != trend_length
+                        or self.ema_filter_length != ema_filter_length
+                        or self.supertrend_atr_length != supertrend_atr_length
+                        or self.supertrend_factor != supertrend_factor
+                    ):
                         configuration_changed = True
                         self._scan_resume_cursor = 0
                         self._scan_resume_boundary_ms = 0
@@ -4882,13 +4934,23 @@ class TradingEngine:
                     stats["requested"] += 1
                     try:
                         m15 = await self.rest.get_klines_with_forming(
-                            symbol, "15m", self._kline_history_limit(trend_length), interval_ms
+                            symbol, "15m", self._kline_history_limit(trend_length, supertrend_atr_length), interval_ms
                         )
                         h4 = await self.rest.get_klines(
                             symbol, "4h", self._h4_ema_history_limit(ema_filter_length),
                             volumatic.TIMEFRAME_MS["H4"],
                         )
-                        min_m15 = max(12, trend_length + 8)
+                        if (
+                            self.trend_length != trend_length
+                            or self.ema_filter_length != ema_filter_length
+                            or self.supertrend_atr_length != supertrend_atr_length
+                            or self.supertrend_factor != supertrend_factor
+                        ):
+                            configuration_changed = True
+                            self._scan_resume_cursor = 0
+                            self._scan_resume_boundary_ms = 0
+                            break
+                        min_m15 = max(12, trend_length + 8, supertrend_atr_length + 1)
                         min_h4 = max(3, (max(ema_filter_length) if isinstance(ema_filter_length, tuple) else (ema_filter_length or 1)))
                         if m15 is None or len(m15) < min_m15 or h4 is None or len(h4) < min_h4:
                             stats["warmup"] += 1
@@ -4910,8 +4972,8 @@ class TradingEngine:
                         signal = volumatic.detect_backtest_signal(
                             m15, h4, symbol=symbol, trend_length=trend_length,
                             ema_filter_length=ema_filter_length,
-                            supertrend_atr_length=volumatic.SUPERTREND_ATR_LENGTH,
-                            supertrend_factor=volumatic.SUPERTREND_FACTOR,
+                            supertrend_atr_length=supertrend_atr_length,
+                            supertrend_factor=supertrend_factor,
                             rr_target=volumatic.RR_TARGET,
                         )
                         if signal is None:
@@ -4979,7 +5041,8 @@ class TradingEngine:
                 release_memory()
                 await self._send_scan_batch_report(
                     timeframe="M15 (EMA H4)", trend_length=trend_length,
-                    ema_length=ema_filter_length, batch_number=batch_number,
+                    ema_length=ema_filter_length, supertrend_atr_length=supertrend_atr_length,
+                    supertrend_factor=supertrend_factor, batch_number=batch_number,
                     batch_start=batch_start, batch_end=batch_end,
                     universe_total=len(universe), stats=stats,
                     elapsed=time.monotonic()-batch_started, interrupted=interrupted,
@@ -5384,6 +5447,12 @@ class TradingEngine:
                 signal=str(signal.get("signal") or ("BLUE" if direction == "LONG" else "RED")),
                 signal_time=signal_close, bubble_price=bubble_price, signal_atr=atr_value,
                 reference_sl=stop, stop_loss=stop, take_profit=target, rr_target=Decimal("3"),
+                supertrend_atr_length=volumatic.normalize_supertrend_atr_length(
+                    signal.get("supertrend_atr_length", self.supertrend_atr_length)
+                ),
+                supertrend_factor=volumatic.normalize_supertrend_factor(
+                    signal.get("supertrend_factor", self.supertrend_factor)
+                ),
                 entry=entry, expires_at=expiry_dt, signal_close_price=signal_close_price,
                 created_at=trade_created_at, entry_order_created_at=entry_order_created_at,
                 entry_window_closes_at=entry_window_closes_at,
@@ -5433,7 +5502,11 @@ class TradingEngine:
             elif self.real_mode:
                 quantity, reason = compute_quantity(trade.entry, trade.margin_usdt, trade.leverage, sizing_filters)
                 if quantity is None:
-                    raise RuntimeError(f"Ukuran order REAL ditolak: {reason}")
+                    raise RuntimeError(
+                        f"Ukuran order REAL ditolak: {reason}. Fixed margin harus tetap dalam "
+                        f"rentang {REAL_NOTIONAL_MIN_RATIO * 100:.0f}–{REAL_NOTIONAL_MAX_RATIO * 100:.0f}% dari target; "
+                        "jika LOT_SIZE Binance tidak memungkinkan, order tidak dipaksakan lebih besar."
+                    )
                 trade.quantity = quantity
                 trade.actual_notional = quantity * trade.entry
             else:
@@ -5469,11 +5542,16 @@ class TradingEngine:
                     f"H4 EMA: {ema_filter_values_label(trade.ema_filter_length, trade.ema_filter_value, trade.ema_filter_slow_value)}\n"
                     f"Entry level (next M15 OPEN): {fmt_price(trade.entry)}\n"
                     f"Eksekusi: {'MARKET saat harga menyentuh level (dipantau WebSocket)' if trade.real_intent else 'PAPER saat harga menyentuh level'}\n"
-                    f"Supertrend M15 SL: {fmt_price(trade.stop_loss)}\n"
+                    f"Supertrend M15 SL: {fmt_price(trade.stop_loss)} • ATR {trade.supertrend_atr_length} / Factor {trade.supertrend_factor:g}\n"
                     f"TP: {fmt_price(trade.take_profit)} • RR 1:3 (dihitung ulang dari harga fill)\n"
                     f"Auto-expire: 1 jam ({format_wib(trade.expires_at)})\n"
-                    f"Margin: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
-                    f"Sizing: {'MINIMUM AUTO' if trade.min_margin_mode else 'FIXED TARGET'} • Qty (estimasi): {format_qty(trade.quantity or Decimal('0'))}\n"
+                    f"Margin target: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
+                    + (
+                        f"Estimasi margin qty: {fmt_num((trade.actual_notional or Decimal('0')) / Decimal(trade.leverage), 5)} USDT "
+                        f"({'guard ±5% REAL' if trade.real_intent else 'PAPER exact'})\n"
+                        if not trade.min_margin_mode and trade.actual_notional is not None else ""
+                    )
+                    + f"Sizing: {'MINIMUM AUTO' if trade.min_margin_mode else 'FIXED TARGET'} • Qty (estimasi): {format_qty(trade.quantity or Decimal('0'))}\n"
                     f"Mode: {'REAL' if trade.real_intent else 'PAPER'}"
                 )
             finally:
@@ -5683,7 +5761,12 @@ class TradingEngine:
         else:
             quantity, reason = compute_quantity(live, trade.margin_usdt, trade.leverage, filters, sizing_available)
             if quantity is None:
-                raise MarketEntryRejected("SIZE_REJECTED", f"Ukuran order ditolak: {reason}")
+                raise MarketEntryRejected(
+                    "SIZE_REJECTED",
+                    f"Ukuran order ditolak: {reason}. Fixed margin dijaga pada rentang "
+                    f"{REAL_NOTIONAL_MIN_RATIO * 100:.0f}–{REAL_NOTIONAL_MAX_RATIO * 100:.0f}% dari target; "
+                    "order ditolak bila aturan LOT_SIZE memaksa margin terlalu jauh.",
+                )
         market_cap = Decimal(str(filters.get("market_max_qty") or "0"))
         if market_cap > 0 and quantity > market_cap:
             raise MarketEntryRejected("QTY_ABOVE_MARKET_MAX", f"Qty {format_qty(quantity)} melebihi batas MARKET {format_qty(market_cap)}.")
@@ -7043,12 +7126,17 @@ class TradingEngine:
                 log.exception("[MAINTENANCE] loop error: %s", exc)
                 await asyncio.sleep(3)
 
-    def _kline_history_limit(self, trend_length: int | None = None) -> int:
-        """M15 history sized for Volumatic EMA-SWMA and Supertrend warm-up."""
+    def _kline_history_limit(
+        self, trend_length: int | None = None, supertrend_atr_length: int | None = None
+    ) -> int:
+        """M15 history sized for Volumatic EMA-SWMA and configured Supertrend warm-up."""
         length = volumatic.normalize_trend_length(
             self.trend_length if trend_length is None else trend_length
         )
-        needed = max(KLINE_HISTORY, volumatic.SUPERTREND_ATR_LENGTH + 20, length * 4 + 12)
+        atr_length = volumatic.normalize_supertrend_atr_length(
+            self.supertrend_atr_length if supertrend_atr_length is None else supertrend_atr_length
+        )
+        needed = max(KLINE_HISTORY, atr_length + 20, length * 4 + 12)
         return min(1500, int(needed))
 
     def _h4_ema_history_limit(self, ema_config: Any = None) -> int:
@@ -8197,6 +8285,81 @@ class TradingEngine:
         )
         log.info("[CONFIG] EMA directional filter: %s -> %s", old_text, new_text)
 
+    def _reset_scan_after_supertrend_change(self) -> None:
+        self._live_signal_candles.clear()
+        self._live_signal_last_eval.clear()
+        self._live_signal_seen.clear()
+        self._signal_retries.clear()
+        self.last_processed_candles.clear()
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+
+    async def _handle_atr(self, text: str) -> None:
+        parts = str(text or "").split()
+        if len(parts) == 1:
+            await self.reply(
+                f"SUPERTREND M15 ATR LENGTH: {self.supertrend_atr_length}\n"
+                f"Default: {volumatic.SUPERTREND_ATR_LENGTH}\n\n"
+                "Gunakan /ATR <angka>, contoh /ATR 14.\n"
+                f"Rentang: {volumatic.MIN_SUPERTREND_ATR_LENGTH}–{volumatic.MAX_SUPERTREND_ATR_LENGTH}.\n"
+                "Ini hanya mengubah ATR untuk garis SuperTrend/SL M15; ATR internal Volumatic tetap 200."
+            )
+            return
+        if len(parts) != 2:
+            await self.reply("Gunakan /ATR <angka> dengan bilangan bulat positif, contoh /ATR 14.")
+            return
+        try:
+            selected = volumatic.normalize_supertrend_atr_length(parts[1])
+        except ValueError as exc:
+            await self.reply(f"❌ {exc}")
+            return
+        old = self.supertrend_atr_length
+        if selected == old:
+            await self.reply(f"SuperTrend ATR Length sudah {selected}.")
+            return
+        self.supertrend_atr_length = selected
+        self._reset_scan_after_supertrend_change()
+        await self._save_runtime_settings()
+        await self.reply(
+            f"✅ SUPERTREND ATR LENGTH UPDATED\n\nPrevious : {old}\nCurrent  : {selected}\n"
+            f"Factor   : {self.supertrend_factor:g}\n"
+            "History M15 dan cursor scanner disesuaikan. Berlaku untuk sinyal/order baru; SL/TP trade aktif tidak berubah."
+        )
+        log.info("[CONFIG] SuperTrend M15 ATR Length changed: %s -> %s", old, selected)
+
+    async def _handle_factor(self, text: str) -> None:
+        parts = str(text or "").split()
+        if len(parts) == 1:
+            await self.reply(
+                f"SUPERTREND M15 FACTOR: {self.supertrend_factor:g}\n"
+                f"Default: {volumatic.SUPERTREND_FACTOR:g}\n\n"
+                "Gunakan /Factor <angka>, contoh /Factor 3 atau /Factor 2.5.\n"
+                "Desimal boleh memakai titik atau koma. Rentang: lebih besar dari 0 sampai 1000."
+            )
+            return
+        if len(parts) != 2:
+            await self.reply("Gunakan /Factor <angka>, contoh /Factor 3 atau /Factor 2.5.")
+            return
+        try:
+            selected = volumatic.normalize_supertrend_factor(parts[1])
+        except ValueError as exc:
+            await self.reply(f"❌ {exc}")
+            return
+        old = self.supertrend_factor
+        if selected == old:
+            await self.reply(f"SuperTrend Factor sudah {selected:g}.")
+            return
+        self.supertrend_factor = selected
+        self._reset_scan_after_supertrend_change()
+        await self._save_runtime_settings()
+        await self.reply(
+            f"✅ SUPERTREND FACTOR UPDATED\n\nPrevious : {old:g}\nCurrent  : {selected:g}\n"
+            f"ATR Length: {self.supertrend_atr_length}\n"
+            "Cache/cursor scanner dibangun ulang. Berlaku untuk sinyal/order baru; SL/TP trade aktif tidak berubah."
+        )
+        log.info("[CONFIG] SuperTrend M15 Factor changed: %s -> %s", old, selected)
+
     async def _handle_timeframe(self, text: str) -> None:
         await self.reply(
             "Timeframe strategi dikunci agar sama dengan backtest:\n"
@@ -8628,6 +8791,7 @@ class TradingEngine:
             f"ACTIVE TRADES • {slot_count}/{self.max_active_trades} slots\n"
             f"PENDING SLOTS: {pending_slots} • FILLED SLOTS: {filled_slots} • LIVE LIMITS: {live_limits}\n"
             f"Scanner TF: {self.timeframe} • Length: {self.trend_length} • EMA filter: {current_ema}\n"
+            f"SuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
             + (f"{snapshot_note}\n" if snapshot_note else "")
         ]
 
@@ -8662,6 +8826,7 @@ class TradingEngine:
                     f"⏳ {t.pair} • PENDING {t.direction} ({t.timeframe} • LEN {t.trend_length})\n"
                     f"Signal: {t.signal} | Signal close: {fmt_price(t.signal_close_price or t.entry)} | Entry level (next M15 open): {fmt_price(t.entry)}\n"
                     f"Planned SL: {fmt_price(t.stop_loss or t.reference_sl)} | Planned TP: {fmt_price(t.take_profit)} (RR 1:3; installed after fill)\n"
+                    f"SuperTrend source: ATR {t.supertrend_atr_length} • Factor {t.supertrend_factor:g}\n"
                     f"EMA H4 at signal: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
@@ -8704,6 +8869,7 @@ class TradingEngine:
                     f"{'🟢' if t.direction == 'LONG' else '🔴'} {t.pair} • {t.direction} FILLED ({t.timeframe} • LEN {t.trend_length})\n"
                     f"Entry: {fmt_price(entry)} | Live: {fmt_price(price)}\n"
                     f"SL M15 Supertrend: {fmt_price(t.stop_loss or t.reference_sl)} | TP 3R: {fmt_price(t.take_profit)}\n"
+                    f"SuperTrend source: ATR {t.supertrend_atr_length} • Factor {t.supertrend_factor:g}\n"
                     f"Protection: {t.protection_state} (SL {t.sl_algo_status} / TP {t.tp_algo_status})\n"
                     f"Algo IDs: SL {t.sl_algo_id or '-'} / TP {t.tp_algo_id or '-'}\n"
                     f"EMA H4 at signal: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
@@ -9238,12 +9404,13 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
+            f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nSuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
             f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending slots: {pending} | Filled slots: {filled} | Live LIMITs: {live_limits} | Max: {self.max_active_trades}\n"
             f"Binance REST cooldown: {self._binance_cooldown_remaining():.0f}s | Deferred commands: {len(self.deferred_commands)}\n"
             f"REAL entry: {'ON' if self.real_mode else 'OFF'} | Margin mode: {'MINIMUM AUTO' if self.min_margin_enabled else 'FIXED'} | Fixed margin: {self.margin_usdt} USDT | Leverage: {self.leverage}x\n"
+            f"Fixed margin guard: {'MINIMUM AUTO (not fixed)' if self.min_margin_enabled else '95%–105% of target (REAL sizing)'}\n"
             f"AUTOSTOP: {'TRIGGERED' if self._autostop_triggered else (decimal_to_str(self.autostop_percent) + '%' if self.autostop_percent is not None else 'OFF')} | Peak: {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '-'} USDT\n"
             f"History: {len(self.history_records)} | Events: {len(self.history_events)} | Session: {self.session_id}"
         )
@@ -9256,6 +9423,8 @@ class TradingEngine:
             "/timeframe - strategi tetap: H4 EMA + M15 Volumatic/Supertrend\n"
             "/length <angka> - atur Trend Length Volumatic bebas (bilangan bulat positif; default 100)\n"
             "/EMA <angka|off> atau /EMA <angka1> <angka2> - filter EMA single/dual bebas\n"
+            f"/ATR <angka> - atur SuperTrend M15 ATR Length (default {volumatic.SUPERTREND_ATR_LENGTH})\n"
+            f"/Factor <angka> - atur SuperTrend M15 Factor (default {volumatic.SUPERTREND_FACTOR:g})\n"
             "/max [angka] - batas total pending + filled\n"
             "/trade - lihat pending order dan posisi aktif\n"
             "/stats - statistik trade, PnL, win rate, DD, R\n"
@@ -9289,6 +9458,8 @@ class TradingEngine:
         if command == "/timeframe": await self._handle_timeframe(text)
         elif command == "/length": await self._handle_length(text)
         elif command == "/ema": await self._handle_ema(text)
+        elif command == "/atr": await self._handle_atr(text)
+        elif command == "/factor": await self._handle_factor(text)
         elif command == "/scan": await self._handle_scan(text)
         elif command == "/max": await self._handle_max(text)
         elif command == "/margin": await self._handle_margin(text)
