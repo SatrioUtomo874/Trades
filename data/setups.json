@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.1.0",
-  "updated_at": "2026-11-08T08:53:05.286717+00:00",
+  "updated_at": "2026-11-08T08:53:14.570088+00:00",
   "active_trades": [
     {
       "trade_id": "ESPORTSUSDT-20261108-130839-2CE7BF",
@@ -838,7 +838,7 @@
       "tp_client_algo_id": "VTTPSDT-20261108-155214-D9F30D",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
