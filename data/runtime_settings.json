@@ -3,7 +3,7 @@
   "timeframe": "M15",
   "trend_length": 100,
   "ema_filter_length": 100,
-  "max_active_trades": 100,
+  "max_active_trades": 6,
   "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": true,
@@ -13,5 +13,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-08T01:56:45.300285+00:00"
+  "updated_at": "2026-11-08T01:56:50.011153+00:00"
 }
