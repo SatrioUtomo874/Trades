@@ -5,7 +5,7 @@
   "ema_filter_length": 100,
   "supertrend_atr_length": 10,
   "supertrend_factor": 3.0,
-  "max_active_trades": 100,
+  "max_active_trades": 6,
   "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": false,
@@ -15,5 +15,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-08T06:08:50.808295+00:00"
+  "updated_at": "2026-11-08T06:08:55.990567+00:00"
 }
