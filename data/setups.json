@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-08T02:57:50.916692+00:00",
+  "updated_at": "2026-11-08T02:58:00.138826+00:00",
   "active_trades": [
     {
       "trade_id": "BNBUSDT-20261108-090008-B73EAF",
@@ -638,7 +638,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "926047234:NEW:NEW:0:0",
+      "last_ws_event_key": "926047234:TRADE:FILLED:13:79818861",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
