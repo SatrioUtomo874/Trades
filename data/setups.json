@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.1.0",
-  "updated_at": "2026-11-08T08:21:38.725533+00:00",
+  "updated_at": "2026-11-08T08:22:36.214419+00:00",
   "active_trades": [
     {
       "trade_id": "ESPORTSUSDT-20261108-130839-2CE7BF",
@@ -722,8 +722,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-08T08:22:35.583113+00:00",
+      "entry_trigger_price": "0.005688",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "2.1.0",
       "entry_reason": "Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN, MARKET order when price touches it",
