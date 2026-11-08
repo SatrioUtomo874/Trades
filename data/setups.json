@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.1.0",
-  "updated_at": "2026-11-08T08:22:52.627566+00:00",
+  "updated_at": "2026-11-08T08:23:00.914949+00:00",
   "active_trades": [
     {
       "trade_id": "ESPORTSUSDT-20261108-130839-2CE7BF",
@@ -716,7 +716,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "4133880645:NEW:NEW:0:0",
+      "last_ws_event_key": "4133880645:TRADE:FILLED:965:527373406",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
