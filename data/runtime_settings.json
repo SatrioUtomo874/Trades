@@ -272,12 +272,20 @@
     "M15:KAVAUSDT": 1794120300000,
     "M15:KERNELUSDT": 1794120300000,
     "M15:KGENUSDT": 1794120300000,
-    "M15:KITEUSDT": 1794120300000
+    "M15:KITEUSDT": 1794120300000,
+    "M15:KMNOUSDT": 1794120300000,
+    "M15:KNCUSDT": 1794120300000,
+    "M15:KOMAUSDT": 1794120300000,
+    "M15:KSMUSDT": 1794120300000,
+    "M15:LABUSDT": 1794120300000,
+    "M15:LAUSDT": 1794120300000,
+    "M15:LAYERUSDT": 1794120300000,
+    "M15:LDOUSDT": 1794120300000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 261,
+  "scan_resume_cursor": 269,
   "scan_resume_boundary_ms": 1794120300000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-08T06:58:39.945784+00:00"
+  "updated_at": "2026-11-08T07:00:23.618677+00:00"
 }
