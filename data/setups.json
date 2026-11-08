@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.1.0",
-  "updated_at": "2026-11-08T06:53:47.390147+00:00",
+  "updated_at": "2026-11-08T06:53:55.149412+00:00",
   "active_trades": [
     {
       "trade_id": "B2USDT-20261108-130839-B0609C",
@@ -873,7 +873,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "22101476912:NEW:NEW:0:0",
+      "last_ws_event_key": "22101476912:TRADE:FILLED:3553:899756814",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
