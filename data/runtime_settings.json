@@ -27,7 +27,7 @@
     "M15:1MBABYDOGEUSDT": 1794105900000,
     "M15:2ZUSDT": 1794105900000,
     "M15:4USDT": 1794105900000,
-    "M15:AAVEUSDT": 1794105000000,
+    "M15:AAVEUSDT": 1794105900000,
     "M15:ACEUSDT": 1794105000000,
     "M15:ACHUSDT": 1794105000000,
     "M15:ACTUSDT": 1794105000000,
@@ -533,8 +533,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 16,
+  "scan_resume_cursor": 17,
   "scan_resume_boundary_ms": 1794105900000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-08T02:54:19.654081+00:00"
+  "updated_at": "2026-11-08T02:54:39.217423+00:00"
 }
