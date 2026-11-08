@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-08T05:21:11.387876+00:00",
+  "updated_at": "2026-11-08T05:21:19.871278+00:00",
   "active_trades": [
     {
       "trade_id": "GRASSUSDT-20261108-090739-C08839",
@@ -915,7 +915,7 @@
       "tp_client_algo_id": "VTTPSDT-20261108-122038-CF19B6",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
