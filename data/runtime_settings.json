@@ -256,12 +256,16 @@
     "M15:IOTAUSDT": 1794103200000,
     "M15:IOTXUSDT": 1794103200000,
     "M15:IOUSDT": 1794103200000,
-    "M15:IRYSUSDT": 1794103200000
+    "M15:IRYSUSDT": 1794103200000,
+    "M15:JASMYUSDT": 1794103200000,
+    "M15:JCTUSDT": 1794103200000,
+    "M15:JELLYJELLYUSDT": 1794103200000,
+    "M15:JOEUSDT": 1794103200000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 246,
+  "scan_resume_cursor": 250,
   "scan_resume_boundary_ms": 1794103200000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-08T02:09:10.989002+00:00"
+  "updated_at": "2026-11-08T02:09:18.515051+00:00"
 }
