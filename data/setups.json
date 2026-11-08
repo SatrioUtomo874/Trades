@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-08T04:16:37.789912+00:00",
+  "updated_at": "2026-11-08T04:16:45.486735+00:00",
   "active_trades": [
     {
       "trade_id": "GRASSUSDT-20261108-090739-C08839",
@@ -585,11 +585,11 @@
       "stop_loss": "0.01836",
       "take_profit": "0.01748",
       "rr_target": "3",
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002068040464,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261108-111614-F18DC2",
       "tp_client_algo_id": "VTTPSDT-20261108-111614-F18DC2",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
