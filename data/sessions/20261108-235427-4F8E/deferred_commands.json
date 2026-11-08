@@ -5,10 +5,10 @@
       "command_id": "b1736503d39043a182d9b9ab9325f035",
       "command": "/real on",
       "queued_at": "2026-11-08T16:54:53.266064+00:00",
-      "attempts": 0,
-      "next_retry_at": "",
-      "last_error": "HTTP 418 | code -1003 | /fapi/v2/account: Way too many requests; IP(74.220.52.251) banned until 1794160974830. Please use the websocket for live updates to avoid bans."
+      "attempts": 1,
+      "next_retry_at": "2026-11-08T18:06:12.589722+00:00",
+      "last_error": "HTTP 418 | code -1003 | /fapi/v1/listenKey: Way too many requests; IP(74.220.52.251) banned until 1794161695587. Please use the websocket for live updates to avoid bans."
     }
   ],
-  "updated_at": "2026-11-08T16:54:53.266081+00:00"
+  "updated_at": "2026-11-08T18:06:07.589750+00:00"
 }
