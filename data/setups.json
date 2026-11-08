@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.1.0",
-  "updated_at": "2026-11-08T06:58:36.770505+00:00",
+  "updated_at": "2026-11-08T06:58:44.575320+00:00",
   "active_trades": [
     {
       "trade_id": "B2USDT-20261108-130839-B0609C",
@@ -904,11 +904,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002068832526,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002068832999,
       "sl_client_algo_id": "VTSLSDT-20261108-135812-A8494A",
       "tp_client_algo_id": "VTTPSDT-20261108-135812-A8494A",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
@@ -956,7 +956,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "1931848764:NEW:NEW:0:0",
+      "last_ws_event_key": "1931848764:TRADE:FILLED:51:227577273",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
