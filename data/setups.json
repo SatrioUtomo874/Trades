@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.0.0",
-  "updated_at": "2026-11-08T03:02:39.010765+00:00",
+  "updated_at": "2026-11-08T03:02:42.874228+00:00",
   "active_trades": [
     {
       "trade_id": "BNBUSDT-20261108-090008-B73EAF",
@@ -342,11 +342,11 @@
       "stop_loss": "0.09153",
       "take_profit": "0.08781",
       "rr_target": "3",
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002067559214,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261108-093723-CF2D00",
       "tp_client_algo_id": "VTTPSDT-20261108-093723-CF2D00",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
