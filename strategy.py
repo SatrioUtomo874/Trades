@@ -4,7 +4,8 @@
 The original ChartPrime-derived EMA-SWMA bubble logic is retained. This module
 adds the closed-candle execution model used by backtest.py: a confirmed M15
 bubble is filtered by the latest fully closed H4 EMA state, enters at the next
-M15 candle open, takes the M15 Supertrend line as SL and computes a fixed 3R TP.
+M15 candle open, takes the M15 Supertrend line as SL, and starts TP at 3R before extending it
+to the farthest unmitigated Volume Liquidity Trend pool inside the 3R-4R cap.
 No intrabar/visual-offset Mode-B signal is used by the live engine.
 
 Original indicator attribution/license notice: © ChartPrime, MPL-2.0.
@@ -17,7 +18,7 @@ from typing import Any, Mapping
 import numpy as np
 
 STRATEGY_NAME = "VOLUMATIC_TREND"
-STRATEGY_VERSION = "2.1.0"
+STRATEGY_VERSION = "2.4.0"
 DEFAULT_TREND_LENGTH = 100
 TREND_LENGTH = DEFAULT_TREND_LENGTH  # backward-compatible public default
 MIN_TREND_LENGTH = 1
@@ -40,7 +41,38 @@ MIN_SUPERTREND_ATR_LENGTH = 1
 # beyond the configured ATR window for adjacent indicator calculations.
 MAX_SUPERTREND_ATR_LENGTH = 1480
 MAX_SUPERTREND_FACTOR = 1000.0
-RR_TARGET = 3.0
+RR_TARGET = 3.0  # legacy alias for the default RR_MIN
+RR_MIN = 3.0
+RR_MAX = 4.0
+MAX_RR_VALUE = 1000.0
+LIQ_K = 0.05
+LIQ_LENGTH = 1
+LIQ_ATR_LEN = 200
+LIQ_ATR_MULT = 2.0
+LIQ_VOL_CUTOFF = 0.1
+
+
+def normalize_rr_value(value: Any, field_name: str = "RR") -> float:
+    """Validate a configurable positive RR multiple; decimal commas are accepted."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} harus berupa angka positif.")
+    raw = str(value).strip().replace(",", ".")
+    try:
+        selected = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} harus berupa angka positif.") from exc
+    if not np.isfinite(selected) or selected <= 0 or selected > MAX_RR_VALUE:
+        raise ValueError(f"{field_name} harus lebih besar dari 0 dan maksimal {MAX_RR_VALUE:g}.")
+    return selected
+
+
+def normalize_rr_range(rr_min: Any, rr_max: Any) -> tuple[float, float]:
+    """Validate the base/floor RR and maximum liquidity-extension RR."""
+    low = normalize_rr_value(rr_min, "RR_MIN")
+    high = normalize_rr_value(rr_max, "RR_MAX")
+    if high < low:
+        raise ValueError(f"RR_MAX ({high:g}) tidak boleh lebih kecil dari RR_MIN ({low:g}).")
+    return low, high
 
 
 def normalize_supertrend_atr_length(value: Any) -> int:
@@ -886,7 +918,8 @@ def trade_result_r(direction: str, entry_price: float, exit_price: float, initia
 
 __all__ = [
     "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "DEFAULT_TREND_LENGTH",
-    "EMA_TIMEFRAME", "SIGNAL_TIMEFRAME", "SUPERTREND_ATR_LENGTH", "SUPERTREND_FACTOR", "RR_TARGET", "detect_backtest_signal",
+    "EMA_TIMEFRAME", "SIGNAL_TIMEFRAME", "SUPERTREND_ATR_LENGTH", "SUPERTREND_FACTOR", "RR_TARGET", "RR_MIN", "RR_MAX",
+    "MAX_RR_VALUE", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal",
     "MIN_TREND_LENGTH", "MAX_TREND_LENGTH", "normalize_trend_length", "ATR_LENGTH",
     "MIN_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_FACTOR",
     "normalize_supertrend_atr_length", "normalize_supertrend_factor",
@@ -975,6 +1008,123 @@ def _backtest_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, length: 
     return _backtest_smooth(tr, length, 1.0 / float(length))
 
 
+def _liquidity_kalman(src: np.ndarray, k: float = LIQ_K, length: int = LIQ_LENGTH) -> np.ndarray:
+    """Mirror Pine: M_n = k * src + (1-k) * nz(M_n[length])."""
+    values = np.asarray(src, dtype=np.float64)
+    out = np.zeros(len(values), dtype=np.float64)
+    for i, value in enumerate(values):
+        previous = out[i - length] if i >= length else 0.0
+        out[i] = float(k) * float(value) + (1.0 - float(k)) * previous
+    return out
+
+
+def _volume_liquidity_state(
+    open_: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    volume: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Recreate Volume Liquidity Trend's active trend segment and pool state.
+
+    Pool price is HLC3. A historical pool is mitigated only when a later
+    candle BODY (open-close range), not merely its wick, crosses that price.
+    """
+    o = np.asarray(open_, dtype=np.float64)
+    h = np.asarray(high, dtype=np.float64)
+    l = np.asarray(low, dtype=np.float64)
+    c = np.asarray(close, dtype=np.float64)
+    v = np.asarray(volume, dtype=np.float64)
+    n = len(c)
+    if not (len(o) == len(h) == len(l) == len(v) == n):
+        raise ValueError("OHLCV M15 untuk Volume Liquidity Trend tidak sama panjang.")
+    if n == 0:
+        empty_i = np.asarray([], dtype=np.int64)
+        empty_f = np.asarray([], dtype=np.float64)
+        return empty_i, empty_f, empty_f, empty_f, empty_f
+
+    kalman = _liquidity_kalman(c, LIQ_K, LIQ_LENGTH)
+    atr = _backtest_atr(h, l, c, LIQ_ATR_LEN)
+    band = atr * LIQ_ATR_MULT
+    upper = kalman + band
+    lower = kalman - band
+
+    # ta.crossover(close, upper) and ta.crossunder(close, lower).
+    events = np.zeros(n, dtype=np.int8)
+    with np.errstate(invalid="ignore"):
+        events[1:][(c[1:] > upper[1:]) & (c[:-1] <= upper[:-1])] = 1
+        events[1:][(c[1:] < lower[1:]) & (c[:-1] >= lower[:-1])] = -1
+
+    positions = np.arange(n, dtype=np.int64)
+    last_event = np.maximum.accumulate(np.where(events != 0, positions, -1))
+    trend = (last_event >= 0) & (events[np.maximum(last_event, 0)] == 1)
+    trend_change = trend != np.r_[False, trend[:-1]]
+    start = np.maximum.accumulate(np.where(trend_change, positions, 0))
+    hlc3 = (h + l + c) / 3.0
+    body_max = np.maximum(o, c)
+    body_min = np.minimum(o, c)
+    return start, hlc3, body_max, body_min, v
+
+
+def _volume_liquidity_target(
+    liquidity: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    index: int,
+    side: int,
+    entry: float,
+    risk: float,
+    rr_min: float = RR_MIN,
+    rr_max: float = RR_MAX,
+) -> tuple[float | None, float | None]:
+    """Choose the FARTHEST unmitigated pool in [rr_min, rr_max], otherwise no pool.
+
+    Candidates are ordered from the furthest RR back toward 3R. This is
+    deliberate: when 3.33R and 3.60R pools both qualify, 3.60R is selected.
+    """
+    start, hlc3, body_max, body_min, volume = liquidity
+    i = int(index)
+    direction = int(side)
+    if direction not in (-1, 1) or i < 0 or i >= len(hlc3):
+        return None, None
+    if not np.isfinite(entry) or not np.isfinite(risk) or entry <= 0 or risk <= 0:
+        return None, None
+
+    segment_start = int(start[i])
+    segment_volume = volume[segment_start:i + 1]
+    segment_levels = hlc3[segment_start:i + 1]
+    if segment_volume.size == 0 or not np.all(np.isfinite(segment_volume)):
+        return None, None
+    max_volume = float(np.max(segment_volume))
+    if not max_volume > 0:
+        return None, None
+
+    rr_low = float(entry) + direction * float(rr_min) * float(risk)
+    rr_high = float(entry) + direction * float(rr_max) * float(risk)
+    if direction == 1:
+        in_range = (segment_levels >= rr_low) & (segment_levels <= rr_high)
+    else:
+        in_range = (segment_levels <= rr_low) & (segment_levels >= rr_high)
+    candidates = np.flatnonzero(
+        in_range & (segment_volume / max_volume > LIQ_VOL_CUTOFF)
+    )
+    if candidates.size == 0:
+        return None, None
+
+    # Highest (level * side) is the furthest pool in the trade direction.
+    order = np.argsort(-(segment_levels[candidates] * direction), kind="stable")
+    for offset in candidates[order]:
+        pool_price = float(segment_levels[offset])
+        # Match Pine's mitigation: check subsequent candle bodies through
+        # the current confirmed signal candle, excluding the pool's own bar.
+        future = slice(segment_start + int(offset) + 1, i + 1)
+        mitigated = np.any(
+            (body_min[future] <= pool_price) & (body_max[future] >= pool_price)
+        )
+        if not mitigated:
+            rr = ((pool_price - float(entry)) * direction) / float(risk)
+            return pool_price, float(rr)
+    return None, None
+
+
 def _backtest_supertrend(
     high: np.ndarray, low: np.ndarray, close: np.ndarray,
     length: int = SUPERTREND_ATR_LENGTH,
@@ -1038,6 +1188,70 @@ def _ema_pair_from_config(
     return float(ema[-1]), None, True, True
 
 
+def _btc_ema_filter_state(
+    btc_h4_closed: Any | None,
+    ema_config: int | tuple[int, int] | None,
+    direction: str,
+    signal_close_time_ms: int,
+) -> tuple[float | None, float | None, bool, bool, int | None, float | None, str]:
+    """Evaluate the mandatory BTC H4 dual-EMA gate at the signal's close time.
+
+    The BTC history must contain completed H4 candles only. The selected
+    candle uses the same timestamp convention as the altcoin H4 filter.
+    Single-EMA and OFF configurations cannot define a fast/slow pair, so the
+    BTC gate remains closed until /EMA FAST SLOW is configured.
+    """
+    selected = normalize_ema_filter_length(ema_config)
+    if not isinstance(selected, tuple):
+        return None, None, False, False, None, None, "BTC_EMA_REQUIRES_DUAL_EMA"
+    if btc_h4_closed is None:
+        return None, None, False, False, None, None, "BTC_H4_DATA_UNAVAILABLE"
+    try:
+        btc_ts, _bo, _bh, _bl, btc_close, _bv = _extract_columns(btc_h4_closed)
+    except (TypeError, ValueError, IndexError):
+        return None, None, False, False, None, None, "BTC_H4_DATA_INVALID"
+    # Select the latest fully closed BTC H4 candle at the M15 signal close.
+    h4_index = int(np.searchsorted(
+        btc_ts,
+        int(signal_close_time_ms) - TIMEFRAME_MS["H4"],
+        side="right",
+    ) - 1)
+    if h4_index < 0 or h4_index >= len(btc_close):
+        return None, None, False, False, None, None, "BTC_H4_CANDLE_NOT_READY"
+    expected_h4_open = (
+        (int(signal_close_time_ms) // TIMEFRAME_MS["H4"]) * TIMEFRAME_MS["H4"]
+        - TIMEFRAME_MS["H4"]
+    )
+    if int(btc_ts[h4_index]) != expected_h4_open:
+        return (
+            None, None, False, False, int(btc_ts[h4_index]),
+            float(btc_close[h4_index]), "BTC_H4_CANDLE_STALE",
+        )
+    fast_value, slow_value, ready, _ = _ema_pair_from_config(
+        btc_close[:h4_index + 1], selected
+    )
+    reference_close = float(btc_close[h4_index])
+    if not ready or fast_value is None or slow_value is None:
+        return None, None, False, False, int(btc_ts[h4_index]), reference_close, "BTC_H4_EMA_NOT_READY"
+    side = str(direction).upper()
+    if side == "LONG":
+        passed = bool(fast_value > slow_value)
+    elif side == "SHORT":
+        passed = bool(fast_value < slow_value)
+    else:
+        passed = False
+    if passed:
+        reason = "OK"
+    elif fast_value == slow_value:
+        reason = "BTC_H4_EMA_FAST_EQUALS_SLOW"
+    else:
+        reason = "BTC_H4_EMA_DIRECTION_NOT_ALIGNED"
+    return (
+        float(fast_value), float(slow_value), True, bool(passed),
+        int(btc_ts[h4_index]), reference_close, reason,
+    )
+
+
 def detect_backtest_signal(
     m15_with_forming: Any,
     h4_closed: Any,
@@ -1047,18 +1261,26 @@ def detect_backtest_signal(
     ema_filter_length: int | tuple[int, int] | None = DEFAULT_EMA_FILTER_LENGTH,
     supertrend_atr_length: int = SUPERTREND_ATR_LENGTH,
     supertrend_factor: float = SUPERTREND_FACTOR,
-    rr_target: float = RR_TARGET,
+    rr_target: float | None = None,
+    rr_min: float = RR_MIN,
+    rr_max: float = RR_MAX,
+    btc_h4_closed: Any | None = None,
 ) -> dict[str, Any] | None:
-    """Detect only the newest just-closed M15 flip and prepare next-open entry.
+    """Detect a confirmed M15 flip and prepare its next-open entry.
 
-    `m15_with_forming` must contain closed M15 candles plus exactly one current
-    forming M15 row. `h4_closed` must contain only completed H4 candles. The H4
-    sample is selected with the same timestamp convention as backtest.py.
+    `m15_with_forming` contains closed M15 candles plus one current forming row.
+    Both `h4_closed` and `btc_h4_closed` contain completed H4 candles only.
+    The altcoin and BTC H4 samples are aligned to the same M15 signal-close time.
+    The BTC fast/slow EMA gate is mandatory and uses the /EMA dual periods.
     """
     length = normalize_trend_length(trend_length)
     filter_config = normalize_ema_filter_length(ema_filter_length)
     supertrend_atr_length = normalize_supertrend_atr_length(supertrend_atr_length)
     supertrend_factor = normalize_supertrend_factor(supertrend_factor)
+    # rr_target is retained as a backward-compatible alias for older callers.
+    if rr_target is not None and rr_min == RR_MIN:
+        rr_min = rr_target
+    rr_min, rr_max = normalize_rr_range(rr_min, rr_max)
     mt, mo, mh, ml, mc, _mv = _extract_columns(m15_with_forming)
     ht, ho, hh, hl, hc, _hv = _extract_columns(h4_closed)
     if len(mt) < max(12, length + 8) or len(ht) < 3:
@@ -1103,6 +1325,13 @@ def detect_backtest_signal(
     else:
         filter_passed = bool(h4_reference_close > fast_value) if direction == "LONG" else bool(h4_reference_close < fast_value)
 
+    (
+        btc_fast_value, btc_slow_value, btc_filter_ready, btc_filter_passed,
+        btc_h4_open_time_ms, btc_h4_reference_close, btc_filter_reason,
+    ) = _btc_ema_filter_state(
+        btc_h4_closed, filter_config, direction, signal_close_ms
+    )
+
     st_line, st_direction = _backtest_supertrend(
         closed_high, closed_low, closed_close,
         int(supertrend_atr_length), float(supertrend_factor),
@@ -1115,7 +1344,29 @@ def detect_backtest_signal(
     risk = abs(entry - stop)
     if not protective or not np.isfinite(risk) or risk <= max(1e-12, entry * 1e-12):
         return None
-    target = entry + (1 if direction == "LONG" else -1) * float(rr_target) * risk
+    side = 1 if direction == "LONG" else -1
+    base_rr = float(rr_min)
+    target = entry + side * base_rr * risk
+    target_source = "RR_MIN_BASE"
+    target_rr = base_rr
+    liquidity_pool_price = None
+
+    # Use the M15 signal candle only (the final, fully closed row). The
+    # currently-forming entry candle is excluded from trend/liquidity state.
+    closed_open = mo[:-1]
+    closed_volume = _mv[:-1]
+    liquidity = _volume_liquidity_state(
+        closed_open, closed_high, closed_low, closed_close, closed_volume
+    )
+    pool_price, pool_rr = _volume_liquidity_target(
+        liquidity, len(closed_close) - 1, side, entry, risk, rr_min, rr_max
+    )
+    if pool_price is not None and pool_rr is not None and rr_min <= pool_rr <= rr_max:
+        target = float(pool_price)
+        target_source = "VOLUME_LIQUIDITY"
+        target_rr = float(pool_rr)
+        liquidity_pool_price = float(pool_price)
+
     if not np.isfinite(target) or target <= 0:
         return None
 
@@ -1149,8 +1400,14 @@ def detect_backtest_signal(
         "reference_sl": stop,
         "stop_loss": stop,
         "take_profit": target,
+        "take_profit_source": target_source,
+        "take_profit_rr": target_rr,
+        "rr_min": rr_min,
+        "rr_max": rr_max,
+        "liquidity_pool_price": liquidity_pool_price,
+        "liquidity_pool_rr": pool_rr if target_source == "VOLUME_LIQUIDITY" else None,
         "initial_risk": risk,
-        "rr_target": float(rr_target),
+        "rr_target": base_rr,
         "supertrend_line": stop,
         "supertrend_direction": int(st_direction[-1]) if len(st_direction) else 0,
         "supertrend_atr_length": int(supertrend_atr_length),
@@ -1163,6 +1420,14 @@ def detect_backtest_signal(
         "ema_filter_passed": bool(filter_passed),
         "ema_filter_ready": bool(filter_ready),
         "ema_h4_open_time_ms": int(ht[h4_index]),
+        "btc_ema_filter_length": list(filter_config) if isinstance(filter_config, tuple) else None,
+        "btc_ema_fast_value": btc_fast_value,
+        "btc_ema_slow_value": btc_slow_value,
+        "btc_ema_filter_passed": bool(btc_filter_passed),
+        "btc_ema_filter_ready": bool(btc_filter_ready),
+        "btc_ema_filter_reason": btc_filter_reason,
+        "btc_ema_reference_close": btc_h4_reference_close,
+        "btc_ema_h4_open_time_ms": btc_h4_open_time_ms,
         "trend_length": length,
         "repaint_risk": False,
     }
