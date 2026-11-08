@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.1.0",
-  "updated_at": "2026-11-08T12:42:02.192754+00:00",
+  "updated_at": "2026-11-08T14:28:17.987918+00:00",
   "active_trades": [
     {
       "trade_id": "ESPORTSUSDT-20261108-130839-2CE7BF",
@@ -673,10 +673,10 @@
       "tp_algo_id": 4000002069298296,
       "sl_client_algo_id": "VTSLSDT-20261108-153814-E57149",
       "tp_client_algo_id": "VTTPSDT-20261108-153814-E57149",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "CANCEL_WAIT_API",
-      "protection_error": "Proteksi closePosition menunggu REST pulih; tidak dianggap sudah dibatalkan.",
+      "sl_algo_status": "FINISHED",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
+      "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": "EXCHANGE_POSITION_FLAT_WS",
       "sl_submit_ambiguous": false,
