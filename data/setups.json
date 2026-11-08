@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.1.0",
-  "updated_at": "2026-11-08T08:23:00.914949+00:00",
+  "updated_at": "2026-11-08T08:23:05.090024+00:00",
   "active_trades": [
     {
       "trade_id": "ESPORTSUSDT-20261108-130839-2CE7BF",
@@ -663,11 +663,11 @@
       "rr_target": "3",
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002069201910,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261108-152131-43066D",
       "tp_client_algo_id": "VTTPSDT-20261108-152131-43066D",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
