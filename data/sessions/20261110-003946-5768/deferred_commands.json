@@ -5,10 +5,10 @@
       "command_id": "b814c807d8b44f12842dea6dda394a71",
       "command": "/real on",
       "queued_at": "2026-11-09T17:55:00.667564+00:00",
-      "attempts": 0,
-      "next_retry_at": "",
-      "last_error": "HTTP 418 | code -1003 | /fapi/v2/account: Way too many requests; IP(74.220.52.251) banned until 1794258469267. Please use the websocket for live updates to avoid bans."
+      "attempts": 1,
+      "next_retry_at": "2026-11-09T21:08:58.206035+00:00",
+      "last_error": "HTTP 429 | code -1003 | /fapi/v2/account: Binance REST sedang cooldown global (116s); request ditahan tanpa dikirim."
     }
   ],
-  "updated_at": "2026-11-09T17:55:00.667585+00:00"
+  "updated_at": "2026-11-09T21:08:53.206054+00:00"
 }
