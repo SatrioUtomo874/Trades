@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-09T17:21:45.971005+00:00",
+  "updated_at": "2026-11-09T17:21:57.877504+00:00",
   "active_trades": [
     {
       "trade_id": "BLURUSDT-20261110-001706-6233D1",
@@ -116,8 +116,8 @@
       "tp_client_algo_id": "VTTPSDT-20261110-001930-14AD93",
       "sl_algo_status": "REJECTED",
       "tp_algo_status": "NOT_PLACED",
-      "protection_state": "WAITING_FOR_EXCHANGE",
-      "protection_error": "SL Algo Order ditolak Binance: HTTP 400 | code -1021 | /fapi/v1/algoOrder: Timestamp for this request is outside of the recvWindow.",
+      "protection_state": "ERROR_REJECTED",
+      "protection_error": "SL Algo Order ditolak Binance; POST ulang otomatis dihentikan.",
       "protection_warning_sent": false,
       "protection_exit_reason": null,
       "sl_submit_ambiguous": false,
