@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-09T17:06:51.621859+00:00",
+  "updated_at": "2026-11-09T17:06:55.738470+00:00",
   "active_trades": [
     {
       "trade_id": "BLURUSDT-20261110-000611-FA5D08",
@@ -78,7 +78,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "6448935595:NEW:NEW:0:0",
+      "last_ws_event_key": "6448935595:TRADE:FILLED:818:303966417",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
