@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-10T14:39:09.557793+00:00",
+  "updated_at": "2026-11-10T14:39:12.901462+00:00",
   "active_trades": [
     {
       "trade_id": "AGLDUSDT-20261110-212133-6A6B09",
@@ -373,12 +373,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.006",
       "realized_r": null,
-      "quantity": "20.4",
-      "margin_usdt": "0.512244",
+      "quantity": "21.9",
+      "margin_usdt": "0.549909",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5",
-      "actual_notional": "5.12244",
+      "actual_notional": "5.49909",
       "real_enabled": true,
       "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
@@ -386,7 +386,7 @@
       "entry_client_order_id": "VTa364a1a23b49b4d3e3ee61934dcf",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "20.4",
+      "entry_executed_qty": "21.9",
       "entry_order_status": "PARTIALLY_FILLED",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
