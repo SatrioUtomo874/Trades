@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-10T15:12:11.004924+00:00",
+  "updated_at": "2026-11-10T15:41:42.098266+00:00",
   "active_trades": [
     {
       "trade_id": "AGLDUSDT-20261110-212133-6A6B09",
@@ -31,8 +31,8 @@
       "tp_client_algo_id": "VTTPSDT-20261110-212133-6A6B09",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
-      "protection_error": null,
+      "protection_state": "CANCEL_WAIT_API",
+      "protection_error": "Proteksi closePosition menunggu REST pulih; tidak dianggap sudah dibatalkan.",
       "protection_warning_sent": false,
       "protection_exit_reason": null,
       "sl_submit_ambiguous": false,
