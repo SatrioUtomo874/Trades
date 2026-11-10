@@ -182,6 +182,7 @@ LEVERAGE_CACHE_SECONDS = 900.0
 QTY_FILTER_CODES = (-1013, -1111, -4004, -4005, -4164)
 MAX_ACTIVE_TRADES = max(1, int(os.getenv("MAX_ACTIVE_TRADES", "100") or "100"))
 SCAN_MAX_PAIRS_PER_CYCLE = 50
+UNIVERSE_REFRESH_SECONDS = 60 * 60  # refresh symbol/filter metadata hourly; retain cache during recovery
 SCAN_PAIR_DELAY_SECONDS = float(os.getenv("SCAN_PAIR_DELAY_SECONDS", "0.15") or "0.15")
 SCAN_POLL_SECONDS = 2.0
 # One-time scanner activation slots in Asia/Jakarta (WIB). 12:00 is an
@@ -1225,15 +1226,15 @@ class ApiStats:
             return base
         ratio = max(0.0, float(self.used_weight) / float(BINANCE_IP_WEIGHT_LIMIT))
         if ratio >= 0.92:
-            return max(base, 5.0)
+            return max(base, 6.0)
         if ratio >= 0.85:
-            return max(base, 3.0)
+            return max(base, 4.0)
         if ratio >= 0.75:
-            return max(base, 1.8)
+            return max(base, 2.5)
         if ratio >= 0.65:
-            return max(base, 1.1)
+            return max(base, 1.5)
         if ratio >= 0.50:
-            return max(base, 0.70)
+            return max(base, 1.0)
         return base
 
 
@@ -1260,7 +1261,7 @@ class BinanceREST:
         self.base_url = BINANCE_REST_BASE
         self._exchange_info_cache: dict[str, SymbolMeta] | None = None
         self._exchange_info_cached_at = 0.0
-        self._exchange_info_cache_ttl_seconds = 900.0
+        self._exchange_info_cache_ttl_seconds = float(UNIVERSE_REFRESH_SECONDS)
         self._ticker_24h_cache: list[dict[str, Any]] | None = None
         self._ticker_24h_cached_at = 0.0
         # Universe ranking is based on rolling 24h volume; refreshing every 5 minutes
@@ -1290,6 +1291,116 @@ class BinanceREST:
         self._kline_cache_max_entries = 32
         self._kline_cache_max_candles = 350_000
         self._kline_cache_ttl = {"5m": 300.0, "15m": 45.0, "1h": 120.0, "4h": 300.0, "1d": 900.0}
+        # One current M15 row plus at most eight closed WebSocket rows per
+        # symbol. The maps are explicitly bounded for Render Free memory.
+        self._forming_klines: OrderedDict[tuple[str, str], tuple[int, float, float, float, float, float, float]] = OrderedDict()
+        self._ws_closed_klines: OrderedDict[tuple[str, str], deque[tuple[int, float, float, float, float, float, float]]] = OrderedDict()
+        self._ws_kline_max_symbols = 1024
+        self._ws_kline_closed_rows_per_symbol = 8
+
+    def update_kline_from_ws(self, symbol: str, kline: dict[str, Any]) -> None:
+        """Accept one Binance kline event without retaining the full event payload."""
+        if not isinstance(kline, dict):
+            return
+        pair = normalize_symbol(symbol)
+        interval = self._binance_interval(str(kline.get("i") or "15m"))
+        if not pair:
+            return
+        try:
+            open_ms = int(kline["t"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return
+        key = (pair, interval)
+        is_closed = kline.get("x") is True
+        if not is_closed:
+            # The active candle's open timestamp and open price never change.
+            # Skip repeated 250ms updates before converting the remaining
+            # OHLCV strings; the final x=True event remains authoritative.
+            previous = self._forming_klines.get(key)
+            if previous is not None and int(previous[0]) == open_ms:
+                self._forming_klines.move_to_end(key)
+                return
+        try:
+            row = (
+                open_ms,
+                float(kline["o"]), float(kline["h"]), float(kline["l"]),
+                float(kline["c"]), float(kline.get("v") or 0.0),
+                float(kline.get("q") or 0.0),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return
+        if not all(math.isfinite(value) for value in row[1:]):
+            return
+        if min(row[1:5]) <= 0 or row[2] < max(row[1], row[4], row[3]) or row[3] > min(row[1], row[2], row[4]):
+            return
+        if row[5] < 0 or row[6] < 0:
+            return
+
+        if not is_closed:
+            self._forming_klines[key] = row
+            self._forming_klines.move_to_end(key)
+            while len(self._forming_klines) > self._ws_kline_max_symbols:
+                self._forming_klines.popitem(last=False)
+            return
+
+        # The completed candle is appended to a tiny bounded replay buffer.
+        closed = self._ws_closed_klines.get(key)
+        if closed is None:
+            closed = deque(maxlen=self._ws_kline_closed_rows_per_symbol)
+            self._ws_closed_klines[key] = closed
+        if not closed or open_ms > closed[-1][0]:
+            closed.append(row)
+        elif open_ms == closed[-1][0]:
+            closed[-1] = row
+        self._ws_closed_klines.move_to_end(key)
+        while len(self._ws_closed_klines) > self._ws_kline_max_symbols:
+            self._ws_closed_klines.popitem(last=False)
+        self._forming_klines.pop(key, None)
+
+        # Update only cache entries already resident in RAM. Disk-only histories
+        # are reconciled from the small replay buffer when next requested.
+        one = np.asarray([row], dtype=KLINE_CACHE_DTYPE)
+        span_ms = self._interval_ms(interval)
+        for cache_key in list(self._kline_cache.keys()):
+            if cache_key[0] != pair or cache_key[1] != interval:
+                continue
+            cached_rows = self._kline_cache[cache_key][1]
+            if not cached_rows.size:
+                continue
+            last_open = int(cached_rows["t"][-1])
+            if open_ms == last_open:
+                merged = np.concatenate((cached_rows[:-1], one))
+            elif open_ms == last_open + span_ms:
+                merged = np.concatenate((cached_rows, one))
+            else:
+                continue
+            self._store_kline_cache(cache_key, merged[-cache_key[2]:])
+
+    def _merge_ws_closed_klines(
+        self, symbol: str, interval: str, rows: np.ndarray, count: int,
+    ) -> tuple[np.ndarray, bool, bool]:
+        """Merge contiguous closed WS rows; report a gap so REST can fill it."""
+        key = (normalize_symbol(symbol), self._binance_interval(interval))
+        buffered = self._ws_closed_klines.get(key)
+        if not buffered or not isinstance(rows, np.ndarray) or not rows.size:
+            return rows, False, False
+        span_ms = self._interval_ms(key[1])
+        merged = rows
+        last_open = int(merged["t"][-1])
+        changed = False
+        gap = False
+        for row in buffered:
+            open_ms = int(row[0])
+            if open_ms <= last_open:
+                continue
+            if open_ms != last_open + span_ms:
+                gap = True
+                break
+            one = np.asarray([row], dtype=KLINE_CACHE_DTYPE)
+            merged = np.concatenate((merged, one))
+            last_open = open_ms
+            changed = True
+        return np.ascontiguousarray(merged[-int(count):]), gap, changed
 
     async def _get(
         self,
@@ -1578,11 +1689,11 @@ class BinanceREST:
     async def get_klines_with_forming(
         self, symbol: str, interval: str, count: int, interval_ms: int | None = None,
     ) -> np.ndarray:
-        """Fetch historical closed bars plus the current forming kline.
+        """Return closed history plus the current row, preferring market WebSocket.
 
-        Deliberately bypasses the closed-bar cache: the last row's close field
-        changes intrabar and must represent the current Binance kline snapshot.
-        The response is never persisted into the closed-candle cache/disk cache.
+        The strategy consumes the current row's open timestamp/open price; all
+        indicators, Supertrend and liquidity calculations use closed rows only.
+        REST remains a safe fallback when this symbol has no current WS kline.
         """
         symbol = normalize_symbol(symbol)
         api_interval = self._binance_interval(interval)
@@ -1590,12 +1701,96 @@ class BinanceREST:
         count = max(3, min(1500, int(count)))
         now_ms = int(time.time() * 1000)
         expected_open = (now_ms // span_ms) * span_ms
+
+        forming = self._forming_klines.get((symbol, api_interval))
+        if forming is not None and int(forming[0]) == expected_open:
+            try:
+                closed = await self.get_klines(symbol, api_interval, count - 1, span_ms)
+            except BinanceRateLimitError:
+                raise
+            except Exception as exc:
+                # Newly listed contracts may have fewer historical candles than
+                # the requested window. Preserve the legacy fallback's shorter
+                # ATR warm-up allowance instead of rejecting those symbols.
+                if not getattr(exc, "insufficient_history", False):
+                    raise
+                closed = None
+            if (
+                isinstance(closed, np.ndarray)
+                and closed.size >= count - 1
+                and int(closed["t"][-1]) + span_ms == expected_open
+            ):
+                current = np.asarray([forming], dtype=KLINE_CACHE_DTYPE)
+                return np.ascontiguousarray(np.concatenate((closed[-(count - 1):], current)))
+
+        # Fallback when a current WS row has not arrived yet. Reuse the cached
+        # closed history and fetch only the active candle (limit=1). On cold
+        # start, keep the one-request full snapshot and seed the history cache.
+        history_key = (symbol, api_interval, count - 1)
+        has_history_cache = (
+            (history_key in self._kline_cache
+             and self._kline_cache[history_key][1].shape[0] >= count - 1)
+            or self._kline_disk_path(history_key).exists()
+            or any(
+                cache_key[0] == symbol and cache_key[1] == api_interval
+                and cached[1].shape[0] >= count - 1
+                for cache_key, cached in self._kline_cache.items()
+            )
+        )
+
+        if has_history_cache:
+            try:
+                closed = await self.get_klines(symbol, api_interval, count - 1, span_ms)
+            except BinanceRateLimitError:
+                raise
+            except Exception as exc:
+                if not getattr(exc, "insufficient_history", False):
+                    raise
+                closed = None
+
+            if (
+                isinstance(closed, np.ndarray)
+                and closed.size >= count - 1
+                and int(closed["t"][-1]) + span_ms == expected_open
+            ):
+                payload = None
+                current = np.empty(0, dtype=KLINE_CACHE_DTYPE)
+                for attempt in range(2):
+                    request_now = int(time.time() * 1000)
+                    payload = await self._get("/fapi/v1/klines", {
+                        "symbol": symbol, "interval": api_interval,
+                        "endTime": request_now + 20_000, "limit": 1,
+                    })
+                    if isinstance(payload, list) and payload:
+                        current = self._pack_kline_rows(
+                            payload, span_ms, request_now + 20_000, include_forming=True
+                        )
+                        if current.size and int(current["t"][-1]) == expected_open:
+                            break
+                    if attempt == 0:
+                        await asyncio.sleep(0.8)
+                        now_ms = int(time.time() * 1000)
+                        new_expected_open = (now_ms // span_ms) * span_ms
+                        if new_expected_open != expected_open:
+                            # The candle we just crossed is now closed; update
+                            # the history tail before appending the next active row.
+                            closed = await self.get_klines(
+                                symbol, api_interval, count - 1, span_ms
+                            )
+                        expected_open = new_expected_open
+                if current.size and int(current["t"][-1]) == expected_open:
+                    return np.ascontiguousarray(
+                        np.concatenate((closed[-(count - 1):], current[-1:]))
+                    )
+                raise RuntimeError(
+                    f"Candle aktif belum tersedia untuk {symbol} {api_interval}; "
+                    f"expected_open={expected_open}; REST tidak mengembalikan candle berjalan."
+                )
+
+        # Cold start or a newly-listed symbol without a reusable full history:
+        # one REST snapshot supplies closed history and the current row.
         payload = None
         rows = np.empty(0, dtype=KLINE_CACHE_DTYPE)
-        last_error = None
-        # At an exact H4/D1 boundary Binance's REST kline endpoint can lag a
-        # few seconds and return only the candle that just closed. Retry once
-        # with a small future endTime; accept only the expected current open.
         for attempt in range(2):
             request_now = int(time.time() * 1000)
             try:
@@ -1604,18 +1799,22 @@ class BinanceREST:
                     "endTime": request_now + 20_000, "limit": count,
                 })
                 if isinstance(payload, list) and payload:
-                    # A short 20s allowance accounts for exchange/local clock
-                    # skew at candle boundaries; do not accept another candle.
-                    rows = self._pack_kline_rows(payload, span_ms, request_now + 20_000, include_forming=True)
+                    rows = self._pack_kline_rows(
+                        payload, span_ms, request_now + 20_000, include_forming=True
+                    )
                     if rows.size and int(rows["t"][-1]) == expected_open:
                         break
-                last_error = f"last_open={int(rows['t'][-1]) if rows.size else 'none'}, expected_open={expected_open}"
-            except Exception as exc:
-                last_error = str(exc)
+            except BinanceRateLimitError:
+                # Never retry a request after Binance has explicitly limited the IP.
+                raise
+            except Exception:
+                if attempt == 1:
+                    raise
             if attempt == 0:
                 await asyncio.sleep(0.8)
                 now_ms = int(time.time() * 1000)
                 expected_open = (now_ms // span_ms) * span_ms
+
         if not isinstance(payload, list) or not payload:
             raise RuntimeError(f"Binance tidak mengembalikan kline live untuk {symbol} {api_interval}.")
         if rows.size < max(3, min(count - 1, volumatic.ATR_LENGTH + 5)):
@@ -1626,6 +1825,16 @@ class BinanceREST:
             raise RuntimeError(
                 f"Candle aktif belum dipublikasikan Binance untuk {symbol} {api_interval}; "
                 f"last_open={last_open}, expected_open={expected_open}, now={now_ms}; retry pada batch berikutnya."
+            )
+
+        # Seed a bounded closed-history cache from the same fallback payload so
+        # later no-WS cycles need only the single current-candle endpoint call.
+        closed_rows = np.ascontiguousarray(rows[:-1])
+        if closed_rows.shape[0] >= count - 1:
+            cache_key = (symbol, api_interval, count - 1)
+            self._store_kline_cache(cache_key, closed_rows[-(count - 1):])
+            await asyncio.to_thread(
+                self._write_kline_disk_cache, cache_key, self._kline_cache[cache_key][1]
             )
         return rows
 
@@ -1639,8 +1848,6 @@ class BinanceREST:
         api_interval = self._binance_interval(interval)
         span_ms = int(interval_ms or self._interval_ms(api_interval))
         key = (symbol, api_interval, count)
-        now = time.monotonic()
-        ttl = self._kline_cache_ttl.get(api_interval, 60.0)
         cached_exact = self._kline_cache.get(key)
         if cached_exact is None:
             disk_cached = self._load_kline_disk_cache(key, count)
@@ -1648,13 +1855,34 @@ class BinanceREST:
                 self._adopt_disk_kline_cache(key, disk_cached)
                 cached_exact = self._kline_cache.get(key)
 
+        if cached_exact is None and not force_refresh:
+            reusable = [
+                (cache_key, cache_value)
+                for cache_key, cache_value in self._kline_cache.items()
+                if cache_key[0] == symbol and cache_key[1] == api_interval
+                and cache_value[1].shape[0] >= count
+            ]
+            if reusable:
+                _cache_key, cached = min(reusable, key=lambda item: item[1][1].shape[0])
+                self._store_kline_cache(key, cached[1][-count:])
+                cached_exact = self._kline_cache.get(key)
+
         if cached_exact and cached_exact[1].shape[0] >= count:
-            cached_rows = cached_exact[1][-count:]
-            if not force_refresh and now - cached_exact[0] <= ttl:
+            cached_rows, ws_gap, ws_changed = self._merge_ws_closed_klines(
+                symbol, api_interval, cached_exact[1][-count:], count
+            )
+            if ws_changed:
+                self._store_kline_cache(key, cached_rows)
+                cached_exact = self._kline_cache.get(key)
+                cached_rows = cached_exact[1][-count:]
+
+            now_ms = int(time.time() * 1000)
+            expected_last_open = (now_ms // span_ms) * span_ms - span_ms
+            cache_is_current = int(cached_rows["t"][-1]) >= expected_last_open
+            if not force_refresh and cache_is_current and not ws_gap:
                 self._kline_cache.move_to_end(key)
                 return cached_rows
 
-            now_ms = int(time.time() * 1000)
             last_open = int(cached_rows["t"][-1])
             next_open = last_open + span_ms
             additions: list[np.ndarray] = []
@@ -1690,6 +1918,9 @@ class BinanceREST:
                 next_open = advanced
 
             rows = self._merge_packed_klines([cached_rows, *additions], count)
+            rows, _ws_gap_after_rest, _ws_changed_after_rest = self._merge_ws_closed_klines(
+                symbol, api_interval, rows, count
+            )
             if rows.shape[0] < count:
                 raise RuntimeError(
                     f"Riwayat incremental Binance {symbol} {api_interval} tidak lengkap: "
@@ -1699,18 +1930,6 @@ class BinanceREST:
             # Never block the Telegram/WebSocket event loop with disk writes.
             await asyncio.to_thread(self._write_kline_disk_cache, key, self._kline_cache[key][1])
             return self._kline_cache[key][1]
-
-        if not force_refresh:
-            reusable = [
-                (cache_key, cache_value)
-                for cache_key, cache_value in self._kline_cache.items()
-                if cache_key[0] == symbol and cache_key[1] == api_interval
-                and cache_value[1].shape[0] >= count and now - cache_value[0] <= ttl
-            ]
-            if reusable:
-                cache_key, cached = min(reusable, key=lambda item: item[1][1].shape[0])
-                self._kline_cache.move_to_end(cache_key)
-                return cached[1][-count:]
 
         # Cold start: convert each response page immediately and discard JSON strings.
         now_ms = int(time.time() * 1000)
@@ -2238,6 +2457,8 @@ class BinanceRealClient:
                         signed=signed,
                         retry_timestamp_error=False,
                     )
+                except BinanceRateLimitError:
+                    raise
                 except Exception:
                     pass
 
@@ -2258,21 +2479,13 @@ class BinanceRealClient:
             ) from exc
 
     async def _public_server_time(self) -> int:
-        def request() -> int:
-            response = requests.get(
-                f"{self.base_url}/fapi/v1/time",
-                timeout=HTTP_REQUEST_SECONDS,
-            )
-            API_STATS.record(
-                "/fapi/v1/time",
-                response.status_code,
-                response.headers.get("X-MBX-USED-WEIGHT-1M"),
-            )
-            response.raise_for_status()
-            body = response.json()
-            return int(body["serverTime"])
-
-        return await asyncio.to_thread(request)
+        # Reuse _request so even timestamp-recovery calls share the global IP
+        # cooldown, request spacing and X-MBX-USED-WEIGHT accounting.
+        body = await self._request(
+            "GET", "/fapi/v1/time", {}, signed=False,
+            retry_timestamp_error=False,
+        )
+        return int(body["serverTime"])
 
     async def _user_stream_request(self, method: str, listen_key: str | None = None) -> dict[str, Any]:
         """Create/renew USD-M listenKey; API-key header only, no HMAC signature."""
@@ -2683,8 +2896,10 @@ class BinanceWebSocket:
     """
     Satu koneksi market WebSocket untuk seluruh symbol aktif.
 
-    Stream:
-        <symbol>@aggTrade
+    Streams:
+        <symbol>@aggTrade       untuk harga / entry trade aktif
+        <symbol>@kline_15m     untuk candle scanner
+        !markPrice@arr@1s      satu stream global
 
     Symbol dikirim lowercase sesuai format Binance.
     """
@@ -2692,15 +2907,20 @@ class BinanceWebSocket:
     def __init__(
         self,
         on_price,
+        on_kline=None,
     ) -> None:
         self.on_price = on_price
+        self.on_kline = on_kline
 
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._ws = None
 
-        self._desired_symbols: set[str] = set()
-        self._subscribed_symbols: set[str] = set()
+        self._desired_symbols: set[str] = set()  # union; retained for status/backward compatibility
+        self._desired_trade_symbols: set[str] = set()
+        self._desired_kline_symbols: set[str] = set()
+        self._subscribed_symbols: set[str] = set()  # aggTrade
+        self._subscribed_kline_symbols: set[str] = set()
 
         self._command_lock = asyncio.Lock()
 
@@ -2782,66 +3002,83 @@ class BinanceWebSocket:
         self._ws = None
         self.connected = False
         self._subscribed_symbols.clear()
+        self._subscribed_kline_symbols.clear()
         self._desired_symbols.clear()
+        self._desired_trade_symbols.clear()
+        self._desired_kline_symbols.clear()
         self._last_market_event_key.clear()
 
-    async def set_symbols(self, symbols: set[str] | list[str] | tuple[str, ...]) -> None:
-        """Replace the desired stream universe using batched subscribe commands."""
-        normalized = {normalize_symbol(symbol) for symbol in symbols if str(symbol).strip()}
-        old_desired = set(self._desired_symbols)
-        self._desired_symbols = normalized
+    async def set_symbols(
+        self,
+        symbols: set[str] | list[str] | tuple[str, ...],
+        *,
+        scanner_symbols: set[str] | list[str] | tuple[str, ...] | None = None,
+    ) -> None:
+        """Set active trade aggTrade streams separately from scanner M15 kline streams."""
+        trade = {normalize_symbol(value) for value in symbols if str(value).strip()}
+        scanner = {
+            normalize_symbol(value) for value in (scanner_symbols or ()) if str(value).strip()
+        }
+        old_trade = set(self._desired_trade_symbols)
+        old_scanner = set(self._desired_kline_symbols)
+        self._desired_trade_symbols = trade
+        self._desired_kline_symbols = scanner
+        self._desired_symbols = trade | scanner
         if not self.connected or self._ws is None:
             return
-        remove = sorted(self._subscribed_symbols - normalized)
-        add = sorted(normalized - self._subscribed_symbols)
-        # Keep each command comfortably under Binance's stream/message limits.
-        batch_size = 40  # keep Binance control payloads small for large universes
-        for start in range(0, len(remove), batch_size):
-            await self._send_unsubscribe(remove[start:start + batch_size])
-        for start in range(0, len(add), batch_size):
-            await self._send_subscribe(add[start:start + batch_size])
-        if old_desired != normalized:
-            log.info("[WS] desired market symbols replaced | old=%s new=%s subscribed=%s",
-                     len(old_desired), len(normalized), len(self._subscribed_symbols))
+
+        remove_trade = sorted(self._subscribed_symbols - trade)
+        add_trade = sorted(trade - self._subscribed_symbols)
+        remove_kline = sorted(self._subscribed_kline_symbols - scanner)
+        add_kline = sorted(scanner - self._subscribed_kline_symbols)
+        batch_size = 100
+        for start in range(0, len(remove_trade), batch_size):
+            await self._send_unsubscribe(remove_trade[start:start + batch_size])
+            await asyncio.sleep(0.25)
+        for start in range(0, len(remove_kline), batch_size):
+            await self._send_unsubscribe(remove_kline[start:start + batch_size], "kline_15m")
+            await asyncio.sleep(0.25)
+        for start in range(0, len(add_trade), batch_size):
+            await self._send_subscribe(add_trade[start:start + batch_size])
+            await asyncio.sleep(0.25)
+        for start in range(0, len(add_kline), batch_size):
+            await self._send_subscribe(add_kline[start:start + batch_size], "kline_15m")
+            await asyncio.sleep(0.25)
+        if old_trade != trade or old_scanner != scanner:
+            log.info(
+                "[WS] subscriptions reconciled | trade=%s scanner_kline=%s total=%s",
+                len(trade), len(scanner), len(self._desired_symbols),
+            )
 
     async def add_symbol(self, symbol: str) -> None:
         symbol = normalize_symbol(symbol)
-
-        if symbol in self._desired_symbols:
+        if not symbol or symbol in self._desired_trade_symbols:
             return
-
-        # Simbol dicatat dulu di _desired_symbols. Kalau koneksi sedang
-        # putus / baru saja ditutup server, simbol ini otomatis
-        # di-subscribe ulang oleh _resubscribe_all() saat reconnect,
-        # jadi kegagalan kirim di sini BUKAN error fatal.
+        self._desired_trade_symbols.add(symbol)
         self._desired_symbols.add(symbol)
-
         if self.connected and self._ws is not None:
             sent = await self._send_subscribe([symbol])
-
             if not sent:
                 log.warning(
-                    "Subscribe %s ditunda: koneksi WebSocket sedang "
-                    "tertutup, akan di-subscribe otomatis saat reconnect.",
-                    symbol,
+                    "Subscribe aggTrade %s ditunda; akan diselaraskan saat reconnect.", symbol
                 )
 
     async def remove_symbol(self, symbol: str) -> None:
         symbol = normalize_symbol(symbol)
-
-        self._desired_symbols.discard(symbol)
-
-        if (
-            self.connected
-            and self._ws is not None
-            and symbol in self._subscribed_symbols
-        ):
-            await self._send_unsubscribe([symbol])
+        self._desired_trade_symbols.discard(symbol)
+        self._desired_kline_symbols.discard(symbol)
+        self._desired_symbols = self._desired_trade_symbols | self._desired_kline_symbols
+        if self.connected and self._ws is not None:
+            if symbol in self._subscribed_symbols:
+                await self._send_unsubscribe([symbol])
+            if symbol in self._subscribed_kline_symbols:
+                await self._send_unsubscribe([symbol], "kline_15m")
 
     async def _send_request(
         self,
         method: str,
         symbols: list[str],
+        stream_type: str = "aggTrade",
     ) -> bool:
         """
         Kirim SUBSCRIBE/UNSUBSCRIBE.
@@ -2859,10 +3096,9 @@ class BinanceWebSocket:
         if not symbols:
             return False
 
-        # Per-symbol trade ticks. Mark prices arrive separately through the
-        # single global !markPrice@arr@1s stream (one stream for the universe),
-        # avoiding the 1024-stream ceiling for a 522-symbol universe.
-        params = [f"{symbol.lower()}@aggTrade" for symbol in symbols]
+        # Scanner symbols use kline_15m; only actual active trade symbols use
+        # aggTrade. Global mark price remains a single stream for price guards.
+        params = [f"{symbol.lower()}@{stream_type}" for symbol in symbols]
 
         payload = {
             "method": method,
@@ -2911,36 +3147,23 @@ class BinanceWebSocket:
     async def _send_subscribe(
         self,
         symbols: list[str],
+        stream_type: str = "aggTrade",
     ) -> bool:
-        sent = await self._send_request(
-            "SUBSCRIBE",
-            symbols,
-        )
-
-        # Hanya tandai subscribed kalau payload benar-benar terkirim.
+        sent = await self._send_request("SUBSCRIBE", symbols, stream_type)
         if sent:
-            for symbol in symbols:
-                self._subscribed_symbols.add(
-                    normalize_symbol(symbol)
-                )
-
+            target = self._subscribed_kline_symbols if stream_type == "kline_15m" else self._subscribed_symbols
+            target.update(normalize_symbol(symbol) for symbol in symbols)
         return sent
 
     async def _send_unsubscribe(
         self,
         symbols: list[str],
+        stream_type: str = "aggTrade",
     ) -> bool:
-        sent = await self._send_request(
-            "UNSUBSCRIBE",
-            symbols,
-        )
-
+        sent = await self._send_request("UNSUBSCRIBE", symbols, stream_type)
         if sent:
-            for symbol in symbols:
-                self._subscribed_symbols.discard(
-                    normalize_symbol(symbol)
-                )
-
+            target = self._subscribed_kline_symbols if stream_type == "kline_15m" else self._subscribed_symbols
+            target.difference_update(normalize_symbol(symbol) for symbol in symbols)
         return sent
 
     async def _send_global_markprice_stream(self) -> None:
@@ -2960,20 +3183,36 @@ class BinanceWebSocket:
 
     async def _resubscribe_all(self) -> None:
         self._subscribed_symbols.clear()
-        symbols = sorted(self._desired_symbols)
-        # Global mark-price array is a single stream, independent of the
-        # symbol count. aggTrade subscriptions are sent in small batches.
+        self._subscribed_kline_symbols.clear()
+        trade_symbols = sorted(self._desired_trade_symbols)
+        scanner_symbols = sorted(self._desired_kline_symbols)
+        # One global mark-price stream plus small batches of active trades and
+        # scanner kline streams. This remains comfortably below 1,024 streams
+        # for the configured 522-symbol universe + normal active-trade count.
         await self._send_global_markprice_stream()
-        batch_size = 40
-        for start in range(0, len(symbols), batch_size):
-            if self._stop.is_set():
-                break
-            batch = symbols[start:start + batch_size]
-            await self._send_subscribe(batch)
-            await asyncio.sleep(0.10)
+        batch_size = 100
+        for symbols, stream_type in (
+            (trade_symbols, "aggTrade"), (scanner_symbols, "kline_15m")
+        ):
+            for start in range(0, len(symbols), batch_size):
+                if self._stop.is_set():
+                    break
+                await self._send_subscribe(symbols[start:start + batch_size], stream_type)
+                await asyncio.sleep(0.25)
 
     async def _handle_market_event(self, data: dict[str, Any]) -> None:
         event_type = str(data.get("e") or "")
+        if event_type == "kline":
+            symbol = normalize_symbol(str(data.get("s") or ""))
+            kline = data.get("k")
+            if symbol and isinstance(kline, dict) and self.on_kline is not None:
+                try:
+                    result = self.on_kline(symbol, kline)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    log.debug("[WS/KLINE] gagal memproses %s M15", symbol, exc_info=True)
+            return
         if event_type not in {"aggTrade", "markPriceUpdate"}:
             return
         symbol = normalize_symbol(str(data.get("s") or ""))
@@ -3113,6 +3352,7 @@ class BinanceWebSocket:
                 self.connected = False
                 self._ws = None
                 self._subscribed_symbols.clear()
+                self._subscribed_kline_symbols.clear()
 
             if self._stop.is_set():
                 break
@@ -3732,7 +3972,7 @@ class TradingEngine:
         self.rest = BinanceREST()
         self.real = BinanceRealClient()
         self.github = GitHubStore()
-        self.ws = BinanceWebSocket(self._on_price)
+        self.ws = BinanceWebSocket(self._on_price, self._on_kline)
         self.user_ws = BinanceUserDataWebSocket(self.real, self._on_user_data_event)
 
         self.real_mode = False  # New REAL entries always require explicit /real on.
@@ -4325,7 +4565,8 @@ class TradingEngine:
             "──────────────────────────────",
             "REST      : PAUSED · no request burst",
             f"ORDERS    : {active_real} REAL active · {gtc_real} preserved/uncertain",
-            f"USER WS   : {self.user_ws.status}",
+            f"USER WS   : {self.user_ws.status} · private",
+            f"MARKET WS : {self.ws.status} · {len(self.ws.symbols())} symbols",
             f"CMD QUEUE : {len(self.deferred_commands)} waiting",
             f"SCANNER   : {'PAUSED' if self.scan_enabled else 'OFF'} · cursor {self._scan_resume_cursor}",
             "──────────────────────────────",
@@ -4343,6 +4584,7 @@ class TradingEngine:
             "STATE     : NORMAL\n"
             "REST      : AVAILABLE\n"
             "NEXT      : reconcile orders → positions → deferred commands → scanner\n"
+            f"MARKET WS : {self.ws.status} · {len(self.ws.symbols())} symbols\n"
             f"CMD QUEUE : {len(self.deferred_commands)} waiting\n"
             "Existing LIMIT orders have been preserved during cooldown."
         )
@@ -4711,9 +4953,36 @@ class TradingEngine:
 
     # ------------------------- Universe / scanner ------------------------
     async def _universe(self) -> list[str]:
-        if not self.symbols or time.monotonic() - self._last_universe_refresh > 900:
-            self.symbols = await self.rest.get_exchange_info(force=bool(self.symbols))
-            self._last_universe_refresh = time.monotonic()
+        now = time.monotonic()
+        if not self.symbols:
+            # First boot still requires an authoritative exchangeInfo snapshot.
+            self.symbols = await self.rest.get_exchange_info(force=False)
+            self._last_universe_refresh = now
+        elif now - self._last_universe_refresh > UNIVERSE_REFRESH_SECONDS:
+            # Recovery has two independent asyncio loops (scanner + maintenance).
+            # The scanner can reach _universe before maintenance clears the ban
+            # flag, so retain the last-good metadata and advance its refresh gate
+            # here too. This prevents a stale exchangeInfo request racing the
+            # first post-cooldown scan batch.
+            if self._was_in_binance_cooldown and self.symbols:
+                self._last_universe_refresh = now
+                log.info(
+                    "[UNIVERSE] post-cooldown recovery uses %s cached symbols; "
+                    "hourly exchangeInfo refresh deferred.", len(self.symbols),
+                )
+            else:
+                try:
+                    refreshed = await self.rest.get_exchange_info(force=True)
+                except BinanceRateLimitError as exc:
+                    self._last_universe_refresh = now
+                    log.warning(
+                        "[UNIVERSE] exchangeInfo refresh deferred by Binance rate governor; "
+                        "using %s cached symbols for this session.", len(self.symbols),
+                    )
+                    await self._notify_binance_cooldown(exc, source="UNIVERSE REFRESH")
+                else:
+                    self.symbols = refreshed
+                    self._last_universe_refresh = now
         result = [
             symbol for symbol, meta in self.symbols.items()
             if meta.status == "TRADING" and meta.contract_type == "PERPETUAL"
@@ -4957,7 +5226,7 @@ class TradingEngine:
                         "4h",
                         self._h4_ema_history_limit(ema_filter_length),
                         volumatic.TIMEFRAME_MS["H4"],
-                        force_refresh=True,
+                        force_refresh=False,
                     )
                     if btc_h4_closed is None or len(btc_h4_closed) < 3:
                         raise RuntimeError("Riwayat H4 BTC tidak cukup.")
@@ -4978,6 +5247,13 @@ class TradingEngine:
                     self._scan_trigger_now = True
                     await self._notify_binance_cooldown(
                         exc, source="BTC H4 EMA REFERENCE", symbol=BTC_EMA_FILTER_SYMBOL
+                    )
+                    await self.reply(
+                        "⚠️ VOL / SCANNER PAUSED BEFORE BATCH\n"
+                        f"CAUSE     : BTC H4 reference tertahan REST cooldown ({self._short_duration(self._binance_cooldown_remaining())})\n"
+                        f"CURSOR    : coin #{self._scan_resume_cursor + 1:04d} belum diproses pada siklus ini\n"
+                        "DATA      : metadata universe tetap disimpan; tidak ada candle lama yang akan dipakai untuk entry\n"
+                        "RESUME    : otomatis setelah cooldown; scanner memakai candle M15 terbaru yang masih valid."
                     )
                     return
                 except Exception as exc:
@@ -7349,7 +7625,12 @@ class TradingEngine:
 
                 if self._was_in_binance_cooldown:
                     await self._sync_cooldown_marker_to_github()
-                    self._last_universe_refresh = 0.0
+                    # Retain warm symbol metadata after recovery. Forcing
+                    # exchangeInfo here caused an immediate second REST request
+                    # and could retrigger the same shared-IP ban.
+                    self._last_universe_refresh = (
+                        time.monotonic() if self.symbols else 0.0
+                    )
                     if self.scan_enabled:
                         self._scan_trigger_now = True
                     now_mono = time.monotonic()
@@ -7385,8 +7666,8 @@ class TradingEngine:
                 await self._process_deferred_commands()
 
                 # Refresh universe only when scanner needs it. ExchangeInfo is
-                # cached for 15 minutes; no forced repeat on every recovery pass.
-                if self.scan_enabled and (not self.symbols or time.monotonic() - self._last_universe_refresh > 900):
+                # cached for one hour; no forced repeat on every recovery pass.
+                if self.scan_enabled and (not self.symbols or time.monotonic() - self._last_universe_refresh > UNIVERSE_REFRESH_SECONDS):
                     if time.monotonic() - self._last_exchange_info_retry >= 30.0:
                         self._last_exchange_info_retry = time.monotonic()
                         try:
@@ -7641,6 +7922,10 @@ class TradingEngine:
                         "attempts": 0, "last_error": str(exc)[:500],
                         "source": "MARKET_WEBSOCKET",
                     }
+
+    def _on_kline(self, symbol: str, kline: dict[str, Any]) -> None:
+        """Forward scanner candle events to the shared bounded REST/cache owner."""
+        self.rest.update_kline_from_ws(symbol, kline)
 
     async def _on_price(self, symbol: str, price: Decimal, event_time_ms: int, aggregate_trade_id: int = -1) -> None:
         symbol = normalize_symbol(symbol)
@@ -8404,19 +8689,19 @@ class TradingEngine:
             await self._save_active_state()
 
     async def _sync_ws_symbols(self) -> None:
-        desired = {
+        trade_symbols = {
             t.pair for t in self.active_trades.values()
             if t.status in {"PENDING", "FILLED"}
         }
-        desired.update(symbol for symbol, _side in self.exchange_positions)
-        desired.update(
+        trade_symbols.update(symbol for symbol, _side in self.exchange_positions)
+        trade_symbols.update(
             normalize_symbol(str(order.get("symbol") or ""))
             for order in self.exchange_open_orders.values()
             if order.get("symbol")
         )
-        if self.scan_enabled:
-            desired.update(self._scanner_symbols)
-        await self.ws.set_symbols(desired)
+        scanner_symbols = set(self._scanner_symbols) if self.scan_enabled else set()
+        desired = trade_symbols | scanner_symbols
+        await self.ws.set_symbols(trade_symbols, scanner_symbols=scanner_symbols)
         for key in list(self._live_signal_candles):
             _tf, pair = key.split(":", 1)
             if pair not in desired:
