@@ -1,35 +1,21 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "timeframe": "M15",
-  "trend_length": 50,
-  "ema_filter_length": [
-    9,
-    21
-  ],
-  "supertrend_atr_length": 14,
-  "supertrend_factor": 2.5,
+  "trend_length": 100,
+  "ema_filter_length": 100,
+  "supertrend_atr_length": 10,
+  "supertrend_factor": 3.0,
   "rr_min": "3",
-  "rr_max": "5",
-  "max_active_trades": 12,
-  "margin_usdt": "0.55",
+  "rr_max": "4",
+  "max_active_trades": 100,
+  "margin_usdt": "0.5",
   "leverage": 10,
   "min_margin_enabled": false,
-  "last_processed_candles": {
-    "M15:0GUSDT": 1794288600000,
-    "M15:1000000MOGUSDT": 1794288600000,
-    "M15:1000BONKUSDT": 1794288600000,
-    "M15:1000CATUSDT": 1794288600000,
-    "M15:1000CHEEMSUSDT": 1794288600000,
-    "M15:1000FLOKIUSDT": 1794288600000,
-    "M15:1000LUNCUSDT": 1794288600000,
-    "M15:1000PEPEUSDT": 1794288600000,
-    "M15:1000RATSUSDT": 1794288600000,
-    "M15:1000SATSUSDT": 1794288600000
-  },
+  "last_processed_candles": {},
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 10,
-  "scan_resume_boundary_ms": 1794288600000,
+  "scan_resume_cursor": 0,
+  "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-10T05:44:08.561989+00:00"
+  "updated_at": "2026-11-10T12:30:59.702264+00:00"
 }
