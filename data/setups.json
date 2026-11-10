@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-10T15:00:06.352092+00:00",
+  "updated_at": "2026-11-10T15:00:11.280512+00:00",
   "active_trades": [
     {
       "trade_id": "AGLDUSDT-20261110-212133-6A6B09",
@@ -47,9 +47,9 @@
       "ema_filter_slow_value": "0.1602762035869681",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794315600000,
-      "ema_exit_last_fast": "0.15736729839484298",
-      "ema_exit_last_slow": "0.1571589948206383",
+      "ema_exit_last_open_ms": 1794319200000,
+      "ema_exit_last_fast": "0.1571738387158744",
+      "ema_exit_last_slow": "0.15708999529148937",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
