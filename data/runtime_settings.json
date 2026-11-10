@@ -6,7 +6,7 @@
     9,
     21
   ],
-  "supertrend_atr_length": 10,
+  "supertrend_atr_length": 14,
   "supertrend_factor": 3.0,
   "rr_min": "3",
   "rr_max": "5",
@@ -20,5 +20,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-10T13:44:33.564661+00:00"
+  "updated_at": "2026-11-10T13:44:36.506436+00:00"
 }
