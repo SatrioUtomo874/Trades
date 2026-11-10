@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Volumatic Trend M15 + H4 EMA + M15 Supertrend execution engine.
+"""Volumatic Trend M15 + H4 EMA + M15 Supertrend + H1 inverse EMA exit engine.
 
 Contract for try.py:
     async def on_start(context)
@@ -151,6 +151,10 @@ BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS = 60
 BINANCE_BAN_FALLBACK_SECONDS = 120
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_RECONCILE_INTERVAL_SECONDS = 20.0
+H1_MS = 3_600_000
+EMA_EXIT_INIT_RETRY_SECONDS = 30.0
+EMA_EXIT_RECONCILE_SECONDS = 20.0
+EMA_EXIT_UNKNOWN_RECHECK_SECONDS = 120.0
 ENTRY_ORDER_TTL_SECONDS = 60 * 60  # local entry watch (and any legacy exchange LIMIT) expires 1 hour after creation
 REAL_POSITION_SETTLE_SECONDS = 15.0  # grace window after a WebSocket fill before REST position reconciliation
 POSITION_CACHE_MAX_AGE_SECONDS = 30.0
@@ -652,6 +656,20 @@ class Trade:
     ema_filter_value: Decimal | None = None
     ema_filter_slow_value: Decimal | None = None
     ema_filter_passed: bool | None = None
+    # H1 inverse-EMA exit state. EMA levels are seeded from closed H1 candles
+    # using the same SMA-seeded recurrence as backtest(10).py.
+    ema_exit_state: str = "UNINITIALIZED"
+    ema_exit_last_open_ms: int = 0
+    ema_exit_last_fast: Decimal | None = None
+    ema_exit_last_slow: Decimal | None = None
+    ema_exit_trigger_close_ms: int | None = None
+    ema_exit_trigger_price: Decimal | None = None
+    ema_exit_reason: str | None = None
+    ema_exit_client_order_id: str | None = None
+    ema_exit_order_id: int | None = None
+    ema_exit_order_status: str = "NOT_SUBMITTED"
+    ema_exit_attempts: int = 0
+    ema_exit_last_error: str | None = None
     status: str = "PENDING"
     created_at: datetime = field(default_factory=now_utc)
     entry_order_created_at: datetime | None = None  # actual local/Binance LIMIT creation timestamp
@@ -741,6 +759,18 @@ class Trade:
             "ema_filter_value": decimal_to_str(self.ema_filter_value),
             "ema_filter_slow_value": decimal_to_str(self.ema_filter_slow_value),
             "ema_filter_passed": self.ema_filter_passed,
+            "ema_exit_state": self.ema_exit_state,
+            "ema_exit_last_open_ms": int(self.ema_exit_last_open_ms or 0),
+            "ema_exit_last_fast": decimal_to_str(self.ema_exit_last_fast),
+            "ema_exit_last_slow": decimal_to_str(self.ema_exit_last_slow),
+            "ema_exit_trigger_close_ms": self.ema_exit_trigger_close_ms,
+            "ema_exit_trigger_price": decimal_to_str(self.ema_exit_trigger_price),
+            "ema_exit_reason": self.ema_exit_reason,
+            "ema_exit_client_order_id": self.ema_exit_client_order_id,
+            "ema_exit_order_id": self.ema_exit_order_id,
+            "ema_exit_order_status": self.ema_exit_order_status,
+            "ema_exit_attempts": int(self.ema_exit_attempts or 0),
+            "ema_exit_last_error": self.ema_exit_last_error,
             "expires_at": iso_utc(self.expires_at),
             "status": self.status, "created_at": iso_utc(self.created_at),
             "entry_order_created_at": iso_utc(self.entry_order_created_at) if self.entry_order_created_at else None,
@@ -882,6 +912,18 @@ class Trade:
             ema_filter_value=dec("ema_filter_value"),
             ema_filter_slow_value=dec("ema_filter_slow_value"),
             ema_filter_passed=(bool(row.get("ema_filter_passed")) if row.get("ema_filter_passed") is not None else None),
+            ema_exit_state=str(row.get("ema_exit_state") or "UNINITIALIZED").upper(),
+            ema_exit_last_open_ms=max(0, int(row.get("ema_exit_last_open_ms") or 0)),
+            ema_exit_last_fast=dec("ema_exit_last_fast"),
+            ema_exit_last_slow=dec("ema_exit_last_slow"),
+            ema_exit_trigger_close_ms=(int(row["ema_exit_trigger_close_ms"]) if row.get("ema_exit_trigger_close_ms") not in (None, "") else None),
+            ema_exit_trigger_price=dec("ema_exit_trigger_price"),
+            ema_exit_reason=row.get("ema_exit_reason"),
+            ema_exit_client_order_id=row.get("ema_exit_client_order_id"),
+            ema_exit_order_id=(int(row["ema_exit_order_id"]) if row.get("ema_exit_order_id") not in (None, "") else None),
+            ema_exit_order_status=str(row.get("ema_exit_order_status") or "NOT_SUBMITTED").upper(),
+            ema_exit_attempts=max(0, int(row.get("ema_exit_attempts") or 0)),
+            ema_exit_last_error=row.get("ema_exit_last_error"),
             entry_executed_qty=dec("entry_executed_qty"),
             entry_order_status=str(row.get("entry_order_status") or "UNKNOWN").upper(),
             entry_order_terminal=bool(row.get("entry_order_terminal", False)),
@@ -2863,6 +2905,7 @@ class BinanceRealClient:
         symbol: str,
         position: dict[str, Any],
         entry_direction: str,
+        new_client_order_id: str | None = None,
     ) -> dict[str, Any]:
         dual = await self.ensure_position_mode()
         position_side = str(position.get("positionSide") or "BOTH")
@@ -2876,6 +2919,10 @@ class BinanceRealClient:
             "quantity": format_qty(quantity),
             "newOrderRespType": "RESULT",
         }
+        if new_client_order_id:
+            if len(new_client_order_id) > 36:
+                raise ValueError("newClientOrderId melebihi batas 36 karakter.")
+            params["newClientOrderId"] = new_client_order_id
         if dual:
             params["positionSide"] = position_side
         else:
@@ -2919,8 +2966,10 @@ class BinanceWebSocket:
         self._desired_symbols: set[str] = set()  # union; retained for status/backward compatibility
         self._desired_trade_symbols: set[str] = set()
         self._desired_kline_symbols: set[str] = set()
+        self._desired_exit_symbols: set[str] = set()  # only filled strategy positions
         self._subscribed_symbols: set[str] = set()  # aggTrade
-        self._subscribed_kline_symbols: set[str] = set()
+        self._subscribed_kline_symbols: set[str] = set()  # scanner M15
+        self._subscribed_exit_symbols: set[str] = set()  # position H1 exit
 
         self._command_lock = asyncio.Lock()
 
@@ -3003,9 +3052,11 @@ class BinanceWebSocket:
         self.connected = False
         self._subscribed_symbols.clear()
         self._subscribed_kline_symbols.clear()
+        self._subscribed_exit_symbols.clear()
         self._desired_symbols.clear()
         self._desired_trade_symbols.clear()
         self._desired_kline_symbols.clear()
+        self._desired_exit_symbols.clear()
         self._last_market_event_key.clear()
 
     async def set_symbols(
@@ -3013,41 +3064,42 @@ class BinanceWebSocket:
         symbols: set[str] | list[str] | tuple[str, ...],
         *,
         scanner_symbols: set[str] | list[str] | tuple[str, ...] | None = None,
+        exit_symbols: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> None:
-        """Set active trade aggTrade streams separately from scanner M15 kline streams."""
+        """Reconcile trade ticks, scanner M15 candles, and active-position H1 candles."""
         trade = {normalize_symbol(value) for value in symbols if str(value).strip()}
-        scanner = {
-            normalize_symbol(value) for value in (scanner_symbols or ()) if str(value).strip()
-        }
+        scanner = {normalize_symbol(value) for value in (scanner_symbols or ()) if str(value).strip()}
+        exits = {normalize_symbol(value) for value in (exit_symbols or ()) if str(value).strip()}
         old_trade = set(self._desired_trade_symbols)
         old_scanner = set(self._desired_kline_symbols)
+        old_exits = set(self._desired_exit_symbols)
         self._desired_trade_symbols = trade
         self._desired_kline_symbols = scanner
-        self._desired_symbols = trade | scanner
+        self._desired_exit_symbols = exits
+        self._desired_symbols = trade | scanner | exits
         if not self.connected or self._ws is None:
             return
 
-        remove_trade = sorted(self._subscribed_symbols - trade)
-        add_trade = sorted(trade - self._subscribed_symbols)
-        remove_kline = sorted(self._subscribed_kline_symbols - scanner)
-        add_kline = sorted(scanner - self._subscribed_kline_symbols)
-        batch_size = 100
-        for start in range(0, len(remove_trade), batch_size):
-            await self._send_unsubscribe(remove_trade[start:start + batch_size])
-            await asyncio.sleep(0.25)
-        for start in range(0, len(remove_kline), batch_size):
-            await self._send_unsubscribe(remove_kline[start:start + batch_size], "kline_15m")
-            await asyncio.sleep(0.25)
-        for start in range(0, len(add_trade), batch_size):
-            await self._send_subscribe(add_trade[start:start + batch_size])
-            await asyncio.sleep(0.25)
-        for start in range(0, len(add_kline), batch_size):
-            await self._send_subscribe(add_kline[start:start + batch_size], "kline_15m")
-            await asyncio.sleep(0.25)
-        if old_trade != trade or old_scanner != scanner:
+        batch_size = 100  # 4 control messages/sec at 250ms spacing, below Binance's limit.
+        plans = (
+            (self._subscribed_symbols, trade, "aggTrade"),
+            (self._subscribed_kline_symbols, scanner, "kline_15m"),
+            (self._subscribed_exit_symbols, exits, "kline_1h"),
+        )
+        for subscribed, desired, stream_type in plans:
+            remove = sorted(subscribed - desired)
+            add = sorted(desired - subscribed)
+            for start in range(0, len(remove), batch_size):
+                await self._send_unsubscribe(remove[start:start + batch_size], stream_type)
+                await asyncio.sleep(0.25)
+            for start in range(0, len(add), batch_size):
+                await self._send_subscribe(add[start:start + batch_size], stream_type)
+                await asyncio.sleep(0.25)
+
+        if old_trade != trade or old_scanner != scanner or old_exits != exits:
             log.info(
-                "[WS] subscriptions reconciled | trade=%s scanner_kline=%s total=%s",
-                len(trade), len(scanner), len(self._desired_symbols),
+                "[WS] subscriptions reconciled | aggTrade=%s M15=%s H1-exit=%s total=%s",
+                len(trade), len(scanner), len(exits), len(self._desired_symbols),
             )
 
     async def add_symbol(self, symbol: str) -> None:
@@ -3073,6 +3125,8 @@ class BinanceWebSocket:
                 await self._send_unsubscribe([symbol])
             if symbol in self._subscribed_kline_symbols:
                 await self._send_unsubscribe([symbol], "kline_15m")
+            if symbol in self._subscribed_exit_symbols:
+                await self._send_unsubscribe([symbol], "kline_1h")
 
     async def _send_request(
         self,
@@ -3151,7 +3205,11 @@ class BinanceWebSocket:
     ) -> bool:
         sent = await self._send_request("SUBSCRIBE", symbols, stream_type)
         if sent:
-            target = self._subscribed_kline_symbols if stream_type == "kline_15m" else self._subscribed_symbols
+            target = (
+                self._subscribed_kline_symbols if stream_type == "kline_15m" else
+                self._subscribed_exit_symbols if stream_type == "kline_1h" else
+                self._subscribed_symbols
+            )
             target.update(normalize_symbol(symbol) for symbol in symbols)
         return sent
 
@@ -3162,7 +3220,11 @@ class BinanceWebSocket:
     ) -> bool:
         sent = await self._send_request("UNSUBSCRIBE", symbols, stream_type)
         if sent:
-            target = self._subscribed_kline_symbols if stream_type == "kline_15m" else self._subscribed_symbols
+            target = (
+                self._subscribed_kline_symbols if stream_type == "kline_15m" else
+                self._subscribed_exit_symbols if stream_type == "kline_1h" else
+                self._subscribed_symbols
+            )
             target.difference_update(normalize_symbol(symbol) for symbol in symbols)
         return sent
 
@@ -3184,15 +3246,19 @@ class BinanceWebSocket:
     async def _resubscribe_all(self) -> None:
         self._subscribed_symbols.clear()
         self._subscribed_kline_symbols.clear()
+        self._subscribed_exit_symbols.clear()
         trade_symbols = sorted(self._desired_trade_symbols)
         scanner_symbols = sorted(self._desired_kline_symbols)
+        exit_symbols = sorted(self._desired_exit_symbols)
         # One global mark-price stream plus small batches of active trades and
         # scanner kline streams. This remains comfortably below 1,024 streams
         # for the configured 522-symbol universe + normal active-trade count.
         await self._send_global_markprice_stream()
         batch_size = 100
         for symbols, stream_type in (
-            (trade_symbols, "aggTrade"), (scanner_symbols, "kline_15m")
+            (trade_symbols, "aggTrade"),
+            (scanner_symbols, "kline_15m"),
+            (exit_symbols, "kline_1h"),
         ):
             for start in range(0, len(symbols), batch_size):
                 if self._stop.is_set():
@@ -3211,7 +3277,7 @@ class BinanceWebSocket:
                     if asyncio.iscoroutine(result):
                         await result
                 except Exception:
-                    log.debug("[WS/KLINE] gagal memproses %s M15", symbol, exc_info=True)
+                    log.debug("[WS/KLINE] gagal memproses %s %s", symbol, kline.get("i"), exc_info=True)
             return
         if event_type not in {"aggTrade", "markPriceUpdate"}:
             return
@@ -3353,6 +3419,7 @@ class BinanceWebSocket:
                 self._ws = None
                 self._subscribed_symbols.clear()
                 self._subscribed_kline_symbols.clear()
+                self._subscribed_exit_symbols.clear()
 
             if self._stop.is_set():
                 break
@@ -4075,6 +4142,11 @@ class TradingEngine:
         self._entry_attempts: dict[str, int] = {}
         self._entry_retry_after: dict[str, float] = {}
         self._protection_locks: dict[str, asyncio.Lock] = {}
+        self._ema_exit_init_tasks: dict[str, asyncio.Task] = {}
+        self._ema_exit_init_semaphore = asyncio.Semaphore(1)
+        self._ema_exit_close_locks: dict[str, asyncio.Lock] = {}
+        self._ema_exit_close_last_check: dict[str, float] = {}
+        self._ema_exit_last_retry: dict[str, float] = {}
         self._leverage_cache: dict[str, tuple[int, Decimal | None, float]] = {}
         self._signal_dedupe_lock = asyncio.Lock()
         self._signal_dedupe_loaded = False
@@ -4749,7 +4821,12 @@ class TradingEngine:
             return
         await self._load_active_state()
         if self._binance_cooldown_remaining() > 0:
+            if self.active_trades:
+                await self.ws.start()
             await self._sync_ws_symbols()
+            for restored_trade in list(self.active_trades.values()):
+                if restored_trade.status == "FILLED" and not restored_trade.real_enabled:
+                    self._schedule_ema_exit_initialization(restored_trade)
             await self.reply(
                 f"✅ Snapshot lokal dimuat. Trade aktif: {len(self.active_trades)}. "
                 f"Binance REST cooldown masih {self._binance_cooldown_remaining():.0f}s; "
@@ -4757,7 +4834,12 @@ class TradingEngine:
             )
             return
         await self._reconcile_restored_trades()
+        if self.active_trades:
+            await self.ws.start()
         await self._sync_ws_symbols()
+        for restored_trade in list(self.active_trades.values()):
+            if restored_trade.status == "FILLED" and not restored_trade.real_enabled:
+                self._schedule_ema_exit_initialization(restored_trade)
         await self.reply(f"✅ Snapshot dimuat dan direkonsiliasi. Trade aktif: {len(self.active_trades)}.")
 
     # ----------------------------- Startup -------------------------------
@@ -4790,6 +4872,9 @@ class TradingEngine:
         self.min_margin_enabled = False
         self.max_active_trades = MAX_ACTIVE_TRADES
         self.active_trades.clear()
+        self._ema_exit_init_tasks.clear()
+        self._ema_exit_last_retry.clear()
+        self._ema_exit_close_last_check.clear()
         self.exchange_positions.clear()
         self.exchange_open_orders.clear()
         self.exchange_snapshot_at = None
@@ -4888,8 +4973,11 @@ class TradingEngine:
         self._scan_schedule_last_fired_minute = None
         self.real_mode = False
 
-        # Signal every loop/socket worker to stop, then cancel concurrently.
-        workers = [self._scan_task, self._maintenance_task, self.ws._task, self.user_ws._task]
+        # Signal every loop/socket worker and every per-trade H1 warm-up task
+        # to stop. EMA initialization tasks are explicitly tracked so they cannot
+        # outlive /end or a Render redeploy and mutate a fresh engine instance.
+        ema_workers = list(self._ema_exit_init_tasks.values())
+        workers = [self._scan_task, self._maintenance_task, self.ws._task, self.user_ws._task, *ema_workers]
         for component in (self.ws, self.user_ws):
             try:
                 component._stop.set()
@@ -4921,6 +5009,10 @@ class TradingEngine:
 
         self._scan_task = None
         self._maintenance_task = None
+        self._ema_exit_init_tasks.clear()
+        self._ema_exit_close_locks.clear()
+        self._ema_exit_close_last_check.clear()
+        self._ema_exit_last_retry.clear()
         self.ws._task = None
         self.user_ws._task = None
         self.ws._ws = None
@@ -6376,7 +6468,10 @@ class TradingEngine:
             trade.quantity = executed
             trade.entry_order_terminal = status in terminal_states
             trade.real_state = "REAL_FILLED" if trade.entry_order_terminal else "REAL_PARTIALLY_FILLED"
-            deferred = await self._mark_filled(trade, fill_price, source or "BINANCE_MARKET_RESPONSE", defer_persist=True)
+            deferred = await self._mark_filled(
+                trade, fill_price, source or "BINANCE_MARKET_RESPONSE",
+                defer_persist=True, filled_at=self._exchange_event_time(response),
+            )
             # TP/SL first; GitHub persistence of the fill follows.
             await self._install_protection_now(trade)
             if deferred is not None:
@@ -6388,6 +6483,9 @@ class TradingEngine:
                 protection_state=trade.protection_state, source=source,
             )
             await self._save_active_state()
+            if not trade.exchange_adopted:
+                self._schedule_ema_exit_initialization(trade)
+                await self._sync_ws_symbols()
             return
         if status in terminal_states:
             self._revert_unsent_entry(trade)
@@ -6430,7 +6528,8 @@ class TradingEngine:
         return fallback
 
     async def _mark_filled(
-        self, trade: Trade, price: Decimal, source: str, *, defer_persist: bool = False
+        self, trade: Trade, price: Decimal, source: str, *, defer_persist: bool = False,
+        filled_at: datetime | None = None,
     ) -> tuple[str, dict[str, Any]] | None:
         # Once Binance has confirmed both closePosition Algo Orders, protection is
         # intentionally locked. Later cumulative-fill/account/REST events may update
@@ -6445,7 +6544,7 @@ class TradingEngine:
         first_fill = trade.status == "PENDING"
         if first_fill:
             trade.status = "FILLED"
-            trade.filled_at = now_utc()
+            trade.filled_at = filled_at or now_utc()
         if price > 0:
             trade.fill_price = price
         if trade.fill_price is None or trade.fill_price <= 0:
@@ -6550,6 +6649,13 @@ class TradingEngine:
         log.info("[TRADE] FILLED %s %s @ %s (%s) | SL=%s TP=%s protection=%s locked=%s",
                  trade.pair, trade.direction, trade.fill_price, source,
                  trade.stop_loss, trade.take_profit, trade.protection_state, protection_locked)
+        if trade.status == "FILLED" and not trade.exchange_adopted:
+            # PAPER can warm up immediately. REAL first gets its exchange-side
+            # SL/TP attempt from maintenance; H1 history must not compete with
+            # the initial protection requests for the shared Binance REST lock.
+            if not trade.real_enabled:
+                self._schedule_ema_exit_initialization(trade)
+            await self._sync_ws_symbols()
         return None
 
     async def _ensure_real_protection(self, trade: Trade) -> None:
@@ -6967,7 +7073,10 @@ class TradingEngine:
                     trade.quantity = executed
                     avg = self._order_fill_price(order, trade.fill_price or trade.entry)
                     if trade.status == "PENDING":
-                        await self._mark_filled(trade, avg, "BINANCE_CANCEL_RECONCILED_FILL")
+                        await self._mark_filled(
+                            trade, avg, "BINANCE_CANCEL_RECONCILED_FILL",
+                            filled_at=self._exchange_event_time(order),
+                        )
                     else:
                         trade.fill_price = avg
                         trade.actual_notional = executed * avg
@@ -7022,17 +7131,24 @@ class TradingEngine:
             trade, "EXPIRED" if "EXPIRE" in reason else "CANCELED", None, reason
         )
 
-    async def _close_trade(self, trade: Trade, reference_price: Decimal, reason: str) -> None:
+    async def _close_trade(
+        self, trade: Trade, reference_price: Decimal, reason: str, *,
+        keep_protections_until_flat: bool = False, client_order_id: str | None = None,
+    ) -> None:
         if trade.status != "FILLED":
             return
         exit_price = reference_price
+        market_order_submitted = False
+        position_was_open = False
         if trade.real_enabled:
             try:
-                # Cancel closePosition protections before an intentional manual MARKET close.
-                if not await self._cancel_real_protections(trade):
-                    raise RuntimeError(
-                        trade.protection_error or "Proteksi Binance belum terkonfirmasi dibatalkan; MARKET close ditahan."
-                    )
+                # Manual closes retain the legacy cancel-first behavior. EMA exits
+                # deliberately keep SL/TP armed until the MARKET position is flat.
+                if not keep_protections_until_flat:
+                    if not await self._cancel_real_protections(trade):
+                        raise RuntimeError(
+                            trade.protection_error or "Proteksi Binance belum terkonfirmasi dibatalkan; MARKET close ditahan."
+                        )
                 # A partially-filled GTC entry may still have an unfilled
                 # remainder. Cancel and confirm that remainder before MARKET
                 # close so it cannot fill later and unexpectedly reopen exposure.
@@ -7041,32 +7157,69 @@ class TradingEngine:
                         trade, "CLOSE_POSITION_CANCEL_ENTRY_REMAINDER"
                     )
                 position = await self.real.get_position(trade.pair, trade.entry_side)
+                position_was_open = position is not None
                 if position is not None:
+                    if keep_protections_until_flat:
+                        trade.ema_exit_state = "CLOSE_SUBMITTING"
+                        await self._save_active_state()
                     response = await self.real.place_market_close(
-                        symbol=trade.pair, position=position, entry_direction=trade.entry_side
+                        symbol=trade.pair, position=position, entry_direction=trade.entry_side,
+                        new_client_order_id=(client_order_id if keep_protections_until_flat else None),
                     )
+                    market_order_submitted = True
                     avg = Decimal(str(response.get("avgPrice") or "0"))
                     if avg > 0:
                         exit_price = avg
-                    # A successful REST response is not enough: verify that no
-                    # exchange exposure remains before recording close/reversal.
-                    remaining = await self.real.get_positions(trade.pair)
-                    if remaining:
-                        raise RuntimeError(
-                            f"Market close {trade.pair} belum flat; reversal/ledger close diblokir."
-                        )
+                    if keep_protections_until_flat:
+                        trade.ema_exit_order_id = (int(response.get("orderId")) if response.get("orderId") not in (None, "") else trade.ema_exit_order_id)
+                        trade.ema_exit_order_status = str(response.get("status") or "UNKNOWN").upper()
+                        trade.ema_exit_state = "CLOSE_VERIFY"
+                        await self._save_active_state()
+                        # In Hedge Mode an opposite-side position on this symbol
+                        # is unrelated; verify only the side being closed.
+                        remaining = await self.real.get_position(trade.pair, trade.entry_side)
+                        if remaining is not None:
+                            raise RuntimeError(
+                                f"EMA MARKET close {trade.pair} {trade.direction} belum flat; "
+                                "Algo SL/TP tetap aktif dan close akan direkonsiliasi tanpa POST ulang."
+                            )
+                    else:
+                        # A successful REST response is not enough: verify that no
+                        # exchange exposure remains before recording close/reversal.
+                        remaining = await self.real.get_positions(trade.pair)
+                        if remaining:
+                            raise RuntimeError(
+                                f"Market close {trade.pair} belum flat; reversal/ledger close diblokir."
+                            )
                 else:
-                    remaining = await self.real.get_positions(trade.pair)
-                    if remaining:
-                        raise RuntimeError(
-                            "Posisi Binance tidak cocok dengan arah trade; reversal diblokir."
-                        )
-                    log.warning("[REAL] %s posisi tidak ditemukan; kemungkinan ditutup manual.", trade.pair)
+                    if not keep_protections_until_flat:
+                        remaining = await self.real.get_positions(trade.pair)
+                        if remaining:
+                            raise RuntimeError(
+                                "Posisi Binance tidak cocok dengan arah trade; reversal diblokir."
+                            )
+                    log.warning("[REAL] %s posisi %s tidak ditemukan; kemungkinan ditutup oleh SL/TP atau manual.", trade.pair, trade.direction)
+                if keep_protections_until_flat:
+                    if not await self._cancel_real_protections(trade):
+                        if trade.protection_exit_reason is None:
+                            trade.protection_exit_reason = (
+                                reason if market_order_submitted else
+                                ("TP_SL_EXIT_RECONCILED" if trade.protection_state == "ACTIVE" else "EXCHANGE_POSITION_FLAT_RECONCILED")
+                            )
+                        trade.ema_exit_state = "CLEANUP_WAIT_API"
+                        await self._save_active_state()
+                        return
             except Exception as exc:
                 trade.real_error = str(exc)[:500]
                 await self._save_active_state()
                 raise
-        await self._finalize_trade(trade, "CLOSED", exit_price, reason)
+        if trade.protection_exit_reason in {"STOP_LOSS", "TAKE_PROFIT"}:
+            final_reason = trade.protection_exit_reason
+        elif keep_protections_until_flat and not market_order_submitted and not position_was_open:
+            final_reason = "TP_SL_EXIT_RECONCILED" if trade.protection_state == "ACTIVE" else "EXCHANGE_POSITION_FLAT_RECONCILED"
+        else:
+            final_reason = reason
+        await self._finalize_trade(trade, "CLOSED", exit_price, final_reason)
 
     async def _finalize_trade(self, trade: Trade, result: str, exit_price: Decimal | None, reason: str) -> None:
         # Idempotent terminal transition: WS flat, Algo exit reconciliation, and
@@ -7297,7 +7450,10 @@ class TradingEngine:
             trade.entry_order_terminal = True
             if executed > 0:
                 trade.quantity = executed
-            await self._mark_filled(trade, self._order_fill_price(order, trade.entry), "BINANCE_POLL")
+            await self._mark_filled(
+                trade, self._order_fill_price(order, trade.entry), "BINANCE_POLL",
+                filled_at=self._exchange_event_time(order),
+            )
             trade.real_state = "REAL_FILLED"
             await self._save_active_state()
         elif status == "PARTIALLY_FILLED":
@@ -7307,7 +7463,10 @@ class TradingEngine:
             trade.entry_order_terminal = False
             if executed > 0:
                 trade.quantity = executed
-                await self._mark_filled(trade, self._order_fill_price(order, trade.entry), "BINANCE_POLL_PARTIAL")
+                await self._mark_filled(
+                    trade, self._order_fill_price(order, trade.entry), "BINANCE_POLL_PARTIAL",
+                    filled_at=self._exchange_event_time(order),
+                )
             trade.real_state = "REAL_PARTIALLY_FILLED"
             await self._save_active_state()
         elif status in {"NEW", "UNKNOWN"} and (
@@ -7322,7 +7481,10 @@ class TradingEngine:
             executed = Decimal(str(order.get("executedQty") or "0"))
             if executed > 0:
                 trade.quantity = executed
-                await self._mark_filled(trade, self._order_fill_price(order, trade.entry), "BINANCE_TERMINAL_PARTIAL_FILL")
+                await self._mark_filled(
+                    trade, self._order_fill_price(order, trade.entry), "BINANCE_TERMINAL_PARTIAL_FILL",
+                    filled_at=self._exchange_event_time(order),
+                )
             else:
                 await self._finalize_trade(
                     trade, "EXPIRED" if status == "EXPIRED" else "CANCELED",
@@ -7378,7 +7540,10 @@ class TradingEngine:
             # change through _mark_filled so the fixed Supertrend SL remains intact
             # and the TP is revalidated against the new cumulative average using the trade's saved RR band.
             if trade.status != "FILLED" or executed != previous_executed or avg != (trade.fill_price or trade.entry):
-                await self._mark_filled(trade, avg, "BINANCE_REST_CUMULATIVE_FILL_RECONCILIATION")
+                await self._mark_filled(
+                    trade, avg, "BINANCE_REST_CUMULATIVE_FILL_RECONCILIATION",
+                    filled_at=self._exchange_event_time(order),
+                )
             else:
                 trade.fill_price = avg
                 trade.actual_notional = executed * avg
@@ -7413,7 +7578,16 @@ class TradingEngine:
             return
         if self._binance_cooldown_remaining() > 0:
             return
+        if trade.ema_exit_state in {"EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN"}:
+            await self._process_ema_exit_real(trade)
+            if trade.status != "FILLED" or trade.ema_exit_state in {"EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN", "CLEANUP_WAIT_API"}:
+                return
         if trade.protection_state == "CANCEL_WAIT_API":
+            if trade.ema_exit_state == "CLEANUP_WAIT_API":
+                now_mono = time.monotonic()
+                if now_mono - self._ema_exit_close_last_check.get(trade.trade_id, 0.0) < EMA_EXIT_RECONCILE_SECONDS:
+                    return
+                self._ema_exit_close_last_check[trade.trade_id] = now_mono
             remaining_now = await self.real.get_position(trade.pair, trade.entry_side)
             if remaining_now is None:
                 keep = "SL" if trade.protection_exit_reason == "STOP_LOSS" else "TP" if trade.protection_exit_reason == "TAKE_PROFIT" else None
@@ -7492,7 +7666,25 @@ class TradingEngine:
                     "Exposure masih aktif di Binance, tetapi SL tidak membentuk jarak risiko valid. Amankan posisi LIVE segera."
                 )
         elif trade.protection_state not in {"ACTIVE", "ERROR_REJECTED"}:
-            await self._ensure_real_protection(trade)
+            try:
+                # Give the first exchange SL/TP installation attempt priority.
+                # EMA history warm-up is scheduled in finally, never ahead of it.
+                await self._ensure_real_protection(trade)
+            finally:
+                if (
+                    trade.status == "FILLED" and not trade.exchange_adopted
+                    and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}
+                ):
+                    self._schedule_ema_exit_initialization(trade)
+                    await self._sync_ws_symbols()
+
+        if (
+            trade.status == "FILLED" and not trade.exchange_adopted
+            and trade.protection_state in {"ACTIVE", "PARTIAL", "INVALID_RISK", "ERROR_REJECTED"}
+            and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}
+        ):
+            self._schedule_ema_exit_initialization(trade)
+            await self._sync_ws_symbols()
 
     async def _reconcile_restored_trades(self) -> None:
         if self._binance_cooldown_remaining() > 0:
@@ -7561,6 +7753,7 @@ class TradingEngine:
                             await self._mark_filled(
                                 trade, self._order_fill_price(order, trade.entry),
                                 "STARTUP_RECONCILIATION" if status == "FILLED" else "STARTUP_PARTIAL_FILL_RECONCILIATION",
+                                filled_at=self._exchange_event_time(order),
                             )
                             trade.real_state = "REAL_FILLED" if status == "FILLED" else "REAL_PARTIALLY_FILLED"
                             await self._save_active_state()
@@ -7577,6 +7770,7 @@ class TradingEngine:
                                 await self._mark_filled(
                                     trade, self._order_fill_price(order, trade.entry),
                                     "STARTUP_TERMINAL_PARTIAL_FILL_RECONCILIATION",
+                                    filled_at=self._exchange_event_time(order),
                                 )
                             else:
                                 await self._finalize_trade(
@@ -7689,6 +7883,8 @@ class TradingEngine:
                 for trade in list(self.active_trades.values()):
                     if self._binance_cooldown_remaining() > 0:
                         break
+                    if trade.status == "FILLED" and not trade.real_enabled and not trade.exchange_adopted and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}:
+                        self._schedule_ema_exit_initialization(trade)
                     if trade.real_enabled and trade.status == "PENDING":
                         try:
                             await self._reconcile_pending_real(trade)
@@ -7923,9 +8119,472 @@ class TradingEngine:
                         "source": "MARKET_WEBSOCKET",
                     }
 
-    def _on_kline(self, symbol: str, kline: dict[str, Any]) -> None:
-        """Forward scanner candle events to the shared bounded REST/cache owner."""
+    @staticmethod
+    def _ema_sma_seeded(values: np.ndarray, period: int) -> np.ndarray:
+        """EMA identical to backtest(10).py smooth(): SMA seed, then recursive EMA."""
+        x = np.asarray(values, dtype=np.float64).reshape(-1)
+        out = np.full(x.shape, np.nan, dtype=np.float64)
+        n = int(period)
+        if n < 1 or x.size < n or not np.all(np.isfinite(x)):
+            return out
+        alpha = 2.0 / (float(n) + 1.0)
+        previous = float(np.mean(x[:n]))
+        out[n - 1] = previous
+        for i in range(n, x.size):
+            previous += alpha * (float(x[i]) - previous)
+            out[i] = previous
+        return out
+
+    @staticmethod
+    def _ema_exit_periods(trade: Trade) -> tuple[int, int] | None:
+        try:
+            selected = volumatic.normalize_ema_filter_length(trade.ema_filter_length)
+        except (TypeError, ValueError):
+            return None
+        return selected if isinstance(selected, tuple) else None
+
+    def _schedule_ema_exit_initialization(self, trade: Trade) -> None:
+        """Start at most one low-priority H1 history warm-up per trade."""
+        if trade.status != "FILLED" or trade.exchange_adopted:
+            return
+        if trade.ema_exit_state in {
+            "ACTIVE", "ACTIVE_WITH_GAP", "EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY",
+            "CLOSE_UNKNOWN", "CLEANUP_WAIT_API", "SUPERSEDED_BY_PROTECTION",
+            "DISABLED", "UNAVAILABLE",
+        }:
+            return
+        periods = self._ema_exit_periods(trade)
+        if periods is None:
+            trade.ema_exit_state = "DISABLED"
+            trade.ema_exit_last_error = "Trade tidak memiliki konfigurasi dual EMA yang tersimpan."
+            return
+        if self._binance_cooldown_remaining() > 0:
+            trade.ema_exit_state = "WAITING_API"
+            trade.ema_exit_last_error = "H1 EMA warm-up menunggu Binance REST cooldown."
+            return
+        now = time.monotonic()
+        last_attempt = self._ema_exit_last_retry.get(trade.trade_id, 0.0)
+        if now - last_attempt < EMA_EXIT_INIT_RETRY_SECONDS:
+            return
+        existing = self._ema_exit_init_tasks.get(trade.trade_id)
+        if existing is not None and not existing.done():
+            return
+        self._ema_exit_last_retry[trade.trade_id] = now
+        task = asyncio.create_task(
+            self._initialize_ema_exit_trade(trade.trade_id),
+            name=f"ema-h1-init-{trade.pair}",
+        )
+        self._ema_exit_init_tasks[trade.trade_id] = task
+
+    async def _initialize_ema_exit_trade(self, trade_id: str) -> None:
+        """Seed/repair the H1 EMA exit state and replay any missed closed candles."""
+        try:
+            async with self._ema_exit_init_semaphore:
+                trade = self.active_trades.get(trade_id)
+                if trade is None or trade.status != "FILLED" or trade.exchange_adopted:
+                    return
+                periods = self._ema_exit_periods(trade)
+                if periods is None:
+                    trade.ema_exit_state = "DISABLED"
+                    trade.ema_exit_last_error = "Dual EMA tidak tersedia pada trade snapshot."
+                    await self._save_active_state()
+                    return
+                fast_len, slow_len = periods
+                # Four EMA periods provide a stable SMA-seeded warm-up, while
+                # also replaying the interval since the last persisted H1 state.
+                slow_bars = max(99, min(1500, slow_len * 4 + 12))
+                saved_open = int(trade.ema_exit_last_open_ms or 0)
+                filled_ms = int((trade.filled_at or trade.created_at).timestamp() * 1000)
+                if saved_open:
+                    replay_bars = max(99, int(max(0, int(time.time() * 1000) - saved_open) / H1_MS) + 4)
+                    count = min(1500, max(slow_bars, replay_bars))
+                else:
+                    age_bars = max(0, int((int(time.time() * 1000) - filled_ms) / H1_MS) + 4)
+                    count = min(1500, max(slow_bars, age_bars))
+                if slow_len > count:
+                    trade.ema_exit_state = "UNAVAILABLE"
+                    trade.ema_exit_last_error = (
+                        f"EMA slow {slow_len} membutuhkan lebih dari {count} candle H1; "
+                        "histori Binance yang diminta tidak cukup."
+                    )
+                    await self._save_active_state()
+                    await self.reply(
+                        f"⚠️ EMA H1 EXIT BELUM AKTIF • {trade.pair}\n"
+                        f"EMA: {fast_len}/{slow_len}\n"
+                        f"Alasan: {trade.ema_exit_last_error}\n"
+                        "SL/TP tetap aktif di Binance; periksa konfigurasi EMA/history."
+                    )
+                    return
+
+                trade.ema_exit_state = "INITIALIZING"
+                await self._save_active_state()
+                candles = await self.rest.get_klines(
+                    trade.pair, "1h", count, H1_MS, force_refresh=False
+                )
+                if not isinstance(candles, np.ndarray) or candles.size < slow_len:
+                    raise RuntimeError(
+                        f"Histori H1 tidak cukup untuk EMA{slow_len}: "
+                        f"{len(candles) if isinstance(candles, np.ndarray) else 0}/{slow_len}."
+                    )
+                opens = np.asarray(candles["t"], dtype=np.int64)
+                closes = np.asarray(candles["c"], dtype=np.float64)
+                fast_values = self._ema_sma_seeded(closes, fast_len)
+                slow_values = self._ema_sma_seeded(closes, slow_len)
+                valid = np.isfinite(fast_values) & np.isfinite(slow_values)
+                valid_indices = np.flatnonzero(valid)
+                if valid_indices.size == 0:
+                    raise RuntimeError("EMA H1 belum memiliki warm-up yang valid.")
+
+                # If a legacy/opened trade predates the available history window,
+                # its past cross cannot be reconstructed safely. Resume from the
+                # latest confirmed candle and surface the gap instead of inventing
+                # an exit signal from the current EMA relationship.
+                first_valid = int(valid_indices[0])
+                history_first_open = int(opens[first_valid])
+                uncovered_gap = False
+                if saved_open and history_first_open > saved_open + H1_MS:
+                    uncovered_gap = True
+                elif not saved_open and history_first_open > (filled_ms // H1_MS) * H1_MS:
+                    uncovered_gap = True
+
+                start_index = first_valid + 1
+                if saved_open:
+                    start_index = max(start_index, int(np.searchsorted(opens, saved_open, side="right")))
+                elif not uncovered_gap:
+                    fill_bucket = (filled_ms // H1_MS) * H1_MS
+                    start_index = max(start_index, int(np.searchsorted(opens, fill_bucket, side="left")))
+
+                triggered = False
+                for i in range(start_index, len(opens)):
+                    if not (np.isfinite(fast_values[i - 1]) and np.isfinite(slow_values[i - 1])
+                            and np.isfinite(fast_values[i]) and np.isfinite(slow_values[i])):
+                        continue
+                    candle_close_ms = int(opens[i]) + H1_MS
+                    if candle_close_ms <= filled_ms:
+                        continue
+                    previous_fast = float(fast_values[i - 1])
+                    previous_slow = float(slow_values[i - 1])
+                    current_fast = float(fast_values[i])
+                    current_slow = float(slow_values[i])
+                    bearish_cross = current_fast < current_slow and previous_fast >= previous_slow
+                    bullish_cross = current_fast > current_slow and previous_fast <= previous_slow
+                    trade.ema_exit_last_open_ms = int(opens[i])
+                    trade.ema_exit_last_fast = Decimal(str(current_fast))
+                    trade.ema_exit_last_slow = Decimal(str(current_slow))
+                    should_exit = (
+                        (trade.direction == "LONG" and bearish_cross)
+                        or (trade.direction == "SHORT" and bullish_cross)
+                    )
+                    if should_exit:
+                        reason = "EMA_H1_BEARISH_CROSS" if trade.direction == "LONG" else "EMA_H1_BULLISH_CROSS"
+                        trade.ema_exit_state = "EXIT_PENDING"
+                        trade.ema_exit_trigger_close_ms = candle_close_ms
+                        trade.ema_exit_trigger_price = Decimal(str(float(closes[i])))
+                        trade.ema_exit_reason = reason
+                        trade.ema_exit_last_error = None
+                        triggered = True
+                        log.warning(
+                            "[EMA EXIT] recovered H1 inverse cross | %s %s EMA%s/%s close=%s",
+                            trade.pair, trade.direction, fast_len, slow_len,
+                            trade.ema_exit_trigger_price,
+                        )
+                        break
+
+                if not triggered:
+                    last_index = int(valid_indices[-1])
+                    trade.ema_exit_last_open_ms = int(opens[last_index])
+                    trade.ema_exit_last_fast = Decimal(str(float(fast_values[last_index])))
+                    trade.ema_exit_last_slow = Decimal(str(float(slow_values[last_index])))
+                    trade.ema_exit_state = "ACTIVE_WITH_GAP" if uncovered_gap else "ACTIVE"
+                    trade.ema_exit_last_error = (
+                        "Sebagian riwayat H1 sebelum warm-up tidak tersedia; exit dilanjutkan dari candle terbaru. "
+                        "Cross yang terjadi saat bot tidak aktif di luar histori ini tidak dapat direkonstruksi."
+                        if uncovered_gap else None
+                    )
+                await self._save_active_state()
+                await self._sync_ws_symbols()
+                if uncovered_gap:
+                    await self.reply(
+                        f"⚠️ EMA H1 HISTORY GAP • {trade.pair} {trade.direction}\n"
+                        f"EMA: {fast_len}/{slow_len}\n"
+                        "Histori candle sebelum warm-up tidak cukup untuk merekonstruksi semua cross saat bot tidak aktif.\n"
+                        "Exit EMA tetap aktif untuk cross baru; SL/TP tetap dipertahankan. Periksa posisi ini."
+                    )
+                if triggered:
+                    if not trade.real_enabled:
+                        await self._finalize_trade(
+                            trade, "CLOSED", trade.ema_exit_trigger_price,
+                            trade.ema_exit_reason or "EMA_H1_INVERSE_CROSS",
+                        )
+                    else:
+                        await self._sync_ws_symbols()
+        except BinanceRateLimitError as exc:
+            trade = self.active_trades.get(trade_id)
+            if trade is not None and trade.status == "FILLED":
+                trade.ema_exit_state = "WAITING_API"
+                trade.ema_exit_last_error = str(exc)[:400]
+                await self._save_active_state()
+            log.info("[EMA EXIT] H1 initialization deferred by rate governor | trade=%s | %s", trade_id, exc)
+        except Exception as exc:
+            trade = self.active_trades.get(trade_id)
+            if trade is not None and trade.status == "FILLED":
+                trade.ema_exit_state = "INIT_RETRY"
+                trade.ema_exit_last_error = str(exc)[:500]
+                await self._save_active_state()
+            log.warning("[EMA EXIT] H1 initialization failed | trade=%s | %s", trade_id, exc)
+        finally:
+            current = asyncio.current_task()
+            if self._ema_exit_init_tasks.get(trade_id) is current:
+                self._ema_exit_init_tasks.pop(trade_id, None)
+
+    async def _finalize_ema_exit_after_flat(
+        self, trade: Trade, reason: str | None = None, *, market_close_confirmed: bool = False,
+    ) -> None:
+        """Position is confirmed flat; only now cancel remaining closePosition protections."""
+        if trade.protection_exit_reason in {"STOP_LOSS", "TAKE_PROFIT"}:
+            final_reason = trade.protection_exit_reason
+        elif market_close_confirmed:
+            final_reason = trade.ema_exit_reason or reason or "EMA_H1_INVERSE_CROSS"
+        else:
+            final_reason = reason or ("TP_SL_EXIT_RECONCILED" if trade.protection_state == "ACTIVE" else "EXTERNAL_CLOSE_RECONCILED")
+        keep = None
+        if final_reason == "STOP_LOSS":
+            keep = "SL"
+        elif final_reason == "TAKE_PROFIT":
+            keep = "TP"
+        if not await self._cancel_real_protections(trade, keep_triggered=keep):
+            trade.protection_exit_reason = final_reason
+            trade.ema_exit_state = "CLEANUP_WAIT_API"
+            await self._save_active_state()
+            return
+        await self._finalize_trade(
+            trade, "CLOSED", self._current_price(trade.pair) or trade.fill_price or trade.entry,
+            final_reason,
+        )
+
+    async def _reconcile_ema_exit_close(self, trade: Trade) -> None:
+        """Resolve a possibly-sent MARKET close by its stable clientOrderId; never POST twice."""
+        client_id = str(trade.ema_exit_client_order_id or "").strip()
+        if not client_id:
+            trade.ema_exit_state = "CLOSE_UNKNOWN"
+            trade.ema_exit_last_error = "Close state ambigu tetapi clientOrderId tidak tersimpan; POST ulang dikunci."
+            await self._save_active_state()
+            return
+        try:
+            order = await self.real.get_order(trade.pair, client_order_id=client_id)
+        except BinanceAPIError as exc:
+            if exc.code != -2013:
+                raise
+            # An absent order is not enough to prove that the original POST never
+            # reached Binance. Check exposure; if still open, keep SL/TP and do not
+            # manufacture a duplicate MARKET order.
+            position = await self.real.get_position(trade.pair, trade.entry_side)
+            if position is None:
+                await self._finalize_ema_exit_after_flat(trade)
+            else:
+                trade.ema_exit_state = "CLOSE_UNKNOWN"
+                trade.ema_exit_last_error = (
+                    "Binance belum menemukan close clientOrderId, tetapi posisi masih terbuka. "
+                    "Tidak ada POST ulang otomatis; SL/TP tetap aktif. Perlu verifikasi manual bila berlarut."
+                )
+                await self._save_active_state()
+                log.error("[EMA EXIT] ambiguous close remains open; no duplicate MARKET POST | %s %s", trade.pair, trade.direction)
+            return
+
+        status = str(order.get("status") or "UNKNOWN").upper()
+        trade.ema_exit_order_id = int(order.get("orderId")) if order.get("orderId") not in (None, "") else trade.ema_exit_order_id
+        trade.ema_exit_order_status = status
+        await self._save_active_state()
+        position = await self.real.get_position(trade.pair, trade.entry_side)
+        if position is None:
+            await self._finalize_ema_exit_after_flat(
+                trade, market_close_confirmed=(status == "FILLED"),
+            )
+            return
+        if status in {"NEW", "PARTIALLY_FILLED", "UNKNOWN"}:
+            trade.ema_exit_state = "CLOSE_VERIFY"
+            trade.ema_exit_last_error = f"Close order masih {status}; menunggu konfirmasi posisi flat."
+            await self._save_active_state()
+            return
+        if status in {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}:
+            trade.ema_exit_state = "CLOSE_UNKNOWN"
+            trade.ema_exit_last_error = (
+                f"Close order berstatus {status}, tetapi posisi arah {trade.direction} masih terbuka. "
+                "Bot tidak mengirim MARKET kedua secara otomatis agar tidak menutup exposure tambahan."
+            )
+            await self._save_active_state()
+            log.error("[EMA EXIT] terminal close order but position still open | %s %s | %s", trade.pair, trade.direction, status)
+            return
+
+    async def _process_ema_exit_real(self, trade: Trade) -> None:
+        """Execute/reconcile one H1 exit while leaving Binance SL/TP armed until flat."""
+        if not trade.real_enabled or trade.status != "FILLED":
+            return
+        if self._binance_cooldown_remaining() > 0:
+            return
+        lock = self._ema_exit_close_locks.setdefault(trade.trade_id, asyncio.Lock())
+        async with lock:
+            if trade.status != "FILLED":
+                return
+            if trade.ema_exit_state in {"CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN"}:
+                now_mono = time.monotonic()
+                interval = (
+                    EMA_EXIT_UNKNOWN_RECHECK_SECONDS
+                    if trade.ema_exit_state in {"CLOSE_SUBMITTING", "CLOSE_UNKNOWN"}
+                    else EMA_EXIT_RECONCILE_SECONDS
+                )
+                if now_mono - self._ema_exit_close_last_check.get(trade.trade_id, 0.0) < interval:
+                    return
+                self._ema_exit_close_last_check[trade.trade_id] = now_mono
+                await self._reconcile_ema_exit_close(trade)
+                return
+            if trade.ema_exit_state != "EXIT_PENDING":
+                return
+            if (
+                trade.protection_exit_reason in {"STOP_LOSS", "TAKE_PROFIT"}
+                or trade.sl_algo_status.upper() in {"TRIGGERED", "FINISHED"}
+                or trade.tp_algo_status.upper() in {"TRIGGERED", "FINISHED"}
+            ):
+                trade.ema_exit_state = "SUPERSEDED_BY_PROTECTION"
+                trade.ema_exit_last_error = "SL/TP Binance terpicu; EMA market close dibatalkan."
+                await self._save_active_state()
+                return
+            if not trade.ema_exit_client_order_id:
+                identity = f"{trade.trade_id}|{trade.ema_exit_trigger_close_ms or 0}|{trade.ema_exit_reason or ''}"
+                trade.ema_exit_client_order_id = "emaexit" + hashlib.sha256(identity.encode()).hexdigest()[:22]
+            trade.ema_exit_attempts += 1
+            trade.ema_exit_last_error = None
+            await self._save_active_state()
+            reference = trade.ema_exit_trigger_price or self._current_price(trade.pair) or trade.fill_price or trade.entry
+            try:
+                await self._close_trade(
+                    trade, reference,
+                    trade.ema_exit_reason or "EMA_H1_INVERSE_CROSS",
+                    keep_protections_until_flat=True,
+                    client_order_id=trade.ema_exit_client_order_id,
+                )
+            except BinanceRateLimitError as exc:
+                # If the MARKET order itself was rate-limited or preflight was
+                # blocked, it was not accepted. If it had been accepted, the
+                # state was already moved to CLOSE_VERIFY before verification.
+                if trade.ema_exit_state == "CLOSE_SUBMITTING":
+                    trade.ema_exit_state = "EXIT_PENDING"
+                trade.ema_exit_last_error = str(exc)[:500]
+                await self._save_active_state()
+                raise
+            except Exception as exc:
+                if trade.ema_exit_state == "CLOSE_SUBMITTING":
+                    trade.ema_exit_state = "CLOSE_UNKNOWN"
+                trade.ema_exit_last_error = str(exc)[:500]
+                await self._save_active_state()
+                log.exception("[EMA EXIT] close operation needs reconciliation | %s %s", trade.pair, trade.direction)
+            else:
+                # _close_trade may leave the ledger open only while Algo cleanup
+                # is rate-limited; its CANCEL_WAIT_API state is handled by the
+                # existing position reconciler without exposing the position.
+                if trade.status == "FILLED" and trade.protection_state == "CANCEL_WAIT_API":
+                    trade.ema_exit_state = "CLEANUP_WAIT_API"
+                    await self._save_active_state()
+
+    async def _process_ema_exit_candle(self, symbol: str, kline: dict[str, Any]) -> None:
+        """Consume only a confirmed H1 close; intrabar EMA crosses are ignored."""
+        if not isinstance(kline, dict) or kline.get("i") != "1h" or kline.get("x") is not True:
+            return
+        try:
+            open_ms = int(kline["t"])
+            close_ms = open_ms + H1_MS
+            close_price = Decimal(str(kline["c"]))
+            if not close_price.is_finite() or close_price <= 0:
+                return
+        except (KeyError, TypeError, ValueError, InvalidOperation, OverflowError):
+            return
+
+        changed = False
+        for trade in list(self.active_trades.values()):
+            if (
+                trade.pair != symbol or trade.status != "FILLED" or trade.exchange_adopted
+                or self._ema_exit_periods(trade) is None
+            ):
+                continue
+            if trade.ema_exit_state in {"EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN", "CLEANUP_WAIT_API", "SUPERSEDED_BY_PROTECTION", "DISABLED", "UNAVAILABLE"}:
+                continue
+            if trade.ema_exit_state not in {"ACTIVE", "ACTIVE_WITH_GAP"}:
+                self._schedule_ema_exit_initialization(trade)
+                continue
+            last_open = int(trade.ema_exit_last_open_ms or 0)
+            if open_ms <= last_open:
+                continue  # duplicate close event after reconnect
+            if last_open <= 0 or open_ms != last_open + H1_MS:
+                trade.ema_exit_state = "BACKFILL_PENDING"
+                trade.ema_exit_last_error = (
+                    f"H1 event gap: last={last_open}, current={open_ms}; reconstructing closed candles."
+                )
+                changed = True
+                self._schedule_ema_exit_initialization(trade)
+                continue
+            if trade.ema_exit_last_fast is None or trade.ema_exit_last_slow is None:
+                trade.ema_exit_state = "INIT_RETRY"
+                self._schedule_ema_exit_initialization(trade)
+                changed = True
+                continue
+            periods = self._ema_exit_periods(trade)
+            if periods is None:
+                trade.ema_exit_state = "DISABLED"
+                continue
+            fast_len, slow_len = periods
+            alpha_fast = 2.0 / (fast_len + 1.0)
+            alpha_slow = 2.0 / (slow_len + 1.0)
+            previous_fast = float(trade.ema_exit_last_fast)
+            previous_slow = float(trade.ema_exit_last_slow)
+            current_fast = previous_fast + alpha_fast * (float(close_price) - previous_fast)
+            current_slow = previous_slow + alpha_slow * (float(close_price) - previous_slow)
+            bearish_cross = current_fast < current_slow and previous_fast >= previous_slow
+            bullish_cross = current_fast > current_slow and previous_fast <= previous_slow
+            trade.ema_exit_last_open_ms = open_ms
+            trade.ema_exit_last_fast = Decimal(str(current_fast))
+            trade.ema_exit_last_slow = Decimal(str(current_slow))
+            changed = True
+            should_exit = (
+                (trade.direction == "LONG" and bearish_cross)
+                or (trade.direction == "SHORT" and bullish_cross)
+            )
+            if not should_exit or close_ms <= int((trade.filled_at or trade.created_at).timestamp() * 1000):
+                continue
+            reason = "EMA_H1_BEARISH_CROSS" if trade.direction == "LONG" else "EMA_H1_BULLISH_CROSS"
+            trade.ema_exit_state = "EXIT_PENDING"
+            trade.ema_exit_trigger_close_ms = close_ms
+            trade.ema_exit_trigger_price = close_price
+            trade.ema_exit_reason = reason
+            trade.ema_exit_last_error = None
+            log.warning(
+                "[EMA EXIT] confirmed H1 inverse cross | %s %s EMA%s/%s close=%s | SL=%s TP=%s remain armed",
+                trade.pair, trade.direction, fast_len, slow_len, close_price,
+                trade.stop_loss, trade.take_profit,
+            )
+            if not trade.real_enabled:
+                # Paper mirrors backtest's H1-close price. Earlier local SL/TP
+                # handling removes the trade before this callback can reach it.
+                await self._finalize_trade(trade, "CLOSED", close_price, reason)
+            else:
+                await self.reply(
+                    f"🔔 EMA H1 EXIT DETECTED • {trade.pair} {trade.direction}\n"
+                    f"EMA: {fast_len}/{slow_len}\n"
+                    f"H1 close: {fmt_price(close_price)}\n"
+                    f"SL: {fmt_price(trade.stop_loss)} · TP: {fmt_price(trade.take_profit)}\n"
+                    "SL/TP tetap aktif sampai MARKET close terkonfirmasi."
+                )
+        if changed:
+            await self._save_active_state()
+            await self._sync_ws_symbols()
+
+    async def _on_kline(self, symbol: str, kline: dict[str, Any]) -> None:
+        """Route M15 scanner and H1 position-exit candles through one cache owner."""
+        if not isinstance(kline, dict):
+            return
         self.rest.update_kline_from_ws(symbol, kline)
+        interval = str(kline.get("i") or "").lower()
+        if interval == "1h":
+            await self._process_ema_exit_candle(normalize_symbol(symbol), kline)
 
     async def _on_price(self, symbol: str, price: Decimal, event_time_ms: int, aggregate_trade_id: int = -1) -> None:
         symbol = normalize_symbol(symbol)
@@ -8079,6 +8738,7 @@ class TradingEngine:
             actual_notional=notional if notional > 0 else None,
             real_enabled=True,
             real_state=("REAL_EXCHANGE_ADOPTED" if status == "FILLED" else "REAL_EXCHANGE_ADOPTED_PENDING"),
+            ema_exit_state="DISABLED",
             position_side=position_side or "BOTH",
             entry_order_id=order_id,
             entry_client_order_id=client_order_id,
@@ -8248,7 +8908,9 @@ class TradingEngine:
             trade.margin_usdt = margin if margin is not None else trade.actual_notional / Decimal(max(1, trade.leverage))
             trade.position_side = side
             if was_pending:
-                await self._mark_filled(trade, trade.fill_price, f"BINANCE_ACCOUNT_UPDATE_{source}")
+                await self._mark_filled(
+                    trade, trade.fill_price, f"BINANCE_ACCOUNT_UPDATE_{source}", filled_at=stamp
+                )
             elif trade.exchange_adopted:
                 trade.real_state = "REAL_EXCHANGE_ADOPTED"
         await self.ws.add_symbol(symbol)
@@ -8348,7 +9010,10 @@ class TradingEngine:
                 except (InvalidOperation, ValueError):
                     pass
                 if trade.status == "PENDING":
-                    await self._mark_filled(trade, trade.fill_price or price, f"BINANCE_OPEN_ORDER_SNAPSHOT_{source}")
+                    await self._mark_filled(
+                        trade, trade.fill_price or price, f"BINANCE_OPEN_ORDER_SNAPSHOT_{source}",
+                        filled_at=stamp,
+                    )
         await self.ws.add_symbol(symbol)
         return trade
 
@@ -8659,10 +9324,16 @@ class TradingEngine:
             trade.actual_notional = cumulative * fill_price
             trade.margin_usdt = trade.actual_notional / Decimal(max(1, trade.leverage))
             if trade.status == "PENDING":
-                await self._mark_filled(trade, fill_price, f"BINANCE_USER_WS_{status}")
+                await self._mark_filled(
+                    trade, fill_price, f"BINANCE_USER_WS_{status}",
+                    filled_at=self._exchange_event_time(order),
+                )
             else:
                 trade.status = "FILLED"
-                await self._mark_filled(trade, fill_price, f"BINANCE_USER_WS_PARTIAL_{status}")
+                await self._mark_filled(
+                    trade, fill_price, f"BINANCE_USER_WS_PARTIAL_{status}",
+                    filled_at=self._exchange_event_time(order),
+                )
                 await self._record_event(
                     "ORDER_CUMULATIVE_FILL_UPDATE", trade,
                     order_status=status, execution_type=execution,
@@ -8700,8 +9371,25 @@ class TradingEngine:
             if order.get("symbol")
         )
         scanner_symbols = set(self._scanner_symbols) if self.scan_enabled else set()
-        desired = trade_symbols | scanner_symbols
-        await self.ws.set_symbols(trade_symbols, scanner_symbols=scanner_symbols)
+        exit_symbols = {
+            t.pair for t in self.active_trades.values()
+            if t.status == "FILLED" and not t.exchange_adopted
+            and self._ema_exit_periods(t) is not None
+            and (
+                not t.real_enabled
+                or t.protection_state in {"ACTIVE", "PARTIAL", "INVALID_RISK", "ERROR_REJECTED"}
+                or t.ema_exit_state in {"INITIALIZING", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING", "ACTIVE", "ACTIVE_WITH_GAP"}
+            )
+            and t.ema_exit_state not in {
+                "DISABLED", "UNAVAILABLE", "EXIT_PENDING", "CLOSE_SUBMITTING",
+                "CLOSE_VERIFY", "CLOSE_UNKNOWN", "CLEANUP_WAIT_API",
+                "SUPERSEDED_BY_PROTECTION",
+            }
+        }
+        desired = trade_symbols | scanner_symbols | exit_symbols
+        await self.ws.set_symbols(
+            trade_symbols, scanner_symbols=scanner_symbols, exit_symbols=exit_symbols
+        )
         for key in list(self._live_signal_candles):
             _tf, pair = key.split(":", 1)
             if pair not in desired:
