@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-10T15:41:42.098266+00:00",
+  "updated_at": "2026-11-10T15:41:45.230949+00:00",
   "active_trades": [
     {
       "trade_id": "AGLDUSDT-20261110-212133-6A6B09",
@@ -34,7 +34,7 @@
       "protection_state": "CANCEL_WAIT_API",
       "protection_error": "Proteksi closePosition menunggu REST pulih; tidak dianggap sudah dibatalkan.",
       "protection_warning_sent": false,
-      "protection_exit_reason": null,
+      "protection_exit_reason": "EXCHANGE_POSITION_FLAT_WS",
       "sl_submit_ambiguous": false,
       "tp_submit_ambiguous": false,
       "entry": "0.1573",
