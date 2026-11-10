@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-10T14:42:16.777324+00:00",
+  "updated_at": "2026-11-10T14:42:18.584309+00:00",
   "active_trades": [
     {
       "trade_id": "AGLDUSDT-20261110-212133-6A6B09",
@@ -446,10 +446,10 @@
       "ema_filter_value": "0.016862859971319137",
       "ema_filter_slow_value": "0.016866890174942167",
       "ema_filter_passed": true,
-      "ema_exit_state": "INITIALIZING",
-      "ema_exit_last_open_ms": 0,
-      "ema_exit_last_fast": null,
-      "ema_exit_last_slow": null,
+      "ema_exit_state": "ACTIVE",
+      "ema_exit_last_open_ms": 1794315600000,
+      "ema_exit_last_fast": "0.01688926113568853",
+      "ema_exit_last_slow": "0.016883071524134416",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
@@ -457,7 +457,7 @@
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
       "ema_exit_attempts": 0,
-      "ema_exit_last_error": "H1 EMA warm-up menunggu Binance REST cooldown.",
+      "ema_exit_last_error": null,
       "expires_at": "2026-11-10T15:34:38.783854+00:00",
       "status": "FILLED",
       "created_at": "2026-11-10T14:34:38.783854+00:00",
