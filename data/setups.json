@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-10T05:42:10.759223+00:00",
+  "updated_at": "2026-11-10T05:42:22.178424+00:00",
   "active_trades": [
     {
       "trade_id": "1000000MOGUSDT-20261110-083046-A3533D",
@@ -31,7 +31,7 @@
       "tp_client_algo_id": null,
       "sl_algo_status": "NOT_PLACED",
       "tp_algo_status": "NOT_PLACED",
-      "protection_state": "NOT_REQUIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
