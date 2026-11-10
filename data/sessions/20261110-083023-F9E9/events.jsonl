@@ -1,0 +1,1 @@
+{"event_id":"1dbe1b9005c6402d985753ea3bbd8e12","event":"POSITION_CLOSED","timestamp":"2026-11-10T05:42:24.419933+00:00","timestamp_wib":"10-11-2026 12:42 WIB","strategy":"VOLUMATIC_TREND","trade_id":"1000000MOGUSDT-20261110-083046-A3533D","pair":"1000000MOGUSDT","direction":"SHORT","timeframe":"EXCHANGE","reason":"EXTERNAL_CLOSE_RECONCILED","exit_price":"0.09235409"}
