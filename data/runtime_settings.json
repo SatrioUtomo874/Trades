@@ -17,12 +17,19 @@
   "last_processed_candles": {
     "M15:0GUSDT": 1794288600000,
     "M15:1000000MOGUSDT": 1794288600000,
-    "M15:1000BONKUSDT": 1794288600000
+    "M15:1000BONKUSDT": 1794288600000,
+    "M15:1000CATUSDT": 1794288600000,
+    "M15:1000CHEEMSUSDT": 1794288600000,
+    "M15:1000FLOKIUSDT": 1794288600000,
+    "M15:1000LUNCUSDT": 1794288600000,
+    "M15:1000PEPEUSDT": 1794288600000,
+    "M15:1000RATSUSDT": 1794288600000,
+    "M15:1000SATSUSDT": 1794288600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 3,
+  "scan_resume_cursor": 10,
   "scan_resume_boundary_ms": 1794288600000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-10T05:42:12.719959+00:00"
+  "updated_at": "2026-11-10T05:42:52.414906+00:00"
 }
