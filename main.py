@@ -951,11 +951,33 @@ ENDPOINT_WEIGHTS = {
     "/fapi/v3/balance": 5,
     "/fapi/v2/account": 5,
     "/fapi/v1/accountConfig": 5,
-    "/fapi/v1/klines": 2,  # limit 499 berada pada tier 100-499; header tetap sumber kebenaran
+    "/fapi/v1/klines": 2,  # fallback; estimator below accounts for the requested limit
     "/fapi/v1/exchangeInfo": 1,
     "/fapi/v1/time": 1,
     "/fapi/v2/ticker/price": 1,
 }
+
+
+def estimate_request_weight(path: str, params: dict[str, Any] | None = None) -> int:
+    """Best local estimate; Binance response header remains authoritative."""
+    params = params or {}
+    if path == "/fapi/v1/klines":
+        try:
+            limit = int(params.get("limit", 500) or 500)
+        except (TypeError, ValueError):
+            limit = 500
+        if limit < 100:
+            return 1
+        if limit < 500:
+            return 2
+        if limit <= 1000:
+            return 5
+        return 10
+    if path == "/fapi/v1/ticker/24hr" and params.get("symbol"):
+        return 1
+    if path == "/fapi/v2/positionRisk" and not params.get("symbol"):
+        return 10
+    return max(1, int(ENDPOINT_WEIGHTS.get(path, 1)))
 
 
 def parse_ban_until_ms(text: Any) -> int | None:
@@ -1218,7 +1240,9 @@ class ApiStats:
     """Hitung request Binance per endpoint + bobot IP dari header Binance."""
 
     def __init__(self) -> None:
-        self.calls: deque[tuple[float, str, int]] = deque(maxlen=50000)
+        # Store the estimate per request so variable-weight endpoints (notably
+        # klines) are not flattened into one inaccurate constant.
+        self.calls: deque[tuple[float, str, int, int]] = deque(maxlen=50000)
         self.total = 0
         self.limit_hits = 0
         self.last_limit_at: datetime | None = None
@@ -1226,16 +1250,20 @@ class ApiStats:
         self.used_weight_at: float | None = None
         self.max_used_weight = 0
 
-    def record(self, path: str, status: int, used_weight: str | None) -> None:
+    def record(
+        self, path: str, status: int, used_weight: str | None,
+        estimated_weight: int | None = None,
+    ) -> None:
         now = time.monotonic()
-        self.calls.append((now, path, status))
+        estimate = max(1, int(estimated_weight if estimated_weight is not None else estimate_request_weight(path)))
+        self.calls.append((now, path, status, estimate))
         self.total += 1
         if status in (418, 429):
             self.limit_hits += 1
             self.last_limit_at = now_utc()
         try:
             weight = int(used_weight) if used_weight not in (None, "") else None
-        except ValueError:
+        except (TypeError, ValueError):
             weight = None
         if weight is not None:
             self.used_weight = weight
@@ -1246,13 +1274,25 @@ class ApiStats:
         end = end if end is not None else time.monotonic()
         cutoff = end - seconds
         counts: dict[str, int] = {}
-        for ts, path, _ in reversed(self.calls):
+        for ts, path, _, _ in reversed(self.calls):
             if ts > end:
                 continue
             if ts < cutoff:
                 break
             counts[path] = counts.get(path, 0) + 1
         return counts
+
+    def window_weight(self, seconds: float, end: float | None = None) -> int:
+        end = end if end is not None else time.monotonic()
+        cutoff = end - seconds
+        total = 0
+        for ts, _, _, estimate in reversed(self.calls):
+            if ts > end:
+                continue
+            if ts < cutoff:
+                break
+            total += estimate
+        return total
 
     @staticmethod
     def weight_of(counts: dict[str, int]) -> int:
@@ -1483,27 +1523,37 @@ class BinanceREST:
                 self._last_request_monotonic = time.monotonic()
                 BINANCE_COOLDOWN.record_request()
 
-        used = headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m")
-        API_STATS.record(path, status, used)
-        code = payload.get("code") if isinstance(payload, dict) else None
-        message = payload.get("msg") if isinstance(payload, dict) else body_text
-        limited = status in {418, 429} or str(code) in {"-1003", "-1015"} or "too many requests" in str(message).lower()
-        if limited:
-            server_seconds, known = rate_limit_wait(type("ResponseLike", (), {
-                "headers": headers, "status_code": status, "text": body_text,
-            })())
-            cooldown = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
-            self._rest_cooldown_until = max(self._rest_cooldown_until, time.monotonic() + cooldown)
-            BINANCE_COOLDOWN.extend(cooldown, f"HTTP {status} {path}: {message}")
-            raise BinanceRateLimitError(
-                f"Binance REST {path}: HTTP {status}, code={code}, {message}",
-                status_code=status or 429,
-                code=int(code) if str(code).lstrip("-").isdigit() else None,
-                endpoint=path,
-                server_cooldown_seconds=server_seconds,
-                bot_cooldown_seconds=cooldown,
-                retry_after_known=known,
-            )
+                # IMPORTANT: publish the IP cooldown BEFORE releasing the shared
+                # HTTP lock. Otherwise a scanner/maintenance waiter can slip one
+                # more request between the 429/418 response and gate activation.
+                used = headers.get("X-MBX-USED-WEIGHT-1M") or headers.get("x-mbx-used-weight-1m")
+                API_STATS.record(path, status, used, estimate_request_weight(path, params))
+                code = payload.get("code") if isinstance(payload, dict) else None
+                message = payload.get("msg") if isinstance(payload, dict) else body_text
+                limited = (
+                    status in {418, 429}
+                    or str(code) in {"-1003", "-1015"}
+                    or "too many requests" in str(message).lower()
+                    or "way too many requests" in str(message).lower()
+                )
+                if limited:
+                    server_seconds, known = rate_limit_wait(type("ResponseLike", (), {
+                        "headers": headers, "status_code": status, "text": body_text,
+                    })())
+                    cooldown = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+                    self._rest_cooldown_until = max(self._rest_cooldown_until, time.monotonic() + cooldown)
+                    BINANCE_COOLDOWN.extend(cooldown, f"HTTP {status} {path}: {message}")
+                    raise BinanceRateLimitError(
+                        f"Binance REST {path}: HTTP {status}, code={code}, {message}",
+                        status_code=status or 429,
+                        code=int(code) if str(code).lstrip("-").isdigit() else None,
+                        endpoint=path,
+                        server_cooldown_seconds=server_seconds,
+                        bot_cooldown_seconds=cooldown,
+                        retry_after_known=known,
+                    )
+
+        # `code` and `message` are set for every HTTP response above.
         if status >= 400:
             raise BinanceAPIError(
                 f"Binance REST {path}: HTTP {status}: {message}",
@@ -2459,32 +2509,32 @@ class BinanceRealClient:
                     ) from exc
                 BINANCE_COOLDOWN.record_request()
 
-        API_STATS.record(
-            path,
-            response.status_code,
-            response.headers.get("X-MBX-USED-WEIGHT-1M"),
-        )
-        code, msg = self._extract_binance_error(response)
-        is_rate_limited = (
-            response.status_code in {418, 429}
-            or code in {-1003, -1015}
-            or "too many requests" in str(msg).lower()
-            or "way too many requests" in str(msg).lower()
-        )
-        if is_rate_limited:
-            server_seconds, retry_known = rate_limit_wait(response, self._time_offset_ms)
-            bot_seconds = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
-            self.apply_cooldown(server_seconds, bot_seconds)
-            BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {msg}")
-            raise BinanceRateLimitError(
-                msg,
-                status_code=response.status_code or 429,
-                code=code,
-                endpoint=path,
-                server_cooldown_seconds=server_seconds,
-                bot_cooldown_seconds=bot_seconds,
-                retry_after_known=retry_known,
-            )
+                code, msg = self._extract_binance_error(response)
+                API_STATS.record(
+                    path, response.status_code,
+                    response.headers.get("X-MBX-USED-WEIGHT-1M"),
+                    estimate_request_weight(path, base_params),
+                )
+                is_rate_limited = (
+                    response.status_code in {418, 429}
+                    or code in {-1003, -1015}
+                    or "too many requests" in str(msg).lower()
+                    or "way too many requests" in str(msg).lower()
+                )
+                if is_rate_limited:
+                    server_seconds, retry_known = rate_limit_wait(response, self._time_offset_ms)
+                    bot_seconds = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+                    self.apply_cooldown(server_seconds, bot_seconds)
+                    BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {msg}")
+                    raise BinanceRateLimitError(
+                        msg,
+                        status_code=response.status_code or 429,
+                        code=code,
+                        endpoint=path,
+                        server_cooldown_seconds=server_seconds,
+                        bot_cooldown_seconds=bot_seconds,
+                        retry_after_known=retry_known,
+                    )
 
         if response.status_code >= 400:
             code, msg = self._extract_binance_error(response)
@@ -2562,23 +2612,28 @@ class BinanceRealClient:
                     raise BinanceAPIError(f"User stream transport error: {exc}", endpoint=path) from exc
                 BINANCE_COOLDOWN.record_request()
 
-        API_STATS.record(path, response.status_code, response.headers.get("X-MBX-USED-WEIGHT-1M"))
-        code, message = self._extract_binance_error(response)
-        is_rate_limited = (
-            response.status_code in {418, 429}
-            or code in {-1003, -1015}
-            or "too many requests" in str(message).lower()
-        )
-        if is_rate_limited:
-            server_seconds, retry_known = rate_limit_wait(response, self._time_offset_ms)
-            bot_seconds = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
-            self.apply_cooldown(server_seconds, bot_seconds)
-            BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {message}")
-            raise BinanceRateLimitError(
-                message, status_code=response.status_code or 429, code=code, endpoint=path,
-                server_cooldown_seconds=server_seconds, bot_cooldown_seconds=bot_seconds,
-                retry_after_known=retry_known,
-            )
+                code, message = self._extract_binance_error(response)
+                API_STATS.record(
+                    path, response.status_code,
+                    response.headers.get("X-MBX-USED-WEIGHT-1M"),
+                    estimate_request_weight(path, params),
+                )
+                is_rate_limited = (
+                    response.status_code in {418, 429}
+                    or code in {-1003, -1015}
+                    or "too many requests" in str(message).lower()
+                    or "way too many requests" in str(message).lower()
+                )
+                if is_rate_limited:
+                    server_seconds, retry_known = rate_limit_wait(response, self._time_offset_ms)
+                    bot_seconds = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+                    self.apply_cooldown(server_seconds, bot_seconds)
+                    BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {message}")
+                    raise BinanceRateLimitError(
+                        message, status_code=response.status_code or 429, code=code, endpoint=path,
+                        server_cooldown_seconds=server_seconds, bot_cooldown_seconds=bot_seconds,
+                        retry_after_known=retry_known,
+                    )
         if response.status_code >= 400:
             code, message = self._extract_binance_error(response)
             raise BinanceAPIError(message, status_code=response.status_code, code=code, endpoint=path)
@@ -4124,6 +4179,10 @@ class TradingEngine:
         self._last_exchange_info_retry = 0.0
         self._was_in_binance_cooldown = self._binance_cooldown_remaining() > 0
         self._scan_interrupted_by_cooldown = False
+        # Scanner must wait until the maintenance loop has completed the first
+        # post-cooldown reconciliation pass. It prevents scanner REST bursts from
+        # racing position/order recovery at the exact moment the ban expires.
+        self._rest_recovery_active = self._was_in_binance_cooldown
         self._scan_capacity_paused = False
         self._scan_protection_paused = False
         self._last_user_stream_start_attempt = 0.0
@@ -5223,7 +5282,11 @@ class TradingEngine:
                 if cooldown > 0:
                     self._scan_interrupted_by_cooldown = True
                     self._was_in_binance_cooldown = True
+                    self._rest_recovery_active = True
                     await asyncio.sleep(min(10.0, max(2.0, cooldown)))
+                    continue
+                if self._rest_recovery_active:
+                    await asyncio.sleep(SCAN_POLL_SECONDS)
                     continue
                 if self._scan_interrupted_by_cooldown:
                     self._scan_interrupted_by_cooldown = False
@@ -7810,6 +7873,7 @@ class TradingEngine:
                 cooldown = self._binance_cooldown_remaining()
                 if cooldown > 0:
                     self._was_in_binance_cooldown = True
+                    self._rest_recovery_active = True
                     await self._sync_cooldown_marker_to_github()
                     # Local PAPER expiration still happens. REAL orders are left
                     # untouched on Binance; WS events continue updating the ledger.
@@ -7818,15 +7882,15 @@ class TradingEngine:
                     continue
 
                 if self._was_in_binance_cooldown:
+                    self._rest_recovery_active = True
+                    self._scan_trigger_now = False
                     await self._sync_cooldown_marker_to_github()
-                    # Retain warm symbol metadata after recovery. Forcing
-                    # exchangeInfo here caused an immediate second REST request
-                    # and could retrigger the same shared-IP ban.
+                    # Retain warm symbol metadata after recovery. Do not wake the
+                    # scanner here: maintenance must first reconcile live REAL
+                    # trades and drain at most one deferred command per pass.
                     self._last_universe_refresh = (
                         time.monotonic() if self.symbols else 0.0
                     )
-                    if self.scan_enabled:
-                        self._scan_trigger_now = True
                     now_mono = time.monotonic()
                     if now_mono - self._last_api_recovery_notice >= BINANCE_RECOVERY_NOTICE_INTERVAL_SECONDS:
                         self._last_api_recovery_notice = now_mono
@@ -7907,6 +7971,14 @@ class TradingEngine:
                 if self._binance_cooldown_remaining() <= 0:
                     await self._retry_signals()
                     await self._monitor_active_positions()
+
+                # Recovery has now had one complete serialized maintenance pass.
+                # Release scanner only if no request in that pass re-triggered a ban.
+                if self._rest_recovery_active and self._binance_cooldown_remaining() <= 0:
+                    self._rest_recovery_active = False
+                    if self.scan_enabled and not self._autostop_triggered:
+                        self._scan_trigger_now = True
+                    log.info("[BINANCE] post-cooldown reconciliation pass complete; scanner gate released.")
                 await asyncio.sleep(MAINTENANCE_POLL_SECONDS)
             except asyncio.CancelledError:
                 break
@@ -10095,11 +10167,24 @@ class TradingEngine:
 
     async def _api_report(self) -> str:
         calls = API_STATS.window(60.0)
-        weight = API_STATS.weight_of(calls)
+        weight = API_STATS.window_weight(60.0)
+        header_age = (
+            max(0.0, time.monotonic() - API_STATS.used_weight_at)
+            if API_STATS.used_weight_at is not None else None
+        )
+        if API_STATS.used_weight is None or header_age is None:
+            header_text = "-"
+            gap_text = "n/a"
+        elif header_age <= 60.0:
+            header_text = f"{API_STATS.used_weight}/{BINANCE_IP_WEIGHT_LIMIT} ({header_age:.0f}s ago)"
+            gap_text = f"~{max(0, API_STATS.used_weight - weight)} weight not explained by this process estimate"
+        else:
+            header_text = f"STALE {API_STATS.used_weight} ({header_age:.0f}s ago)"
+            gap_text = "n/a (header older than 60s)"
         return (
             "BINANCE API (60s)\n"
             f"Requests: {sum(calls.values())}\nEstimated weight: {weight}/{BINANCE_IP_WEIGHT_LIMIT}\n"
-            f"Header weight: {API_STATS.used_weight if API_STATS.used_weight is not None else '-'}\n"
+            f"Header weight: {header_text}\nIP vs local estimate: {gap_text}\n"
             f"Lifetime requests: {API_STATS.total}\nRate-limit hits: {API_STATS.limit_hits}\n"
             f"Cooldown remaining: {BINANCE_COOLDOWN.remaining():.0f}s\n"
             f"Cooldown reason: {BINANCE_COOLDOWN.reason() or '-'}\n"
