@@ -7,8 +7,8 @@
       "queued_at": "2026-11-10T12:30:58.359015+00:00",
       "attempts": 1,
       "next_retry_at": "2026-11-10T13:42:01.662722+00:00",
-      "last_error": "HTTP 429 | /fapi/v2/account: REST Binance sedang ditahan oleh rate-limit cooldown (2110s tersisa)."
+      "last_error": "HTTP 429 | /fapi/v2/account: REST Binance sedang ditahan oleh rate-limit cooldown (2043s tersisa)."
     }
   ],
-  "updated_at": "2026-11-10T13:44:48.338185+00:00"
+  "updated_at": "2026-11-10T13:45:55.300086+00:00"
 }
