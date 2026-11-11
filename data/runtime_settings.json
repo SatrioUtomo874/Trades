@@ -534,12 +534,13 @@
     "M15:\u725b\u6765USDT": 1794406500000,
     "M15:\u9f99\u867eUSDT": 1794406500000,
     "M15:CETUSUSDT": 1794406500000,
-    "M15:CFGUSDT": 1794406500000
+    "M15:CFGUSDT": 1794406500000,
+    "M15:YGGUSDT": 1794406500000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 500,
+  "scan_resume_cursor": 520,
   "scan_resume_boundary_ms": 1794406500000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T14:23:47.362854+00:00"
+  "updated_at": "2026-11-11T14:24:03.898845+00:00"
 }
