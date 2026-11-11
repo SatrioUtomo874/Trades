@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-11T16:56:22.820386+00:00",
+  "updated_at": "2026-11-11T16:56:44.223378+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261111-205503-1A056F",
@@ -1193,8 +1193,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-11T16:56:26.933747+00:00",
+      "entry_trigger_price": "0.00911962",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "2.4.0",
       "entry_reason": "Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN; TP baseline 3.0R with farthest unmitigated Volume Liquidity Trend pool extension up to 5.0R",
