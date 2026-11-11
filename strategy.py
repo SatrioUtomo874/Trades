@@ -1330,6 +1330,7 @@ def detect_backtest_signal(
     rr_min: float = RR_MIN,
     rr_max: float = RR_MAX,
     btc_h4_closed: Any | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Detect a confirmed M15 flip and prepare its next-open entry.
 
@@ -1337,7 +1338,18 @@ def detect_backtest_signal(
     Both `h4_closed` and `btc_h4_closed` contain completed H4 candles only.
     The altcoin and BTC H4 samples are aligned to the same M15 signal-close time.
     The BTC fast/slow EMA gate is mandatory and uses the /EMA dual periods.
+
+    When ``diagnostics`` is supplied, it is cleared and populated with a stable
+    ``reason`` code. This does not change the legacy return value or signal math.
     """
+    if diagnostics is not None:
+        diagnostics.clear()
+
+    def reject(reason: str) -> None:
+        if diagnostics is not None:
+            diagnostics["reason"] = reason
+        return None
+
     length = normalize_trend_length(trend_length)
     filter_config = normalize_ema_filter_length(ema_filter_length)
     supertrend_atr_length = normalize_supertrend_atr_length(supertrend_atr_length)
@@ -1348,20 +1360,22 @@ def detect_backtest_signal(
     rr_min, rr_max = normalize_rr_range(rr_min, rr_max)
     mt, mo, mh, ml, mc, _mv = _extract_columns(m15_with_forming)
     ht, ho, hh, hl, hc, _hv = _extract_columns(h4_closed)
-    if len(mt) < max(12, length + 8) or len(ht) < 3:
-        return None
+    if len(mt) < max(12, length + 8):
+        return reject("M15_HISTORY_TOO_SHORT")
+    if len(ht) < 3:
+        return reject("H4_HISTORY_TOO_SHORT")
     if len(mt) < 2:
-        return None
+        return reject("M15_HISTORY_TOO_SHORT")
     # Verify that the last M15 row really is the immediately following entry bar.
     signal_open_ms = int(mt[-2])
     signal_close_ms = signal_open_ms + 900_000
     entry_open_ms = int(mt[-1])
     entry_close_ms = entry_open_ms + 900_000
     if entry_open_ms != signal_close_ms:
-        return None
+        return reject("M15_ENTRY_CANDLE_MISMATCH")
     now_ms = int(__import__("time").time() * 1000)
     if not (entry_open_ms <= now_ms < entry_close_ms):
-        return None
+        return reject("M15_ENTRY_WINDOW_EXPIRED")
 
     closed_close = mc[:-1]
     closed_high = mh[:-1]
@@ -1370,12 +1384,12 @@ def detect_backtest_signal(
     signal_index = len(events) - 1
     code = int(events[signal_index])
     if code == 0:
-        return None
+        return reject("NO_NEW_BUBBLE")
 
     # H4 EMA filter: latest fully closed H4 candle at this M15 signal close.
     h4_index = int(np.searchsorted(ht, signal_close_ms - 14_400_000, side="right") - 1)
     if h4_index < 0 or h4_index >= len(hc):
-        return None
+        return reject("H4_CANDLE_NOT_READY")
     h4_closes = hc[:h4_index + 1]
     fast_value, slow_value, filter_ready, _ = _ema_pair_from_config(h4_closes, filter_config)
     direction = "LONG" if code == 1 else "SHORT"
@@ -1404,11 +1418,13 @@ def detect_backtest_signal(
     stop = float(st_line[-1]) if len(st_line) else float("nan")
     entry = float(mo[-1])
     if not (np.isfinite(stop) and np.isfinite(entry) and entry > 0):
-        return None
+        return reject("SUPERTREND_INVALID")
     protective = stop < entry if direction == "LONG" else stop > entry
+    if not protective:
+        return reject("SUPERTREND_NOT_PROTECTIVE")
     risk = abs(entry - stop)
-    if not protective or not np.isfinite(risk) or risk <= max(1e-12, entry * 1e-12):
-        return None
+    if not np.isfinite(risk) or risk <= max(1e-12, entry * 1e-12):
+        return reject("INVALID_RISK")
     side = 1 if direction == "LONG" else -1
     base_rr = float(rr_min)
     target = entry + side * base_rr * risk
@@ -1433,13 +1449,15 @@ def detect_backtest_signal(
         liquidity_pool_price = float(pool_price)
 
     if not np.isfinite(target) or target <= 0:
-        return None
+        return reject("INVALID_TARGET")
 
     # Backtest.py's bubble event occurs on this closed M15 index; EMA1[i-1]
     # is retained only as a visual/debug reference, not as the entry price.
     bubble_price = float(ema1[-2]) if len(ema1) >= 2 and np.isfinite(ema1[-2]) else signal_close
     atr_for_record = _backtest_atr(closed_high, closed_low, closed_close, int(supertrend_atr_length))[-1]
     selected_meta = list(filter_config) if isinstance(filter_config, tuple) else filter_config
+    if diagnostics is not None:
+        diagnostics["reason"] = "OK"
     return {
         "strategy": STRATEGY_NAME,
         "strategy_version": STRATEGY_VERSION,
