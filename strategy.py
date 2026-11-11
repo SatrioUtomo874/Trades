@@ -919,7 +919,7 @@ def trade_result_r(direction: str, entry_price: float, exit_price: float, initia
 __all__ = [
     "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "DEFAULT_TREND_LENGTH",
     "EMA_TIMEFRAME", "SIGNAL_TIMEFRAME", "SUPERTREND_ATR_LENGTH", "SUPERTREND_FACTOR", "RR_TARGET", "RR_MIN", "RR_MAX",
-    "MAX_RR_VALUE", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal",
+    "MAX_RR_VALUE", "h1_ema_filter_state", "H1_MS", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal",
     "MIN_TREND_LENGTH", "MAX_TREND_LENGTH", "normalize_trend_length", "ATR_LENGTH",
     "MIN_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_FACTOR",
     "normalize_supertrend_atr_length", "normalize_supertrend_factor",
@@ -1250,6 +1250,71 @@ def _btc_ema_filter_state(
         float(fast_value), float(slow_value), True, bool(passed),
         int(btc_ts[h4_index]), reference_close, reason,
     )
+
+
+H1_MS = 3_600_000
+
+
+def h1_ema_filter_state(
+    h1_closed: Any | None,
+    ema_config: int | tuple[int, int] | None,
+    direction: str,
+    signal_close_time_ms: int,
+) -> dict[str, Any]:
+    """Directional EMA gate on the latest fully closed H1 candle at signal close.
+
+    Same rule as the H4 filter, using the same /EMA periods:
+    dual  -> LONG only if fast > slow, SHORT only if fast < slow;
+    single-> LONG only if H1 close > EMA, SHORT only if H1 close < EMA;
+    OFF   -> always passes. `h1_closed` must contain completed H1 candles only.
+    """
+    selected = normalize_ema_filter_length(ema_config)
+    out: dict[str, Any] = {
+        "h1_ema_checked": True,
+        "h1_ema_filter_length": list(selected) if isinstance(selected, tuple) else selected,
+        "h1_ema_filter_value": None, "h1_ema_filter_slow_value": None,
+        "h1_ema_filter_ready": False, "h1_ema_filter_passed": False,
+        "h1_ema_open_time_ms": None, "h1_ema_reference_close": None,
+        "h1_ema_filter_reason": "H1_DATA_UNAVAILABLE",
+    }
+    if selected is None:
+        out.update(h1_ema_filter_ready=True, h1_ema_filter_passed=True, h1_ema_filter_reason="OK")
+        return out
+    if h1_closed is None:
+        return out
+    try:
+        ts, _o, _h, _l, close, _v = _extract_columns(h1_closed)
+    except (TypeError, ValueError, IndexError):
+        out["h1_ema_filter_reason"] = "H1_DATA_INVALID"
+        return out
+    idx = int(np.searchsorted(ts, int(signal_close_time_ms) - H1_MS, side="right") - 1)
+    if idx < 0 or idx >= len(close):
+        out["h1_ema_filter_reason"] = "H1_CANDLE_NOT_READY"
+        return out
+    expected_open = (int(signal_close_time_ms) // H1_MS) * H1_MS - H1_MS
+    out["h1_ema_open_time_ms"] = int(ts[idx])
+    out["h1_ema_reference_close"] = float(close[idx])
+    if int(ts[idx]) != expected_open:
+        out["h1_ema_filter_reason"] = "H1_CANDLE_STALE"
+        return out
+    fast, slow, ready, _ = _ema_pair_from_config(close[:idx + 1], selected)
+    if not ready or fast is None or (isinstance(selected, tuple) and slow is None):
+        out["h1_ema_filter_reason"] = "H1_EMA_NOT_READY"
+        return out
+    ref = float(close[idx])
+    side = str(direction).upper()
+    if isinstance(selected, tuple):
+        passed = (fast > slow) if side == "LONG" else (fast < slow) if side == "SHORT" else False
+    else:
+        passed = (ref > fast) if side == "LONG" else (ref < fast) if side == "SHORT" else False
+    out.update(
+        h1_ema_filter_value=float(fast),
+        h1_ema_filter_slow_value=(float(slow) if slow is not None else None),
+        h1_ema_filter_ready=True, h1_ema_filter_passed=bool(passed),
+        h1_ema_filter_reason="OK" if passed else "H1_EMA_DIRECTION_NOT_ALIGNED",
+    )
+    return out
+
 
 
 def detect_backtest_signal(
