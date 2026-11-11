@@ -3,7 +3,7 @@
   "timeframe": "M15",
   "trend_length": 100,
   "ema_filter_length": 100,
-  "supertrend_atr_length": 10,
+  "supertrend_atr_length": 14,
   "supertrend_factor": 3.0,
   "rr_min": "3",
   "rr_max": "5",
@@ -17,5 +17,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T11:58:13.348521+00:00"
+  "updated_at": "2026-11-11T11:58:16.169452+00:00"
 }
