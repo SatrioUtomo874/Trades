@@ -4262,6 +4262,8 @@ class TradingEngine:
         self.timeframe = "M15"
         self.trend_length = volumatic.DEFAULT_TREND_LENGTH
         self.ema_filter_length: int | tuple[int, int] | None = volumatic.DEFAULT_EMA_FILTER_LENGTH
+        self.h1_enabled = True  # one master switch for H1 entry filter + H1 inverse-cross forced exit
+        self._h1_toggle_generation = 0
         self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
         self.supertrend_factor = volumatic.SUPERTREND_FACTOR
         self.rr_min = Decimal(str(volumatic.RR_MIN))
@@ -4466,6 +4468,8 @@ class TradingEngine:
             except ValueError:
                 self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
                 log.warning("ema_filter_length tidak valid; default EMA %s dipakai.", self.ema_filter_length)
+            raw_h1_enabled = payload.get("h1_enabled", True)
+            self.h1_enabled = raw_h1_enabled if isinstance(raw_h1_enabled, bool) else True
             try:
                 self.supertrend_atr_length = volumatic.normalize_supertrend_atr_length(
                     payload.get("supertrend_atr_length", volumatic.SUPERTREND_ATR_LENGTH)
@@ -4633,6 +4637,7 @@ class TradingEngine:
                 "timeframe": self.timeframe,
                 "trend_length": self.trend_length,
                 "ema_filter_length": list(self.ema_filter_length) if isinstance(self.ema_filter_length, tuple) else self.ema_filter_length,
+                "h1_enabled": bool(self.h1_enabled),
                 "supertrend_atr_length": self.supertrend_atr_length,
                 "supertrend_factor": self.supertrend_factor,
                 "rr_min": decimal_to_str(self.rr_min),
@@ -5094,6 +5099,8 @@ class TradingEngine:
         self.timeframe = "M15"
         self.trend_length = volumatic.DEFAULT_TREND_LENGTH
         self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
+        self.h1_enabled = True
+        self._h1_toggle_generation = 0
         self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
         self.supertrend_factor = volumatic.SUPERTREND_FACTOR
         self.margin_usdt = DEFAULT_MARGIN_USDT
@@ -5183,6 +5190,7 @@ class TradingEngine:
             "Signal TF     : M15\nEMA Trend TF  : H4\n"
             f"Trend length  : {self.trend_length} (default {volumatic.DEFAULT_TREND_LENGTH})\n"
             f"EMA filter    : {ema_filter_label(self.ema_filter_length)}\n"
+            f"H1 logic      : {'ON' if self.h1_enabled else 'OFF'} (entry filter + inverse-cross exit)\n"
             f"SuperTrend    : ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
             f"Max positions : {self.max_active_trades}\n"
             "Scanner       : OFF — menunggu /scan on atau /scan schedule\n"
@@ -5344,7 +5352,9 @@ class TradingEngine:
             "SCANNING · PENDING LIMIT RESERVED" if pending_limit_exists else
             "BATCH COMPLETE"
         )
-        processed = int(stats.get("processed", 0))
+        analyzed = int(stats.get("analyzed", stats.get("processed", 0)))
+        rejected = int(stats.get("rejected", 0))
+        rejection_reasons = stats.get("rejection_reasons") or {}
         requested = int(stats.get("requested", 0))
         pass_start = batch_start if pass_start is None else pass_start
         pass_expected = max(0, batch_end - pass_start + 1)
@@ -5359,6 +5369,7 @@ class TradingEngine:
         lines = [
             "╔══ VOL / SCAN BATCH REPORT ══╗",
             f"ENGINE    : M15 VOLUMATIC · H4 EMA ALT+BTC · M15 SUPERTREND · LEN{trend_length} · {ema} · ATR{supertrend_atr_length} · FACTOR{supertrend_factor:g}",
+            f"H1 LOGIC  : {'ON' if self.h1_enabled else 'OFF'} · ENTRY FILTER + INVERSE-CROSS EXIT",
             f"TP RULE   : BASE RR 1:{fmt_num(rr_min, 3)} · LIQUIDITY RANGE 1:{fmt_num(rr_min, 3)}–1:{fmt_num(rr_max, 3)}",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
@@ -5366,14 +5377,22 @@ class TradingEngine:
             f"SLOTS     : {used_slots}/{self.max_active_trades} · PENDING {pending_only_slots} · FILLED {filled_slots} · LIVE LIMITS {live_limits}",
             "──────────────────────────────",
             f"PASS      : {pass_start:04d}–{min(batch_end, pass_start + requested - 1):04d}  ({requested}/{pass_expected} requested)",
-            f"ANALYZED  : {processed}  ·  SKIPPED {skipped}",
+            f"ANALYZED  : {analyzed}  ·  SKIPPED {skipped}",
             f"BUBBLES   : BLUE {blue}  ·  RED {red}  ·  NONE {no_signal}",
+            f"REJECTED  : {rejected}",
             f"EXECUTION : NEW {created}  ·  FILLED {filled}  ·  DEFERRED {deferred}  ·  UNKNOWN {unknown}",
             f"BTC FILTER: {stats.get('btc_filter_status', 'UNKNOWN')}",
             f"FILTER    : ALT H4 BLOCK {int(stats.get('ema_blocked', 0))}  ·  ALT H1 BLOCK {int(stats.get('h1_ema_blocked', 0))}  ·  BTC EMA BLOCK {int(stats.get('btc_ema_blocked', 0))}  ·  MAX BLOCK {int(stats.get('max_blocked', 0))}",
             f"OTHER     : DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
             f"DURATION  : {elapsed:.1f}s",
         ]
+        if rejection_reasons:
+            reason_text = " · ".join(
+                f"{name} {count}" for name, count in sorted(
+                    rejection_reasons.items(), key=lambda item: (-int(item[1]), str(item[0]))
+                )[:6]
+            )
+            lines.append(f"REASONS   : {reason_text[:220]}")
         details = stats.get("details") or []
         if details:
             lines.extend(["──────────────────────────────", "SIGNAL TRACE:"])
@@ -5520,6 +5539,7 @@ class TradingEngine:
             timeframe = "M15"
             trend_length = self.trend_length
             ema_filter_length = self.ema_filter_length
+            h1_enabled = self.h1_enabled
             supertrend_atr_length = self.supertrend_atr_length
             supertrend_factor = self.supertrend_factor
             rr_min = self.rr_min
@@ -5612,6 +5632,7 @@ class TradingEngine:
                 if (
                     self.trend_length != trend_length
                     or self.ema_filter_length != ema_filter_length
+                    or self.h1_enabled != h1_enabled
                     or self.rr_min != rr_min
                     or self.rr_max != rr_max
                 ):
@@ -5632,8 +5653,10 @@ class TradingEngine:
                 pass_start = offset + 1
                 batch_started = time.monotonic()
                 stats: dict[str, Any] = {
-                    "requested": 0, "processed": 0, "already_seen": 0, "warmup": 0,
-                    "stale": 0, "no_signal": 0, "blue": 0, "red": 0,
+                    "requested": 0, "processed": 0, "analyzed": 0,
+                    "already_seen": 0, "warmup": 0, "stale": 0,
+                    "no_signal": 0, "rejected": 0, "rejection_reasons": {},
+                    "blue": 0, "red": 0,
                     "orders": 0, "filled": 0, "deferred": 0, "unknown": 0,
                     "ema_blocked": 0, "h1_ema_blocked": 0, "btc_ema_blocked": 0, "max_blocked": 0, "duplicate": 0,
                     "btc_filter_status": btc_filter_status,
@@ -5651,6 +5674,7 @@ class TradingEngine:
                     if (
                         self.trend_length != trend_length
                         or self.ema_filter_length != ema_filter_length
+                        or self.h1_enabled != h1_enabled
                         or self.supertrend_atr_length != supertrend_atr_length
                         or self.supertrend_factor != supertrend_factor
                         or self.rr_min != rr_min
@@ -5683,6 +5707,7 @@ class TradingEngine:
                         if (
                             self.trend_length != trend_length
                             or self.ema_filter_length != ema_filter_length
+                            or self.h1_enabled != h1_enabled
                             or self.supertrend_atr_length != supertrend_atr_length
                             or self.supertrend_factor != supertrend_factor
                             or self.rr_min != rr_min
@@ -5711,6 +5736,7 @@ class TradingEngine:
                             stats["stale"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
+                        signal_diagnostics: dict[str, Any] = {}
                         signal = volumatic.detect_backtest_signal(
                             m15, h4, symbol=symbol, trend_length=trend_length,
                             ema_filter_length=ema_filter_length,
@@ -5719,15 +5745,25 @@ class TradingEngine:
                             supertrend_factor=supertrend_factor,
                             rr_min=float(rr_min),
                             rr_max=float(rr_max),
+                            diagnostics=signal_diagnostics,
                         )
+                        stats["analyzed"] += 1
+                        if signal is not None:
+                            signal["h1_enabled_at_scan"] = h1_enabled
                         if signal is None:
-                            stats["no_signal"] += 1
+                            rejection_reason = str(signal_diagnostics.get("reason") or "UNCLASSIFIED_REJECTION")
+                            if rejection_reason == "NO_NEW_BUBBLE":
+                                stats["no_signal"] += 1
+                            else:
+                                stats["rejected"] += 1
+                                reasons = stats["rejection_reasons"]
+                                reasons[rejection_reason] = int(reasons.get(rejection_reason, 0)) + 1
                             self.last_processed_candles[key] = entry_open_ms
                             self._scan_resume_cursor = absolute_index + 1
                             continue
                         # H1 EMA entry gate: fetched only for a real signal that already
                         # passed the H4 gate, to avoid extra REST weight on every coin.
-                        if ema_filter_length is not None and (
+                        if h1_enabled and ema_filter_length is not None and (
                             signal.get("ema_filter_passed") is True
                         ):
                             try:
@@ -6186,7 +6222,8 @@ class TradingEngine:
             # H1 EMA entry gate: same /EMA periods and direction rule as H4.
             h1_fast_value = positive_decimal(signal.get("h1_ema_filter_value"))
             h1_slow_value = positive_decimal(signal.get("h1_ema_filter_slow_value"))
-            if filter_length is not None:
+            h1_filter_enabled_for_signal = bool(signal.get("h1_enabled_at_scan", self.h1_enabled)) and self.h1_enabled
+            if h1_filter_enabled_for_signal and filter_length is not None:
                 if not signal.get("h1_ema_checked"):
                     h1_reason = "H1_EMA_NOT_EVALUATED"
                 elif not signal.get("h1_ema_filter_ready") or h1_fast_value is None or (needs_slow and h1_slow_value is None):
@@ -8484,6 +8521,8 @@ class TradingEngine:
 
     async def _initialize_ema_exit_trade(self, trade_id: str) -> None:
         """Seed/repair the H1 EMA exit state and replay any missed closed candles."""
+        exit_enabled_at_start = self.h1_enabled
+        h1_generation_at_start = self._h1_toggle_generation
         try:
             async with self._ema_exit_init_semaphore:
                 trade = self.active_trades.get(trade_id)
@@ -8581,7 +8620,10 @@ class TradingEngine:
                         (trade.direction == "LONG" and bearish_cross)
                         or (trade.direction == "SHORT" and bullish_cross)
                     )
-                    if should_exit:
+                    if (
+                        should_exit and exit_enabled_at_start and self.h1_enabled
+                        and self._h1_toggle_generation == h1_generation_at_start
+                    ):
                         reason = "EMA_H1_BEARISH_CROSS" if trade.direction == "LONG" else "EMA_H1_BULLISH_CROSS"
                         trade.ema_exit_state = "EXIT_PENDING"
                         trade.ema_exit_trigger_close_ms = candle_close_ms
@@ -8616,7 +8658,11 @@ class TradingEngine:
                         "Histori candle sebelum warm-up tidak cukup untuk merekonstruksi semua cross saat bot tidak aktif.\n"
                         "Exit EMA tetap aktif untuk cross baru; SL/TP tetap dipertahankan. Periksa posisi ini."
                     )
-                if triggered:
+                if (
+                    triggered and trade.ema_exit_state == "EXIT_PENDING"
+                    and self.h1_enabled
+                    and self._h1_toggle_generation == h1_generation_at_start
+                ):
                     if not trade.real_enabled:
                         await self._finalize_trade(
                             trade, "CLOSED", trade.ema_exit_trigger_price,
@@ -8854,6 +8900,8 @@ class TradingEngine:
                 (trade.direction == "LONG" and bearish_cross)
                 or (trade.direction == "SHORT" and bullish_cross)
             )
+            if not self.h1_enabled:
+                continue  # update EMA baseline only; ignore H1 crosses while the master switch is OFF
             if not should_exit or close_ms <= int((trade.filled_at or trade.created_at).timestamp() * 1000):
                 continue
             reason = "EMA_H1_BEARISH_CROSS" if trade.direction == "LONG" else "EMA_H1_BULLISH_CROSS"
@@ -9819,6 +9867,87 @@ class TradingEngine:
             "Catatan: /try berikutnya memulai fresh session dengan default 100."
         )
         log.info("[CONFIG] Volumatic length changed: %s -> %s", old, selected)
+
+    async def _handle_h1(self, text: str) -> None:
+        parts = str(text or "").split()
+        if len(parts) == 1:
+            state = "ON" if self.h1_enabled else "OFF"
+            await self.reply(
+                f"H1 LOGIC: {state}\n\n"
+                f"ENTRY FILTER : {state} — sinyal baru wajib lolos directional EMA H1 saat ON.\n"
+                f"FORCED CLOSE: {state} — posisi LONG ditutup pada bearish EMA cross H1; "
+                "posisi SHORT ditutup pada bullish EMA cross H1 saat ON.\n\n"
+                "Gunakan /H1 on atau /H1 off. Saklar ini mengatur kedua logika sekaligus.\n"
+                "Saat OFF, EMA H1 tetap diperbarui sebagai baseline agar cross yang terjadi selama OFF "
+                "tidak memicu forced close setelah H1 dinyalakan kembali. SL/TP exchange tidak diubah."
+            )
+            return
+        if len(parts) != 2 or parts[1].lower() not in {"on", "off"}:
+            await self.reply("Gunakan /H1 on atau /H1 off.")
+            return
+
+        enabled = parts[1].lower() == "on"
+        previous = self.h1_enabled
+        if enabled == previous:
+            await self.reply(f"H1 LOGIC sudah {'ON' if enabled else 'OFF'}. Kedua logika tidak berubah.")
+            return
+
+        self.h1_enabled = enabled
+        self._h1_toggle_generation += 1
+        # A scan must not mix H1 filter modes inside one batch. Re-scan the
+        # current universe with the new setting; no active trade is modified.
+        self._signal_retries.clear()
+        self._live_signal_candles.clear()
+        self._live_signal_last_eval.clear()
+        self._live_signal_seen.clear()
+        self.last_processed_candles.clear()
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+        await self._save_runtime_settings()
+
+        state = "ON" if enabled else "OFF"
+        if enabled:
+            for trade in list(self.active_trades.values()):
+                if trade.status == "FILLED" and not trade.exchange_adopted:
+                    self._schedule_ema_exit_initialization(trade)
+            detail = (
+                "Filter entry H1 kembali wajib lolos. Forced close mengikuti cross H1 yang "
+                "terkonfirmasi setelah baseline EMA terbaru; cross yang terjadi ketika OFF diabaikan."
+            )
+        else:
+            # An inverse cross that has been detected but whose MARKET close has
+            # not been submitted yet can still be cancelled by this switch.
+            # Once submission starts, retain reconciliation to avoid duplicate or
+            # ambiguous close orders.
+            cancelled_pending = 0
+            for trade in self.active_trades.values():
+                if (
+                    trade.status == "FILLED"
+                    and trade.ema_exit_state == "EXIT_PENDING"
+                    and not trade.ema_exit_client_order_id
+                    and int(trade.ema_exit_attempts or 0) == 0
+                ):
+                    trade.ema_exit_state = "ACTIVE" if trade.ema_exit_last_fast is not None and trade.ema_exit_last_slow is not None else "UNINITIALIZED"
+                    trade.ema_exit_trigger_close_ms = None
+                    trade.ema_exit_trigger_price = None
+                    trade.ema_exit_reason = None
+                    trade.ema_exit_last_error = "Forced close H1 dibatalkan karena /H1 off sebelum MARKET close dikirim."
+                    cancelled_pending += 1
+            detail = (
+                "Filter entry H1 dinonaktifkan. Cross H1 tidak lagi memicu forced close. "
+                "Close yang sudah mulai dikirim ke Binance tetap direkonsiliasi; SL/TP tetap aktif."
+            )
+            if cancelled_pending:
+                detail += f"\nPending close yang belum dikirim dibatalkan: {cancelled_pending}."
+
+        await self._save_active_state()
+        await self._sync_ws_symbols()
+        await self.reply(
+            f"✅ H1 LOGIC {state}\n\n"
+            f"ENTRY FILTER : {state}\nFORCED CLOSE: {state}\n\n{detail}"
+        )
+        log.info("[CONFIG] H1 master switch: %s -> %s", "ON" if previous else "OFF", state)
 
     async def _handle_ema(self, text: str) -> None:
         parts = str(text or "").split()
@@ -11125,7 +11254,7 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nSuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\nTP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
+            f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nH1 logic: {'ON' if self.h1_enabled else 'OFF'} (entry filter + inverse-cross forced exit)\nSuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\nTP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
             f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending slots: {pending} | Filled slots: {filled} | Live LIMITs: {live_limits} | Max: {self.max_active_trades}\n"
@@ -11144,6 +11273,7 @@ class TradingEngine:
             "/timeframe - strategi tetap: H4 EMA + M15 Volumatic/Supertrend\n"
             "/length <angka> - atur Trend Length Volumatic bebas (bilangan bulat positif; default 100)\n"
             "/EMA <angka|off> atau /EMA <angka1> <angka2> - filter EMA single/dual bebas\n"
+            "/H1 on|off - saklar bersama filter entry H1 dan forced close saat EMA H1 cross\n"
             f"/ATR <angka> - atur SuperTrend M15 ATR Length (default {volumatic.SUPERTREND_ATR_LENGTH})\n"
             f"/Factor <angka> - atur SuperTrend M15 Factor (default {volumatic.SUPERTREND_FACTOR:g})\n"
             f"/RR_MIN <angka> - RR dasar/fallback dan batas bawah liquidity (default {volumatic.RR_MIN:g})\n"
@@ -11181,6 +11311,7 @@ class TradingEngine:
         if command == "/timeframe": await self._handle_timeframe(text)
         elif command == "/length": await self._handle_length(text)
         elif command == "/ema": await self._handle_ema(text)
+        elif command == "/h1": await self._handle_h1(text)
         elif command == "/atr": await self._handle_atr(text)
         elif command == "/factor": await self._handle_factor(text)
         elif command == "/rr_min": await self._handle_rr_min(text)
