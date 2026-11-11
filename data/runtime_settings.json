@@ -110,12 +110,16 @@
     "M15:BIRBUSDT": 1794403800000,
     "M15:BLESSUSDT": 1794403800000,
     "M15:BLUAIUSDT": 1794403800000,
-    "M15:BLURUSDT": 1794403800000
+    "M15:BLURUSDT": 1794403800000,
+    "M15:BMTUSDT": 1794403800000,
+    "M15:BNBUSDT": 1794403800000,
+    "M15:BNTUSDT": 1794403800000,
+    "M15:BOMEUSDT": 1794403800000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 96,
+  "scan_resume_cursor": 100,
   "scan_resume_boundary_ms": 1794403800000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T13:40:34.064127+00:00"
+  "updated_at": "2026-11-11T13:40:44.769442+00:00"
 }
