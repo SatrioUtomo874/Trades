@@ -64,12 +64,13 @@
     "M15:APTUSDT": 1794399300000,
     "M15:ARBUSDT": 1794399300000,
     "M15:ARCUSDT": 1794399300000,
-    "M15:ARIAUSDT": 1794399300000
+    "M15:ARIAUSDT": 1794399300000,
+    "M15:ARKMUSDT": 1794399300000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 50,
+  "scan_resume_cursor": 51,
   "scan_resume_boundary_ms": 1794399300000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T12:24:06.510169+00:00"
+  "updated_at": "2026-11-11T12:24:29.408368+00:00"
 }
