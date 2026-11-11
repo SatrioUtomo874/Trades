@@ -1,6 +1,6 @@
-Flask>=3.1,<4
-requests>=2.32,<3
-python-dotenv>=1.1,<2
-websockets>=17,<18
 numpy
-pandas
+requests
+python-dotenv
+websockets>=17,<18
+tzdata
+Flask>=3,<4

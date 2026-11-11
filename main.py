@@ -3,10 +3,9 @@ from __future__ import annotations
 
 """Volumatic Trend M15 + H4 EMA + M15 Supertrend + H1 inverse EMA exit engine.
 
-Contract for try.py:
-    async def on_start(context)
-    async def handle_update(update, context)
-    async def on_stop(context)
+The lifecycle functions on_start(), handle_update(), and on_stop() remain
+available to an external launcher. Running this file directly also starts a
+local Telegram Bot API long-polling adapter, so no separate try.py is needed.
 
 The strategy combines confirmed M15 Volumatic bubble flips, the latest
 closed H4 EMA direction filter, and M15 Supertrend SL. TP starts at the
@@ -43,7 +42,7 @@ from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -108,6 +107,7 @@ GITHUB_BRANCH = (os.getenv("GITHUB_BRANCH") or "main").strip()
 MAIN_FILE = "main.py"  # canonical runtime/source name; descriptive names are download labels only
 BINANCE_API_KEY = (os.getenv("BINANCE_API_KEY") or "").strip()
 BINANCE_API_SECRET = (os.getenv("BINANCE_API_SECRET") or "").strip()
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 
 TIMEZONE_NAME = "Asia/Jakarta"
 TZ = ZoneInfo(TIMEZONE_NAME)
@@ -117,11 +117,38 @@ BINANCE_WS_BASE = "wss://fstream.binance.com/market/stream"
 # Binance migrated USD-M streams to separated public/market/private routes in 2026.
 BINANCE_PRIVATE_WS_BASE = "wss://fstream.binance.com/private/ws"
 BINANCE_WS_API_BASE = "wss://ws-fapi.binance.com/ws-fapi/v1"
+# Optional authenticated HTTP(S) proxy for Binance only. The proxy is applied
+# to USD-M REST requests and all Binance WebSocket connections; Telegram and
+# GitHub keep their normal network route.
+BINANCE_PROXY_URL = (os.getenv("BINANCE_PROXY_URL") or "").strip()
+if BINANCE_PROXY_URL:
+    _binance_proxy_parts = urlsplit(BINANCE_PROXY_URL)
+    if _binance_proxy_parts.scheme not in {"http", "https"} or not _binance_proxy_parts.hostname:
+        raise RuntimeError("BINANCE_PROXY_URL harus berupa URL proxy http:// atau https:// yang valid.")
+    BINANCE_REQUEST_PROXIES = {"http": BINANCE_PROXY_URL, "https": BINANCE_PROXY_URL}
+    BINANCE_WS_PROXY_KWARGS = {"proxy": BINANCE_PROXY_URL}
+else:
+    BINANCE_REQUEST_PROXIES = None
+    BINANCE_WS_PROXY_KWARGS = {}
+# Cooldown markers are scoped to the actual configured egress identity. Set
+# BINANCE_EGRESS_ID to the proxy's public exit IP when known; otherwise derive
+# a stable identity from the proxy endpoint (or "direct" without a proxy).
+BINANCE_EGRESS_ID = (os.getenv("BINANCE_EGRESS_ID") or "").strip()
+if not BINANCE_EGRESS_ID:
+    if BINANCE_PROXY_URL:
+        BINANCE_EGRESS_ID = f"proxy:{_binance_proxy_parts.hostname}:{_binance_proxy_parts.port or 0}"
+    else:
+        BINANCE_EGRESS_ID = "direct"
 BINANCE_TRADING_MODE = "live"
 REAL_EXECUTION_ENABLED = (os.getenv("REAL_EXECUTION_ENABLED", "1") or "1").strip().lower() not in {
     "0", "false", "off", "no", "disabled"
 }
 GITHUB_API = "https://api.github.com"
+# IP cooldown markers are machine/egress-IP specific. Keep them local by default;
+# enable GitHub sharing only when the process restarts behind the same public IP.
+BINANCE_COOLDOWN_GITHUB_SYNC = (os.getenv("BINANCE_COOLDOWN_GITHUB_SYNC", "0") or "0").strip().lower() in {
+    "1", "true", "yes", "on", "enabled"
+}
 
 HISTORY_TRADES_PATH = "data/trades.json"
 HISTORY_EVENTS_PATH = "data/events.jsonl"
@@ -1035,6 +1062,16 @@ class BinanceCooldownGate:
         """Restore a server IP ban and its historical time range."""
         try:
             payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return
+            saved_egress = str(payload.get("egress_id") or "").strip()
+            if not saved_egress or saved_egress != BINANCE_EGRESS_ID:
+                log.info(
+                    "[BINANCE] persisted cooldown diabaikan: egress berbeda/legacy "
+                    "(saved=%s, current=%s).",
+                    saved_egress or "unknown", BINANCE_EGRESS_ID,
+                )
+                return
             now_epoch = time.time()
             self._started_epoch = float(payload.get("started_epoch") or 0.0)
             self._until_epoch = float(payload.get("until_epoch") or 0.0)
@@ -1065,6 +1102,14 @@ class BinanceCooldownGate:
     def merge_persisted_payload(self, payload: dict[str, Any]) -> None:
         """Merge a GitHub/local snapshot without shortening an active cooldown."""
         if not isinstance(payload, dict):
+            return
+        saved_egress = str(payload.get("egress_id") or "").strip()
+        if not saved_egress or saved_egress != BINANCE_EGRESS_ID:
+            log.info(
+                "[BINANCE] cooldown snapshot eksternal diabaikan: egress berbeda/legacy "
+                "(saved=%s, current=%s).",
+                saved_egress or "unknown", BINANCE_EGRESS_ID,
+            )
             return
         try:
             now_epoch = time.time()
@@ -1116,6 +1161,7 @@ class BinanceCooldownGate:
             if self._until > 0:
                 self._until_epoch = max(self._until_epoch, now_epoch + remaining)
             payload = {
+                "egress_id": BINANCE_EGRESS_ID,
                 "started_epoch": self._started_epoch,
                 "until_epoch": self._until_epoch,
                 "ban_intervals": self._ban_intervals[-64:],
@@ -1361,6 +1407,8 @@ class BinanceREST:
         # Reuse TCP/TLS connections for sequential REST calls; request lock means
         # this session is never used concurrently by the public market-data client.
         self._session = requests.Session()
+        if BINANCE_REQUEST_PROXIES:
+            self._session.proxies.update(BINANCE_REQUEST_PROXIES)
         self._last_request_monotonic = 0.0
         self._rest_cooldown_until = 0.0
         # Bounded LRU and ephemeral-disk cache for repeated H4/D1 kline requests.
@@ -1665,7 +1713,12 @@ class BinanceREST:
             stat = path.stat()
             if stat.st_size <= 0:
                 raise ValueError("file cache kosong")
-            rows = np.load(path, mmap_mode="r", allow_pickle=False)
+            # On Windows, a read-only memmap keeps the .npy file mapped. Later
+            # os.replace(tmp_path, path) cannot replace a mapped destination and
+            # raises WinError 5 (Access is denied). Load a regular ndarray there;
+            # the in-memory LRU below is already bounded, so this remains safe.
+            mmap_mode = None if os.name == "nt" else "r"
+            rows = np.load(path, mmap_mode=mmap_mode, allow_pickle=False)
             if (
                 not isinstance(rows, np.ndarray)
                 or rows.ndim != 1
@@ -1749,7 +1802,7 @@ class BinanceREST:
     def _adopt_disk_kline_cache(
         self, key: tuple[str, str, int], cached: tuple[float, np.ndarray]
     ) -> None:
-        """Attach a read-only memmap to the bounded RAM LRU without copying its bytes."""
+        """Adopt a validated disk cache into the bounded RAM LRU."""
         old = self._kline_cache.pop(key, None)
         if old is not None:
             self._kline_cache_candles = max(0, self._kline_cache_candles - int(old[1].shape[0]))
@@ -2350,6 +2403,10 @@ class BinanceRealClient:
         self.api_secret = BINANCE_API_SECRET
         self.recv_window = BINANCE_RECV_WINDOW
         self._time_offset_ms = 0
+        self._time_sync_at_monotonic = 0.0
+        self._time_sync_rtt_ms: float | None = None
+        self._time_sync_lock = asyncio.Lock()
+        self._time_sync_interval_seconds = 600.0
         self._cooldown_until = 0.0
         self._server_cooldown_until = 0.0
         self._early_cooldown_until = 0.0
@@ -2390,11 +2447,11 @@ class BinanceRealClient:
         )
 
     def _signed_query(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Build a signed payload with a timestamp as close as possible to send time."""
         result = dict(params)
-        result.setdefault(
-            "timestamp",
-            int(time.time() * 1000) + self._time_offset_ms,
-        )
+        # Always refresh timestamp here. _request calls this inside request_once,
+        # after all asyncio locks and Binance pacing delays have completed.
+        result["timestamp"] = int(time.time() * 1000) + self._time_offset_ms
         result.setdefault("recvWindow", self.recv_window)
 
         query = urlencode(result)
@@ -2438,6 +2495,7 @@ class BinanceRealClient:
         *,
         signed: bool = True,
         retry_timestamp_error: bool = True,
+        _timing: dict[str, float] | None = None,
     ) -> Any:
         if not REAL_EXECUTION_ENABLED:
             raise BinanceAPIError(
@@ -2449,6 +2507,9 @@ class BinanceRealClient:
                 "BINANCE_API_KEY / BINANCE_API_SECRET belum tersedia di environment.",
                 endpoint=path,
             )
+
+        if signed and retry_timestamp_error:
+            await self._ensure_time_sync()
 
         remaining = max(
             BINANCE_COOLDOWN.remaining(),
@@ -2469,12 +2530,15 @@ class BinanceRealClient:
             raise blocked
 
         base_params = dict(params or {})
-        payload = self._signed_query(base_params) if signed else base_params
         headers = {"Accept": "application/json"}
         if signed:
             headers["X-MBX-APIKEY"] = self.api_key
 
         def request_once() -> requests.Response:
+            # Do not create the signed timestamp before acquiring the request
+            # locks/pacing slot: a busy scanner can otherwise make it stale
+            # while the request waits locally.
+            payload = self._signed_query(base_params) if signed else base_params
             kwargs: dict[str, Any] = {
                 "headers": headers,
                 "timeout": HTTP_REQUEST_SECONDS,
@@ -2487,11 +2551,20 @@ class BinanceRealClient:
                     **headers,
                     "Content-Type": "application/x-www-form-urlencoded",
                 }
-            return requests.request(
-                method.upper(),
-                f"{self.base_url}{path}",
-                **kwargs,
-            )
+            if _timing is not None:
+                _timing["started_wall_ms"] = time.time() * 1000.0
+                _timing["started_monotonic"] = time.monotonic()
+            try:
+                response = requests.request(
+                    method.upper(),
+                    f"{self.base_url}{path}",
+                    proxies=BINANCE_REQUEST_PROXIES,
+                    **kwargs,
+                )
+            finally:
+                if _timing is not None:
+                    _timing["finished_monotonic"] = time.monotonic()
+            return response
 
         async with self._request_lock:
             async with BINANCE_HTTP_LOCK:
@@ -2545,9 +2618,16 @@ class BinanceRealClient:
         if response.status_code >= 400:
             code, msg = self._extract_binance_error(response)
             if code == -1021 and retry_timestamp_error:
+                log.warning(
+                    "[BINANCE TIME] received -1021 on %s; resynchronizing server clock and retrying once.",
+                    path,
+                )
                 try:
-                    server = await self._public_server_time()
-                    self._time_offset_ms = int(server) - int(time.time() * 1000)
+                    offset_ms, rtt_ms = await self.sync_server_time(force=True, samples=3)
+                    log.info(
+                        "[BINANCE TIME] resynchronized after -1021 | offset=%+dms | best_rtt=%.1fms | retry=%s",
+                        offset_ms, rtt_ms, path,
+                    )
                     return await self._request(
                         method,
                         path,
@@ -2557,8 +2637,13 @@ class BinanceRealClient:
                     )
                 except BinanceRateLimitError:
                     raise
-                except Exception:
-                    pass
+                except Exception as sync_exc:
+                    raise BinanceAPIError(
+                        f"{msg}; sinkronisasi waktu Binance gagal: {type(sync_exc).__name__}: {sync_exc}",
+                        status_code=response.status_code,
+                        code=code,
+                        endpoint=path,
+                    ) from sync_exc
 
             raise BinanceAPIError(
                 msg,
@@ -2576,9 +2661,72 @@ class BinanceRealClient:
                 endpoint=path,
             ) from exc
 
+    async def sync_server_time(
+        self, *, force: bool = False, samples: int = 3,
+    ) -> tuple[int, float]:
+        """Estimate Binance clock offset using request-midpoint timing.
+
+        Each sample records its timestamps inside the worker thread immediately
+        around the actual HTTP call, so local queue/pacing delays are excluded.
+        The lowest-RTT sample is selected to minimize proxy/network asymmetry.
+        """
+        sample_count = max(1, min(5, int(samples)))
+        async with self._time_sync_lock:
+            age = time.monotonic() - self._time_sync_at_monotonic
+            if (
+                not force
+                and self._time_sync_at_monotonic > 0
+                and age < self._time_sync_interval_seconds
+            ):
+                return self._time_offset_ms, float(self._time_sync_rtt_ms or 0.0)
+
+            best: tuple[float, int, float] | None = None
+            for _ in range(sample_count):
+                timing: dict[str, float] = {}
+                body = await self._request(
+                    "GET", "/fapi/v1/time", {}, signed=False,
+                    retry_timestamp_error=False, _timing=timing,
+                )
+                try:
+                    server_ms = int(body["serverTime"])
+                    started_wall_ms = float(timing["started_wall_ms"])
+                    started_mono = float(timing["started_monotonic"])
+                    finished_mono = float(timing["finished_monotonic"])
+                except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                    raise BinanceAPIError(
+                        "Sampel sinkronisasi waktu Binance tidak lengkap.",
+                        endpoint="/fapi/v1/time",
+                    ) from exc
+
+                rtt_ms = max(0.0, (finished_mono - started_mono) * 1000.0)
+                local_midpoint_ms = started_wall_ms + (rtt_ms / 2.0)
+                offset_ms = int(round(server_ms - local_midpoint_ms))
+                if best is None or rtt_ms < best[0]:
+                    best = (rtt_ms, offset_ms, float(server_ms))
+
+            if best is None:
+                raise BinanceAPIError(
+                    "Binance tidak memberikan sampel waktu yang valid.",
+                    endpoint="/fapi/v1/time",
+                )
+
+            self._time_sync_rtt_ms = best[0]
+            self._time_offset_ms = best[1]
+            self._time_sync_at_monotonic = time.monotonic()
+            log.info(
+                "[BINANCE TIME] synchronized | offset=%+dms | best_rtt=%.1fms | samples=%d",
+                self._time_offset_ms, self._time_sync_rtt_ms, sample_count,
+            )
+            return self._time_offset_ms, self._time_sync_rtt_ms
+
+    async def _ensure_time_sync(self) -> None:
+        """Refresh the Binance clock offset periodically before signed requests."""
+        age = time.monotonic() - self._time_sync_at_monotonic
+        if self._time_sync_at_monotonic <= 0 or age >= self._time_sync_interval_seconds:
+            await self.sync_server_time(force=False, samples=1)
+
     async def _public_server_time(self) -> int:
-        # Reuse _request so even timestamp-recovery calls share the global IP
-        # cooldown, request spacing and X-MBX-USED-WEIGHT accounting.
+        # Backward-compatible helper; the robust synchronizer owns offset updates.
         body = await self._request(
             "GET", "/fapi/v1/time", {}, signed=False,
             retry_timestamp_error=False,
@@ -2609,6 +2757,7 @@ class BinanceRealClient:
                         method.upper(), f"{self.base_url}{path}",
                         headers={"X-MBX-APIKEY": self.api_key, "Accept": "application/json"},
                         params=params or None,
+                        proxies=BINANCE_REQUEST_PROXIES,
                         timeout=HTTP_REQUEST_SECONDS,
                     )
 
@@ -3375,6 +3524,7 @@ class BinanceWebSocket:
 
                 async with ws_connect(
                     BINANCE_WS_BASE,
+                    **BINANCE_WS_PROXY_KWARGS,
                     # Binance sends server ping frames; websockets automatically replies.
                     # Disable client keepalive to avoid client/server ping races that can
                     # produce a misleading 1011 keepalive timeout during command sends.
@@ -3614,8 +3764,8 @@ class BinanceUserDataWebSocket:
             "params": {"apiKey": self.real.api_key},
         }
         async with ws_connect(
-            BINANCE_WS_API_BASE, ping_interval=None, ping_timeout=None,
-            close_timeout=3, max_queue=16,
+            BINANCE_WS_API_BASE, **BINANCE_WS_PROXY_KWARGS,
+            ping_interval=None, ping_timeout=None, close_timeout=3, max_queue=16,
         ) as ws:
             await ws.send(json.dumps(payload))
             raw = await asyncio.wait_for(ws.recv(), timeout=12.0)
@@ -3684,7 +3834,8 @@ class BinanceUserDataWebSocket:
                 url = f"{BINANCE_PRIVATE_WS_BASE}?{query}"
                 log.info("[USER WS] connecting private order stream")
                 async with ws_connect(
-                    url, ping_interval=None, ping_timeout=None, close_timeout=3, max_queue=2048,
+                    url, **BINANCE_WS_PROXY_KWARGS,
+                    ping_interval=None, ping_timeout=None, close_timeout=3, max_queue=2048,
                 ) as ws:
                     self._ws = ws
                     self.connected = True
@@ -4730,7 +4881,14 @@ class TradingEngine:
         self._binance_notice_until_epoch = 0.0
 
     async def _restore_cooldown_from_github(self) -> None:
-        """Restore a persisted IP ban before the first Binance REST request."""
+        """Restore a shared IP ban only when GitHub sharing is explicitly enabled.
+
+        A GitHub marker may belong to a different machine/public egress IP.
+        Local Windows runs therefore restore only their own data/ marker by default.
+        """
+        if not BINANCE_COOLDOWN_GITHUB_SYNC:
+            log.info("[BINANCE] GitHub cooldown marker diabaikan; memakai state IP lokal saja.")
+            return
         raw = await self._remote_or_local(BINANCE_COOLDOWN_PATH)
         if raw:
             try:
@@ -4742,7 +4900,9 @@ class TradingEngine:
         self._was_in_binance_cooldown = self._binance_cooldown_remaining() > 0
 
     async def _sync_cooldown_marker_to_github(self) -> None:
-        """Publish a changed cooldown marker once per ban transition, not per poll."""
+        """Publish a changed cooldown marker only for a deliberately shared IP."""
+        if not BINANCE_COOLDOWN_GITHUB_SYNC:
+            return
         path = BINANCE_COOLDOWN._state_path
         try:
             raw = path.read_bytes()
@@ -4920,6 +5080,10 @@ class TradingEngine:
         if self._running:
             return
         self._running = True
+        log.info(
+            "[BINANCE] outbound route configured | egress_id=%s | proxy=%s (REST + WebSocket)",
+            BINANCE_EGRESS_ID, "ON" if BINANCE_PROXY_URL else "OFF",
+        )
         self.real_mode = False
         self.scan_enabled = False
         self._scan_trigger_now = False
@@ -4962,9 +5126,9 @@ class TradingEngine:
         self._scan_capacity_paused = False
         self._scan_protection_paused = False
         self._was_in_binance_cooldown = False
-        # A Binance IP ban is an exchange-side fact, not session state. Forgetting it on
-        # /try or a Render restart makes the first reconcile request hit Binance while
-        # still banned, which escalates the ban. Restore it (local file + GitHub marker).
+        # Restore a persisted Binance ban only when its saved egress identity matches
+        # this process. Legacy markers without egress_id and markers from another
+        # proxy/direct IP are ignored; matching-IP bans remain protected on restart.
         try:
             BINANCE_COOLDOWN._restore_persisted_cooldown()
             await self._restore_cooldown_from_github()
@@ -9553,6 +9717,10 @@ class TradingEngine:
             # first /real on takes one wallet-balance baseline; later process starts
             # retain that baseline and the locally accumulated realized PnL.
             await self._load_real_guard_checkpoint()
+            # Synchronize against Binance immediately before the first signed
+            # account/preflight calls. REST timestamp generation also refreshes
+            # this offset periodically and retries one -1021 after resync.
+            await self.real.sync_server_time(force=True, samples=3)
             account_snapshot = await self.real.get_account_info()
             all_open_orders = await self.real.get_open_orders(None)
             await self.real.get_account_config()
@@ -11079,7 +11247,7 @@ class TradingEngine:
 
 
 # ---------------------------------------------------------------------------
-# Module contract for try.py
+# Engine lifecycle + standalone local Telegram long-polling runner
 # ---------------------------------------------------------------------------
 _ENGINE: TradingEngine | None = None
 
@@ -11115,5 +11283,255 @@ async def on_stop(context: dict[str, Any]):
     finally: _ENGINE = None
 
 
+class TelegramBotAPIError(RuntimeError):
+    """Telegram Bot API response error with retry metadata when available."""
+
+    def __init__(self, message: str, *, status_code: int = 0, retry_after: float | None = None):
+        super().__init__(message)
+        self.status_code = int(status_code or 0)
+        self.retry_after = retry_after
+
+
+class LocalTelegramBot:
+    """Small synchronous Telegram Bot API adapter used by the local runner.
+
+    TradingEngine expects a synchronous ``send_message(chat_id, text)`` callback;
+    its ``reply`` method already dispatches that callback through asyncio.to_thread.
+    Polling is also dispatched through asyncio.to_thread so long polling never
+    blocks the trading engine's event loop.
+    """
+
+    def __init__(self, token: str, offset_path: Path) -> None:
+        self.token = str(token or "").strip()
+        if not self.token:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN belum diset di .env.")
+        self.api_root = f"https://api.telegram.org/bot{self.token}"
+        self.offset_path = Path(offset_path)
+        self.offset_path.parent.mkdir(parents=True, exist_ok=True)
+        self.connect_timeout = 10.0
+        self.request_timeout = 40.0
+
+    def _url(self, method: str) -> str:
+        return f"{self.api_root}/{method}"
+
+    @staticmethod
+    def _result_or_raise(response: requests.Response, method: str) -> Any:
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise TelegramBotAPIError(
+                f"Telegram {method}: respons bukan JSON (HTTP {response.status_code}).",
+                status_code=response.status_code,
+            ) from exc
+
+        if response.status_code >= 400 or not isinstance(body, dict) or not body.get("ok"):
+            description = str(body.get("description") or response.text or "Unknown Telegram API error") if isinstance(body, dict) else str(response.text)
+            parameters = body.get("parameters") if isinstance(body, dict) else None
+            retry_after = None
+            if isinstance(parameters, dict):
+                try:
+                    retry_after = float(parameters.get("retry_after"))
+                except (TypeError, ValueError):
+                    retry_after = None
+            raise TelegramBotAPIError(
+                f"Telegram {method} gagal (HTTP {response.status_code}): {description[:700]}",
+                status_code=response.status_code,
+                retry_after=retry_after,
+            )
+        return body.get("result")
+
+    def get_me(self) -> dict[str, Any]:
+        response = requests.get(
+            self._url("getMe"),
+            timeout=(self.connect_timeout, self.request_timeout),
+        )
+        result = self._result_or_raise(response, "getMe")
+        if not isinstance(result, dict):
+            raise TelegramBotAPIError("Telegram getMe mengembalikan data bot yang tidak valid.")
+        return result
+
+    def delete_webhook(self) -> None:
+        # getUpdates is unavailable while a webhook is configured. Pending updates
+        # are deliberately preserved; no old Telegram messages are discarded.
+        response = requests.post(
+            self._url("deleteWebhook"),
+            json={"drop_pending_updates": False},
+            timeout=(self.connect_timeout, self.request_timeout),
+        )
+        self._result_or_raise(response, "deleteWebhook")
+
+    def get_updates(self, offset: int | None, poll_timeout: int) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "timeout": int(poll_timeout),
+            "limit": 100,
+            "allowed_updates": json.dumps(["message", "edited_message"]),
+        }
+        if offset is not None:
+            params["offset"] = int(offset)
+        response = requests.get(
+            self._url("getUpdates"),
+            params=params,
+            timeout=(self.connect_timeout, max(self.request_timeout, float(poll_timeout) + 15.0)),
+        )
+        result = self._result_or_raise(response, "getUpdates")
+        if not isinstance(result, list):
+            raise TelegramBotAPIError("Telegram getUpdates mengembalikan daftar update yang tidak valid.")
+        return [item for item in result if isinstance(item, dict)]
+
+    @staticmethod
+    def _split_message(message: str, limit: int = 4000) -> list[str]:
+        text = str(message or "")
+        if not text:
+            return []
+        chunks: list[str] = []
+        while len(text) > limit:
+            split_at = text.rfind("\n", 0, limit + 1)
+            if split_at < limit // 2:
+                split_at = limit
+            chunks.append(text[:split_at])
+            text = text[split_at:].lstrip("\n")
+        if text:
+            chunks.append(text)
+        return chunks
+
+    def send_message(self, chat_id: int, message: str) -> None:
+        # Telegram text messages are limited to 4,096 characters. Keep a margin
+        # below that limit and send plain text to preserve the engine's formatting.
+        for chunk in self._split_message(str(message)):
+            response = requests.post(
+                self._url("sendMessage"),
+                json={"chat_id": int(chat_id), "text": chunk},
+                timeout=(self.connect_timeout, self.request_timeout),
+            )
+            self._result_or_raise(response, "sendMessage")
+
+    def load_offset(self) -> int | None:
+        try:
+            raw = self.offset_path.read_text(encoding="utf-8").strip()
+            return int(raw) if raw else None
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            log.warning("[TELEGRAM] Offset lokal tidak terbaca; polling dimulai dari update yang masih tertunda.", exc_info=True)
+            return None
+
+    def save_offset(self, offset: int) -> None:
+        temporary = self.offset_path.with_suffix(self.offset_path.suffix + ".tmp")
+        try:
+            temporary.write_text(str(int(offset)), encoding="utf-8")
+            temporary.replace(self.offset_path)
+        except OSError:
+            log.warning("[TELEGRAM] Offset lokal gagal disimpan; update mungkin diproses ulang setelah restart.", exc_info=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+async def _wait_for_local_stop(stop_event: asyncio.Event, seconds: float) -> None:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=max(0.1, float(seconds)))
+    except asyncio.TimeoutError:
+        pass
+
+
+async def _local_telegram_polling_loop(
+    telegram: LocalTelegramBot,
+    context: dict[str, Any],
+    stop_event: asyncio.Event,
+) -> None:
+    """Receive private messages from the configured Telegram user only."""
+    offset = telegram.load_offset()
+    poll_timeout = max(5, min(50, int(os.getenv("TELEGRAM_POLL_TIMEOUT_SECONDS", "25") or "25")))
+    backoff = 2.0
+    log.info("[TELEGRAM] Long polling aktif; hanya private chat ALLOWED_USER_ID yang diproses.")
+
+    while not stop_event.is_set():
+        try:
+            updates = await asyncio.to_thread(telegram.get_updates, offset, poll_timeout)
+            backoff = 2.0
+        except TelegramBotAPIError as exc:
+            if exc.status_code == 401:
+                raise RuntimeError("TELEGRAM_BOT_TOKEN ditolak Telegram (HTTP 401). Periksa token di .env.") from exc
+            delay = max(1.0, exc.retry_after or backoff)
+            log.warning("[TELEGRAM] Polling API gagal; mencoba lagi dalam %.1fs: %s", delay, exc)
+            await _wait_for_local_stop(stop_event, delay)
+            backoff = min(30.0, max(backoff * 2.0, delay))
+            continue
+        except requests.RequestException as exc:
+            log.warning("[TELEGRAM] Koneksi polling gagal; mencoba lagi dalam %.1fs: %s", backoff, exc)
+            await _wait_for_local_stop(stop_event, backoff)
+            backoff = min(30.0, backoff * 2.0)
+            continue
+
+        for update in updates:
+            if stop_event.is_set():
+                break
+            try:
+                update_id = int(update.get("update_id"))
+            except (TypeError, ValueError):
+                log.warning("[TELEGRAM] Mengabaikan update tanpa update_id yang valid.")
+                continue
+
+            message = update.get("message") or update.get("edited_message") or {}
+            sender = message.get("from") or {}
+            chat = message.get("chat") or {}
+            try:
+                sender_id = int(sender.get("id") or 0)
+                chat_id = int(chat.get("id") or 0)
+            except (TypeError, ValueError):
+                sender_id, chat_id = 0, 0
+
+            # ALLOWED_USER_ID is the Telegram user ID. Restricting the local
+            # adapter to that user's private chat also keeps reply routing exact.
+            if sender_id == ALLOWED_USER_ID and chat_id == ALLOWED_USER_ID:
+                try:
+                    await handle_update(update, context)
+                except Exception:
+                    log.exception("[TELEGRAM] Gagal meneruskan update %s ke trading engine.", update_id)
+
+            # Acknowledge every valid update (including unauthorized messages) so
+            # one unrelated update cannot permanently block the polling queue.
+            offset = max(offset or 0, update_id + 1)
+            telegram.save_offset(offset)
+
+
+async def _run_local_telegram() -> None:
+    """Run the same TradingEngine directly with Telegram long polling on a PC."""
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN belum diset. Tambahkan ke file .env.")
+
+    telegram = LocalTelegramBot(
+        TELEGRAM_BOT_TOKEN,
+        BASE_DIR / "data" / "telegram_update_offset.txt",
+    )
+    context: dict[str, Any] = {
+        "chat_id": ALLOWED_USER_ID,
+        "user_id": ALLOWED_USER_ID,
+        "send_message": telegram.send_message,
+    }
+    stop_event = asyncio.Event()
+    engine_started = False
+
+    try:
+        bot_info = await asyncio.to_thread(telegram.get_me)
+        await asyncio.to_thread(telegram.delete_webhook)
+        bot_username = bot_info.get("username")
+        bot_name = f"@{bot_username}" if bot_username else str(bot_info.get("first_name") or "Telegram bot")
+        log.info("[TELEGRAM] Terhubung sebagai %s.", bot_name)
+
+        await on_start(context)
+        engine_started = True
+        await _local_telegram_polling_loop(telegram, context, stop_event)
+    finally:
+        stop_event.set()
+        if engine_started:
+            await on_stop(context)
+        log.info("[LOCAL] Proses bot dihentikan.")
+
+
 if __name__ == "__main__":
-    raise SystemExit("main.py dijalankan melalui try.py dengan on_start(), handle_update(), dan on_stop().")
+    try:
+        asyncio.run(_run_local_telegram())
+    except KeyboardInterrupt:
+        print("\n[STOP] Bot dihentikan oleh pengguna.")
