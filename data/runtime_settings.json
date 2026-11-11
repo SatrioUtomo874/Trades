@@ -507,12 +507,18 @@
     "M15:XMRUSDT": 1794405600000,
     "M15:XNYUSDT": 1794405600000,
     "M15:XPINUSDT": 1794405600000,
-    "M15:XPLUSDT": 1794405600000
+    "M15:XPLUSDT": 1794405600000,
+    "M15:XRPUSDT": 1794405600000,
+    "M15:XTZUSDT": 1794405600000,
+    "M15:XVGUSDT": 1794405600000,
+    "M15:XVSUSDT": 1794405600000,
+    "M15:YBUSDT": 1794405600000,
+    "M15:YFIUSDT": 1794405600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 494,
+  "scan_resume_cursor": 500,
   "scan_resume_boundary_ms": 1794404700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T14:14:35.336708+00:00"
+  "updated_at": "2026-11-11T14:14:56.722717+00:00"
 }
