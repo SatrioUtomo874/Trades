@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-11T14:37:20.591217+00:00",
+  "updated_at": "2026-11-11T14:38:03.268377+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261111-205503-1A056F",
@@ -970,12 +970,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.0000011",
       "realized_r": null,
-      "quantity": "18751",
-      "margin_usdt": "0.54959181",
+      "quantity": "839",
+      "margin_usdt": "0.02459109",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5",
-      "actual_notional": "5.4959181",
+      "actual_notional": "0.2459109",
       "real_enabled": true,
       "real_state": "REAL_FILLED",
       "position_side": "BOTH",
@@ -983,7 +983,7 @@
       "entry_client_order_id": "VTd5fa3b458d8482e2dbc7bd63dc30",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "18751",
+      "entry_executed_qty": "839",
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
