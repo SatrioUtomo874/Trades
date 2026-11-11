@@ -117,12 +117,17 @@
     "M15:BREVUSDT": 1794393000000,
     "M15:BROCCOLI714USDT": 1794393000000,
     "M15:BIGTIMEUSDT": 1794393000000,
-    "M15:BIOUSDT": 1794393000000
+    "M15:BIOUSDT": 1794393000000,
+    "M15:BROCCOLIF3BUSDT": 1794393000000,
+    "M15:BRUSDT": 1794393000000,
+    "M15:BSBUSDT": 1794393000000,
+    "M15:BSVUSDT": 1794393000000,
+    "M15:BTCDOMUSDT": 1794393000000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 100,
+  "scan_resume_cursor": 108,
   "scan_resume_boundary_ms": 1794393000000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T10:34:15.073706+00:00"
+  "updated_at": "2026-11-11T10:34:52.359200+00:00"
 }
