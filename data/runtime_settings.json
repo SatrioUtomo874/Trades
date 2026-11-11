@@ -458,12 +458,17 @@
     "M15:THETAUSDT": 1794405600000,
     "M15:THEUSDT": 1794405600000,
     "M15:TIAUSDT": 1794405600000,
-    "M15:TLMUSDT": 1794405600000
+    "M15:TLMUSDT": 1794405600000,
+    "M15:TNSRUSDT": 1794405600000,
+    "M15:TOSHIUSDT": 1794405600000,
+    "M15:TOWNSUSDT": 1794405600000,
+    "M15:TRADOORUSDT": 1794405600000,
+    "M15:TRBUSDT": 1794405600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 445,
+  "scan_resume_cursor": 450,
   "scan_resume_boundary_ms": 1794404700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T14:11:53.037268+00:00"
+  "updated_at": "2026-11-11T14:12:09.039159+00:00"
 }
