@@ -502,8 +502,8 @@
     "M15:WLFIUSDT": 1794415500000,
     "M15:WOOUSDT": 1794415500000,
     "M15:WUSDT": 1794415500000,
-    "M15:XAIUSDT": 1794414600000,
-    "M15:XANUSDT": 1794414600000,
+    "M15:XAIUSDT": 1794415500000,
+    "M15:XANUSDT": 1794415500000,
     "M15:XAUTUSDT": 1794414600000,
     "M15:XLMUSDT": 1794414600000,
     "M15:XMRUSDT": 1794414600000,
@@ -539,8 +539,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 486,
+  "scan_resume_cursor": 488,
   "scan_resume_boundary_ms": 1794415500000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T16:55:31.343704+00:00"
+  "updated_at": "2026-11-11T16:56:39.625246+00:00"
 }
