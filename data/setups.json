@@ -1,11 +1,11 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-11T12:15:34.356892+00:00",
+  "updated_at": "2026-11-11T12:19:49.572947+00:00",
   "active_trades": [
     {
-      "trade_id": "AVAUSDT-20261111-191534-0A4FB7",
-      "session_id": "20261111-191513-34FF",
+      "trade_id": "AVAUSDT-20261111-191949-464607",
+      "session_id": "20261111-191922-5364",
       "pair": "AVAUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -71,7 +71,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "21.9",
-      "margin_usdt": "0.53098221",
+      "margin_usdt": "0.53217",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.49909",
