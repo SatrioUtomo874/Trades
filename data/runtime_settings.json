@@ -413,12 +413,18 @@
     "M15:SHELLUSDT": 1794405600000,
     "M15:SIGNUSDT": 1794405600000,
     "M15:SIRENUSDT": 1794405600000,
-    "M15:SKLUSDT": 1794405600000
+    "M15:SKLUSDT": 1794405600000,
+    "M15:SKRUSDT": 1794405600000,
+    "M15:SKYAIUSDT": 1794405600000,
+    "M15:SKYUSDT": 1794405600000,
+    "M15:SLPUSDT": 1794405600000,
+    "M15:SLXUSDT": 1794405600000,
+    "M15:SNXUSDT": 1794405600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 400,
+  "scan_resume_cursor": 406,
   "scan_resume_boundary_ms": 1794404700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T14:09:16.373959+00:00"
+  "updated_at": "2026-11-11T14:09:45.952900+00:00"
 }
