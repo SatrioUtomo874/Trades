@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "timeframe": "M15",
-  "trend_length": 100,
+  "trend_length": 50,
   "ema_filter_length": [
     9,
     21
@@ -20,5 +20,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T07:31:28.812244+00:00"
+  "updated_at": "2026-11-11T07:31:31.313120+00:00"
 }
