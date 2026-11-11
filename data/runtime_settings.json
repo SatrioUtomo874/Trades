@@ -448,7 +448,7 @@
     "M15:SWARMSUSDT": 1794406500000,
     "M15:SXTUSDT": 1794406500000,
     "M15:SYNUSDT": 1794406500000,
-    "M15:SYRUPUSDT": 1794405600000,
+    "M15:SYRUPUSDT": 1794406500000,
     "M15:TACUSDT": 1794405600000,
     "M15:TAGUSDT": 1794405600000,
     "M15:TAIKOUSDT": 1794405600000,
@@ -538,8 +538,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 434,
+  "scan_resume_cursor": 435,
   "scan_resume_boundary_ms": 1794406500000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T14:22:02.936803+00:00"
+  "updated_at": "2026-11-11T14:22:28.739376+00:00"
 }
