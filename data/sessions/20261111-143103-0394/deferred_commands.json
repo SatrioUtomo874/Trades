@@ -1,0 +1,14 @@
+{
+  "strategy": "VOLUMATIC_TREND",
+  "commands": [
+    {
+      "command_id": "9e6ea112a5cd4315b4e908e2e5373e80",
+      "command": "/real on",
+      "queued_at": "2026-11-11T07:31:18.175462+00:00",
+      "attempts": 0,
+      "next_retry_at": "",
+      "last_error": "HTTP 429 | /fapi/v2/account: REST Binance sedang ditahan oleh rate-limit cooldown (10423s tersisa)."
+    }
+  ],
+  "updated_at": "2026-11-11T07:31:18.175492+00:00"
+}
