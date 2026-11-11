@@ -147,10 +147,16 @@ BINANCE_RECV_WINDOW = 5000
 BINANCE_PUBLIC_REQUEST_SPACING_SECONDS = float(os.getenv("BINANCE_PUBLIC_REQUEST_SPACING_SECONDS", "0.75") or "0.75")
 BINANCE_RATE_LIMIT_FALLBACK_SECONDS = 60
 BINANCE_RATE_LIMIT_SAFETY_SECONDS = 60
+BINANCE_BAN_418_SAFETY_SECONDS = 600  # extra quiet time after an IP ban (418); retrying early escalates the ban
+
+
+def rate_limit_safety(status: Any) -> int:
+    return BINANCE_BAN_418_SAFETY_SECONDS if int(status or 0) == 418 else BINANCE_RATE_LIMIT_SAFETY_SECONDS
 BINANCE_RATE_LIMIT_PRIORITY_SAFETY_SECONDS = 60
 BINANCE_BAN_FALLBACK_SECONDS = 120
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_RECONCILE_INTERVAL_SECONDS = 20.0
+REAL_RECONCILE_WS_COVERED_SECONDS = 300.0  # private WS (ACCOUNT_UPDATE/ALGO_UPDATE) already reports fills/closes
 H1_MS = 3_600_000
 EMA_EXIT_INIT_RETRY_SECONDS = 30.0
 EMA_EXIT_RECONCILE_SECONDS = 20.0
@@ -1540,7 +1546,7 @@ class BinanceREST:
                     server_seconds, known = rate_limit_wait(type("ResponseLike", (), {
                         "headers": headers, "status_code": status, "text": body_text,
                     })())
-                    cooldown = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+                    cooldown = max(1.0, server_seconds + rate_limit_safety(status))
                     self._rest_cooldown_until = max(self._rest_cooldown_until, time.monotonic() + cooldown)
                     BINANCE_COOLDOWN.extend(cooldown, f"HTTP {status} {path}: {message}")
                     raise BinanceRateLimitError(
@@ -2523,7 +2529,7 @@ class BinanceRealClient:
                 )
                 if is_rate_limited:
                     server_seconds, retry_known = rate_limit_wait(response, self._time_offset_ms)
-                    bot_seconds = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+                    bot_seconds = max(1.0, server_seconds + rate_limit_safety(response.status_code))
                     self.apply_cooldown(server_seconds, bot_seconds)
                     BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {msg}")
                     raise BinanceRateLimitError(
@@ -2626,7 +2632,7 @@ class BinanceRealClient:
                 )
                 if is_rate_limited:
                     server_seconds, retry_known = rate_limit_wait(response, self._time_offset_ms)
-                    bot_seconds = max(1.0, server_seconds + BINANCE_RATE_LIMIT_SAFETY_SECONDS)
+                    bot_seconds = max(1.0, server_seconds + rate_limit_safety(response.status_code))
                     self.apply_cooldown(server_seconds, bot_seconds)
                     BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {message}")
                     raise BinanceRateLimitError(
@@ -4956,6 +4962,17 @@ class TradingEngine:
         self._scan_capacity_paused = False
         self._scan_protection_paused = False
         self._was_in_binance_cooldown = False
+        # A Binance IP ban is an exchange-side fact, not session state. Forgetting it on
+        # /try or a Render restart makes the first reconcile request hit Binance while
+        # still banned, which escalates the ban. Restore it (local file + GitHub marker).
+        try:
+            BINANCE_COOLDOWN._restore_persisted_cooldown()
+            await self._restore_cooldown_from_github()
+            if self._binance_cooldown_remaining() > 0:
+                self._rest_recovery_active = True
+                log.warning("[START] Binance IP cooldown restored: %.0fs remaining; REST held.", self._binance_cooldown_remaining())
+        except Exception:
+            log.warning("[START] cooldown restore failed", exc_info=True)
         self._last_scan_boundary_ms = 0
         self.symbols.clear()
         self._scanner_symbols.clear()
@@ -5189,7 +5206,7 @@ class TradingEngine:
             f"BUBBLES   : BLUE {blue}  ·  RED {red}  ·  NONE {no_signal}",
             f"EXECUTION : NEW {created}  ·  FILLED {filled}  ·  DEFERRED {deferred}  ·  UNKNOWN {unknown}",
             f"BTC FILTER: {stats.get('btc_filter_status', 'UNKNOWN')}",
-            f"FILTER    : ALT EMA BLOCK {int(stats.get('ema_blocked', 0))}  ·  BTC EMA BLOCK {int(stats.get('btc_ema_blocked', 0))}  ·  MAX BLOCK {int(stats.get('max_blocked', 0))}",
+            f"FILTER    : ALT H4 BLOCK {int(stats.get('ema_blocked', 0))}  ·  ALT H1 BLOCK {int(stats.get('h1_ema_blocked', 0))}  ·  BTC EMA BLOCK {int(stats.get('btc_ema_blocked', 0))}  ·  MAX BLOCK {int(stats.get('max_blocked', 0))}",
             f"OTHER     : DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
             f"DURATION  : {elapsed:.1f}s",
         ]
@@ -5454,7 +5471,7 @@ class TradingEngine:
                     "requested": 0, "processed": 0, "already_seen": 0, "warmup": 0,
                     "stale": 0, "no_signal": 0, "blue": 0, "red": 0,
                     "orders": 0, "filled": 0, "deferred": 0, "unknown": 0,
-                    "ema_blocked": 0, "btc_ema_blocked": 0, "max_blocked": 0, "duplicate": 0,
+                    "ema_blocked": 0, "h1_ema_blocked": 0, "btc_ema_blocked": 0, "max_blocked": 0, "duplicate": 0,
                     "btc_filter_status": btc_filter_status,
                     "errors": 0, "details": [],
                 }
@@ -5544,6 +5561,25 @@ class TradingEngine:
                             self.last_processed_candles[key] = entry_open_ms
                             self._scan_resume_cursor = absolute_index + 1
                             continue
+                        # H1 EMA entry gate: fetched only for a real signal that already
+                        # passed the H4 gate, to avoid extra REST weight on every coin.
+                        if ema_filter_length is not None and (
+                            signal.get("ema_filter_passed") is True
+                        ):
+                            try:
+                                h1 = await self.rest.get_klines(
+                                    symbol, "1h", self._h4_ema_history_limit(ema_filter_length),
+                                    H1_MS, force_refresh=False,
+                                )
+                            except BinanceRateLimitError:
+                                raise
+                            except Exception as h1_exc:
+                                h1 = None
+                                log.warning("[H1 EMA] %s data H1 gagal; entry diblokir fail-closed: %s", symbol, h1_exc)
+                            signal.update(volumatic.h1_ema_filter_state(
+                                h1, ema_filter_length, str(signal.get("direction") or ""),
+                                int(signal.get("signal_close_time_ms") or 0),
+                            ))
                         bubble = str(signal.get("signal") or "?").upper()
                         direction = str(signal.get("direction") or "?").upper()
                         stats["blue" if bubble == "BLUE" else "red"] += 1
@@ -5564,12 +5600,14 @@ class TradingEngine:
                         elif outcome == "ORDER_DEFERRED": stats["deferred"] += 1
                         elif outcome == "ORDER_UNKNOWN": stats["unknown"] += 1
                         elif outcome == "EMA_BLOCKED": stats["ema_blocked"] += 1
+                        elif outcome == "H1_EMA_BLOCKED": stats["h1_ema_blocked"] += 1
                         elif outcome == "BTC_EMA_BLOCKED": stats["btc_ema_blocked"] += 1
                         elif outcome == "MAX_BLOCKED": stats["max_blocked"] += 1
                         elif outcome in {"DUPLICATE", "IGNORED_TIMEFRAME", "EXCHANGE_SLOT_EXISTS"}: stats["duplicate"] += 1
                         stats["details"].append(
                             f"#{absolute_index+1:04d} {symbol} {bubble}/{direction} M15LEN{trend_length} "
                             f"H4EMA={ema_filter_values_label(ema_filter_length, signal.get('ema_filter_value'), signal.get('ema_filter_slow_value'))} "
+                            f"H1EMA={signal.get('h1_ema_filter_value')}/{signal.get('h1_ema_filter_slow_value')}({signal.get('h1_ema_filter_reason', '-')}) "
                             f"BTCEMA={signal.get('btc_ema_fast_value')}/{signal.get('btc_ema_slow_value')} "
                             f"BTC={signal.get('btc_ema_filter_reason', 'UNKNOWN')} "
                             f"ENTRY={signal.get('entry_price')} SL={signal.get('stop_loss')} "
@@ -5981,6 +6019,35 @@ class TradingEngine:
                 )
                 return "EMA_BLOCKED"
 
+            # H1 EMA entry gate: same /EMA periods and direction rule as H4.
+            h1_fast_value = positive_decimal(signal.get("h1_ema_filter_value"))
+            h1_slow_value = positive_decimal(signal.get("h1_ema_filter_slow_value"))
+            if filter_length is not None:
+                if not signal.get("h1_ema_checked"):
+                    h1_reason = "H1_EMA_NOT_EVALUATED"
+                elif not signal.get("h1_ema_filter_ready") or h1_fast_value is None or (needs_slow and h1_slow_value is None):
+                    h1_reason = str(signal.get("h1_ema_filter_reason") or "H1_EMA_NOT_READY")
+                elif not signal.get("h1_ema_filter_passed"):
+                    h1_reason = str(signal.get("h1_ema_filter_reason") or "H1_EMA_DIRECTION_NOT_ALIGNED")
+                else:
+                    h1_reason = "OK"
+                if h1_reason != "OK":
+                    await self._record_event(
+                        "SIGNAL_REJECTED_BY_H1_EMA", None, pair=pair, direction=direction,
+                        ema_filter_length=list(filter_length) if isinstance(filter_length, tuple) else filter_length,
+                        h1_ema_filter_value=decimal_to_str(h1_fast_value),
+                        h1_ema_filter_slow_value=decimal_to_str(h1_slow_value),
+                        h1_ema_open_time_ms=signal.get("h1_ema_open_time_ms"),
+                        h1_ema_reference_close=signal.get("h1_ema_reference_close"),
+                        reason=h1_reason,
+                    )
+                    await self.reply(
+                        f"⛔ SINYAL {direction} DIBLOKIR H1 EMA • {pair}\n"
+                        f"Filter: {ema_filter_values_label(filter_length, h1_fast_value, h1_slow_value)}\n"
+                        f"Alasan: {h1_reason}. Tidak ada order yang dibuat."
+                    )
+                    return "H1_EMA_BLOCKED"
+
             btc_filter_length_raw = signal.get("btc_ema_filter_length")
             try:
                 btc_filter_length = volumatic.normalize_ema_filter_length(btc_filter_length_raw)
@@ -6204,6 +6271,7 @@ class TradingEngine:
                     f"Signal TF: M15 • EMA Trend TF: H4 • Volumatic Length: {trade.trend_length}\n"
                     f"Signal: {trade.signal} confirmed M15 bubble\n"
                     f"H4 EMA: {ema_filter_values_label(trade.ema_filter_length, trade.ema_filter_value, trade.ema_filter_slow_value)}\n"
+                    f"H1 EMA: {ema_filter_values_label(trade.ema_filter_length, h1_fast_value, h1_slow_value)}\n"
                     f"Entry level (next M15 OPEN): {fmt_price(trade.entry)}\n"
                     f"Eksekusi: {'MARKET saat harga menyentuh level (dipantau WebSocket)' if trade.real_intent else 'PAPER saat harga menyentuh level'}\n"
                     f"Supertrend M15 SL: {fmt_price(trade.stop_loss)} • ATR {trade.supertrend_atr_length} / Factor {trade.supertrend_factor:g}\n"
@@ -7672,7 +7740,9 @@ class TradingEngine:
             await self._cancel_real_entry_remainder(trade, trade.pending_cancel_reason or "ENTRY_LIMIT_TIMEOUT_1H")
             if trade.status != "FILLED":
                 return
-        if time.monotonic() - trade.last_real_check_monotonic < REAL_RECONCILE_INTERVAL_SECONDS:
+        ws_covered = self.user_ws.status == "LIVE" and trade.protection_state == "ACTIVE" and trade.entry_order_terminal
+        reconcile_interval = REAL_RECONCILE_WS_COVERED_SECONDS if ws_covered else REAL_RECONCILE_INTERVAL_SECONDS
+        if time.monotonic() - trade.last_real_check_monotonic < reconcile_interval:
             return
         trade.last_real_check_monotonic = time.monotonic()
 
@@ -9655,6 +9725,7 @@ class TradingEngine:
         await self.reply(
             f"✅ EMA FILTER UPDATED\n\nPrevious : {old_text}\nCurrent  : {new_text}\n\n{rule}\n"
             f"{btc_rule}\n"
+            "Filter H1 (pair yang sama, periode /EMA yang sama, aturan arah sama dengan H4) juga wajib lolos.\n"
             "Kedua filter H4 memakai candle yang sudah ditutup.\n"
             "Sinyal ketika pair masih memiliki posisi/order aktif diabaikan sampai SL/TP atau close manual."
         )
