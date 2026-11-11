@@ -14,11 +14,24 @@
   "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": false,
-  "last_processed_candles": {},
+  "last_processed_candles": {
+    "M15:0GUSDT": 1794399300000,
+    "M15:1000000MOGUSDT": 1794399300000,
+    "M15:1000BONKUSDT": 1794399300000,
+    "M15:1000CATUSDT": 1794399300000,
+    "M15:1000CHEEMSUSDT": 1794399300000,
+    "M15:1000FLOKIUSDT": 1794399300000,
+    "M15:1000LUNCUSDT": 1794399300000,
+    "M15:1000PEPEUSDT": 1794399300000,
+    "M15:1000RATSUSDT": 1794399300000,
+    "M15:1000SATSUSDT": 1794399300000,
+    "M15:1000SHIBUSDT": 1794399300000,
+    "M15:1000XECUSDT": 1794399300000
+  },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 0,
-  "scan_resume_boundary_ms": 0,
+  "scan_resume_cursor": 12,
+  "scan_resume_boundary_ms": 1794399300000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T12:20:30.002559+00:00"
+  "updated_at": "2026-11-11T12:21:00.053910+00:00"
 }
