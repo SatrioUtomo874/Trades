@@ -3,10 +3,10 @@
   "timeframe": "M15",
   "trend_length": 100,
   "ema_filter_length": 100,
-  "supertrend_atr_length": 14,
-  "supertrend_factor": 2.5,
+  "supertrend_atr_length": 10,
+  "supertrend_factor": 3.0,
   "rr_min": "3",
-  "rr_max": "5",
+  "rr_max": "4",
   "max_active_trades": 100,
   "margin_usdt": "0.5",
   "leverage": 10,
@@ -17,5 +17,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T11:58:18.885293+00:00"
+  "updated_at": "2026-11-11T12:04:19.883723+00:00"
 }
