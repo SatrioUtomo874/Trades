@@ -406,12 +406,19 @@
     "M15:SANDUSDT": 1794405600000,
     "M15:SANTOSUSDT": 1794405600000,
     "M15:SAPIENUSDT": 1794405600000,
-    "M15:SCRUSDT": 1794405600000
+    "M15:SCRUSDT": 1794405600000,
+    "M15:SEIUSDT": 1794405600000,
+    "M15:SENTUSDT": 1794405600000,
+    "M15:SFPUSDT": 1794405600000,
+    "M15:SHELLUSDT": 1794405600000,
+    "M15:SIGNUSDT": 1794405600000,
+    "M15:SIRENUSDT": 1794405600000,
+    "M15:SKLUSDT": 1794405600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 393,
+  "scan_resume_cursor": 400,
   "scan_resume_boundary_ms": 1794404700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T14:08:43.366605+00:00"
+  "updated_at": "2026-11-11T14:09:16.373959+00:00"
 }
