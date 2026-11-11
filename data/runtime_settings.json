@@ -56,12 +56,21 @@
     "M15:ALLOUSDT": 1794411000000,
     "M15:ALLUSDT": 1794411000000,
     "M15:ALPINEUSDT": 1794411000000,
-    "M15:ALTUSDT": 1794411000000
+    "M15:ALTUSDT": 1794411000000,
+    "M15:ANIMEUSDT": 1794411000000,
+    "M15:ANKRUSDT": 1794411000000,
+    "M15:APEUSDT": 1794411000000,
+    "M15:API3USDT": 1794411000000,
+    "M15:APRUSDT": 1794411000000,
+    "M15:APTUSDT": 1794411000000,
+    "M15:ARBUSDT": 1794411000000,
+    "M15:ARCUSDT": 1794411000000,
+    "M15:ARIAUSDT": 1794411000000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 41,
+  "scan_resume_cursor": 50,
   "scan_resume_boundary_ms": 1794411000000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-11T15:41:54.190949+00:00"
+  "updated_at": "2026-11-11T15:43:26.112896+00:00"
 }
