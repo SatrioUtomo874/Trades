@@ -5408,6 +5408,19 @@ class TradingEngine:
                             log.info("[PROXY] WebSocket %s ditutup agar tersambung ulang lewat route baru", label)
                         except Exception:
                             log.debug("[PROXY] gagal menutup WS %s", label, exc_info=True)
+                # Every IP change pauses the scanner until the user sends /scan on again.
+                scan_was_on = bool(self.scan_enabled or self.scan_schedule_waiting)
+                self.scan_enabled = False
+                self._scan_trigger_now = False
+                self._scanner_symbols.clear()
+                self.scan_schedule_waiting = False
+                self.scan_schedule_slots = ()
+                self.scan_schedule_activated_at = None
+                self._scan_schedule_last_fired_minute = None
+                log.warning(
+                    "[PROXY] scanner DIHENTIKAN karena IP berganti (sebelumnya %s); kirim /scan on untuk melanjutkan.",
+                    "ON/terjadwal" if scan_was_on else "sudah OFF",
+                )
                 if info.get("mode") == PROXY_MANAGER.AUTO:
                     risk = "\nCatatan: proxy gratis tidak dijamin stabil; bot berotasi otomatis bila gagal."
                 else:
@@ -5420,7 +5433,8 @@ class TradingEngine:
                     f"IP LAMA   : {info.get('old_ip') or '?'}\n"
                     f"LATENSI   : {float(info.get('latency_ms') or 0):.0f} ms (uji /fapi/v1/time OK)\n"
                     f"ALASAN    : {str(info.get('reason'))[:300]}\n"
-                    "TERPASANG : REST + market WS + user WS (reconnect otomatis)"
+                    "TERPASANG : REST + market WS + user WS (reconnect otomatis)\n"
+                    "SCANNER   : ⛔ OFF — IP berganti. Whitelist IP baru bila perlu, lalu kirim /scan on"
                     f"{risk}"
                 )
             elif info.get("kind") == "exhausted":
@@ -11914,6 +11928,75 @@ class TradingEngine:
             f"History: {len(self.history_records)} | Events: {len(self.history_events)} | Session: {self.session_id}"
         )
 
+    async def _handle_ip(self) -> None:
+        """Refresh and report the public egress IP used by Binance REST/WS.
+
+        The lookup runs in a worker thread so it cannot block Telegram polling,
+        the market WebSocket, or the trading engine event loop. If the proxy
+        route changes during lookup, retry once against the new active route.
+        Only the IP in the final route snapshot is reported as whitelist-ready.
+        """
+        def route_signature(snapshot: dict[str, Any]) -> tuple[str, str, str]:
+            return (
+                str(snapshot.get("mode") or ""),
+                str(snapshot.get("route") or ""),
+                str(snapshot.get("egress_id") or ""),
+            )
+
+        stable = False
+        snapshot: dict[str, Any] = PROXY_MANAGER.snapshot()
+        for attempt in range(2):
+            before = PROXY_MANAGER.snapshot()
+            await asyncio.to_thread(
+                PROXY_MANAGER.refresh_exit_ip,
+                "Telegram /IP" if attempt == 0 else "Telegram /IP after route change",
+            )
+            snapshot = PROXY_MANAGER.snapshot()
+            if route_signature(before) == route_signature(snapshot):
+                stable = True
+                break
+            log.warning(
+                "[PROXY] route changed while /IP lookup was running; %s refresh will target current route.",
+                "retrying" if attempt == 0 else "final",
+            )
+
+        ip = str(snapshot.get("exit_ip") or "").strip()
+        mode = str(snapshot.get("mode") or "UNKNOWN").upper()
+        route = str(snapshot.get("route") or "UNKNOWN")
+        egress_id = str(snapshot.get("egress_id") or "UNKNOWN")
+        checked_at = datetime.now(TZ).strftime("%d-%m-%Y %H:%M:%S WIB")
+
+        if not ip:
+            await self.reply(
+                "⚠️ BINANCE OUTBOUND IP BELUM TERDETEKSI\n\n"
+                f"ROUTE     : {mode} · {route}\n"
+                f"EGRESS ID : {egress_id}\n"
+                f"CHECKED   : {checked_at}\n\n"
+                "IP whitelist belum bisa dipastikan. Coba /IP lagi ketika proxy/rute sudah stabil."
+            )
+            return
+
+        route_note = (
+            "Route stabil selama pemeriksaan."
+            if stable else
+            "Route berubah saat pemeriksaan; IP di bawah berasal dari snapshot rute aktif terakhir. Jalankan /IP sekali lagi untuk verifikasi."
+        )
+        await self.reply(
+            "╔══ BINANCE / OUTBOUND IP ══╗\n"
+            f"WHITELIST IP : {ip}\n"
+            f"ROUTE        : {mode} · {route}\n"
+            f"EGRESS ID    : {egress_id}\n"
+            f"CHECKED      : {checked_at}\n"
+            "──────────────────────────────\n"
+            f"{route_note}\n"
+            "Gunakan WHITELIST IP di atas pada Binance API Management.\n"
+            "Catatan: jika proxy failover/pindah route, jalankan /IP lagi karena IP whitelist dapat berubah."
+        )
+        log.info(
+            "[COMMAND] /IP completed | ip=%s | mode=%s | route=%s | egress_id=%s | stable=%s",
+            ip, mode, route, egress_id, stable,
+        )
+
     async def show_help(self) -> None:
         await self.reply(
             "COMMAND VOLUMATIC TREND\n\n"
@@ -11942,6 +12025,7 @@ class TradingEngine:
             "/leverage [angka] - leverage entry baru\n"
             "/balance - saldo Futures atau estimasi PAPER\n"
             "/api - statistik bobot/request Binance\n"
+            "/IP - refresh dan lihat IP keluar aktif untuk whitelist Binance\n"
             "/catatan [teks] - tambah atau lihat catatan\n"
             "/resetstats - arsipkan lalu reset statistik trade\n"
             "/reset CONFIRM - reset history/event/catatan (tanpa mengubah posisi)\n"
@@ -11989,6 +12073,7 @@ class TradingEngine:
         elif command == "/reset": await self._handle_reset(text)
         elif command == "/balance": await self._show_balance()
         elif command == "/api": await self.reply(await self._api_report())
+        elif command == "/ip": await self._handle_ip()
         elif command == "/catatan":
             arg = text[len(text.split(maxsplit=1)[0]):].strip() if len(text.split(maxsplit=1)) > 1 else ""
             if arg: await self.add_note(arg)
