@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T14:31:20.300038+00:00",
+  "updated_at": "2026-11-12T14:31:32.020892+00:00",
   "active_trades": [
     {
       "trade_id": "OGUSDT-20261112-200405-38167D",
@@ -810,7 +810,7 @@
       "tp_client_algo_id": "VTTPSDT-20261112-213018-AD87E3",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
