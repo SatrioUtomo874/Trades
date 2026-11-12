@@ -1,11 +1,11 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T06:39:40.806984+00:00",
+  "updated_at": "2026-11-12T06:44:06.933090+00:00",
   "active_trades": [
     {
-      "trade_id": "BUSDT-20261112-133340-BE9055",
-      "session_id": "20261112-132810-9006",
+      "trade_id": "BUSDT-20261112-134406-AD32FB",
+      "session_id": "20261112-134308-5B01",
       "pair": "BUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -71,7 +71,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "48",
-      "margin_usdt": "0.53655106",
+      "margin_usdt": "0.53350445",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5488",
@@ -101,8 +101,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "APRUSDT-20261112-133340-CE3C0F",
-      "session_id": "20261112-132810-9006",
+      "trade_id": "APRUSDT-20261112-134406-67297A",
+      "session_id": "20261112-134308-5B01",
       "pair": "APRUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -168,7 +168,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "155",
-      "margin_usdt": "0.55531308",
+      "margin_usdt": "0.557017",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.51025",
@@ -198,8 +198,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "SUNUSDT-20261112-133340-89A3A6",
-      "session_id": "20261112-132810-9006",
+      "trade_id": "SUNUSDT-20261112-134406-FA5833",
+      "session_id": "20261112-134308-5B01",
       "pair": "SUNUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -265,7 +265,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "360",
-      "margin_usdt": "0.54745201",
+      "margin_usdt": "0.547272",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.49612",
@@ -295,8 +295,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "JCTUSDT-20261112-133340-652D6D",
-      "session_id": "20261112-132810-9006",
+      "trade_id": "JCTUSDT-20261112-134406-65C67A",
+      "session_id": "20261112-134308-5B01",
       "pair": "JCTUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -362,7 +362,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "897",
-      "margin_usdt": "0.3836469",
+      "margin_usdt": "0.3733314",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.4940559999793",
@@ -392,8 +392,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "ARCUSDT-20261112-133340-C364F7",
-      "session_id": "20261112-132810-9006",
+      "trade_id": "ARCUSDT-20261112-134406-99E6B7",
+      "session_id": "20261112-134308-5B01",
       "pair": "ARCUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -459,7 +459,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "166",
-      "margin_usdt": "0.535184",
+      "margin_usdt": "0.53398333",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.49792",
@@ -489,8 +489,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "GRASSUSDT-20261112-133340-950448",
-      "session_id": "20261112-132810-9006",
+      "trade_id": "GRASSUSDT-20261112-134406-BB66BA",
+      "session_id": "20261112-134308-5B01",
       "pair": "GRASSUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -556,7 +556,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "12.1",
-      "margin_usdt": "0.5362831",
+      "margin_usdt": "0.53603849",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.50913",
