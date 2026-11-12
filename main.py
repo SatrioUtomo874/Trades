@@ -4973,6 +4973,10 @@ class TradingEngine:
         self._last_api_notice = 0.0
         self._api_recovery_until = 0.0
         self._last_universe_refresh = 0.0
+        # HTTP 401 / Binance -2015 is not a transient position-sync problem.
+        # Remember denied egress routes for this process so maintenance does not
+        # hammer every active position with the same invalid-IP/permission check.
+        self._real_ip_permission_blocked_routes: set[str] = set()
 
     # ----------------------- Telegram and persistence --------------------
     async def reply(self, message: str) -> None:
@@ -5454,6 +5458,59 @@ class TradingEngine:
             self.rest._rest_cooldown_until - time.monotonic(),
             self.real.cooldown_remaining,
         )
+
+    def _real_permission_route_identity(self) -> tuple[str, str, str]:
+        """Return stable identity, current exit IP, and display route."""
+        snapshot = PROXY_MANAGER.snapshot()
+        egress_id = str(snapshot.get("egress_id") or "UNKNOWN")
+        exit_ip = str(snapshot.get("exit_ip") or "").strip()
+        # egress_id identifies the actual proxy/direct route and remains stable
+        # while its exit-IP lookup is refreshed in the background.
+        identity = egress_id
+        route = f"{snapshot.get('mode') or '?'} · {snapshot.get('route') or 'DIRECT'}"
+        return identity, exit_ip, route
+
+    def _real_ip_permission_blocked_for_current_route(self) -> bool:
+        identity, _exit_ip, _route = self._real_permission_route_identity()
+        return identity in self._real_ip_permission_blocked_routes
+
+    async def _mark_real_ip_permission_blocked(
+        self, exc: BinanceAPIError, *, symbol: str | None = None,
+    ) -> None:
+        """Pause REAL REST work on this egress and notify once per route."""
+        identity, exit_ip, route = self._real_permission_route_identity()
+        if identity in self._real_ip_permission_blocked_routes:
+            return
+        self._real_ip_permission_blocked_routes.add(identity)
+        log.info(
+            "[REAL] REST permission blocked for egress=%s ip=%s endpoint=%s; repeated checks suppressed",
+            identity, exit_ip or "unknown", exc.endpoint or "REST",
+        )
+        await self.reply(
+            "╔══ BINANCE / REAL PERMISSION ══╗\n"
+            "STATE      : PAUSED · HTTP 401 / code -2015\n"
+            f"EXIT IP    : {exit_ip or 'belum terdeteksi'}\n"
+            f"ROUTE      : {route}\n"
+            f"PAIR       : {symbol or '-'}\n"
+            f"ENDPOINT   : {exc.endpoint or 'REST'}\n"
+            "ACTION     : pengecekan REST REAL otomatis dihentikan untuk rute ini.\n"
+            "Tidak akan mengulang pengecekan untuk setiap posisi.\n"
+            "Whitelist EXIT IP di Binance API Management dan pastikan izin Futures API aktif, "
+            "lalu kirim /real on untuk tes ulang. Jika route/IP berganti, rute baru akan diuji satu kali.\n"
+            "Catatan: SL/TP yang sudah terkonfirmasi di Binance tetap berada di exchange dan tidak dihapus. "
+            "Untuk posisi yang proteksinya belum terkonfirmasi, periksa dan amankan manual sampai akses pulih."
+        )
+
+    def _clear_real_ip_permission_block_for_current_route(self) -> None:
+        identity, _exit_ip, _route = self._real_permission_route_identity()
+        was_blocked = identity in self._real_ip_permission_blocked_routes
+        self._real_ip_permission_blocked_routes.discard(identity)
+        if was_blocked:
+            # A successful /real on is the explicit retry after whitelist changes.
+            # Make active positions eligible for immediate reconciliation again.
+            for trade in self.active_trades.values():
+                if trade.real_enabled and trade.status in {"PENDING", "FILLED"}:
+                    trade.last_real_check_monotonic = 0.0
 
     @staticmethod
     def _short_duration(seconds: float) -> str:
@@ -7288,6 +7345,13 @@ class TradingEngine:
         direction = trade.direction
         if not self.real_mode:
             raise MarketEntryRejected("REAL_OFF_BEFORE_ENTRY", "REAL sedang OFF; entry baru tidak dikirim ke Binance.")
+        if self._real_ip_permission_blocked_for_current_route():
+            raise MarketEntryRejected(
+                "BINANCE_IP_PERMISSION_BLOCKED",
+                "Entry REAL ditahan: egress IP rute ini sebelumnya ditolak Binance (-2015). "
+                "Whitelist IP lalu jalankan /real on untuk tes ulang.",
+                notify=False,
+            )
         if self._autostop_triggered:
             raise MarketEntryRejected("AUTOSTOP_BEFORE_ENTRY", "AUTOSTOP aktif; entry baru diblokir.")
         if now_utc() >= trade.expires_at:
@@ -7319,6 +7383,13 @@ class TradingEngine:
         except BinanceRateLimitError:
             raise
         except BinanceAPIError as exc:
+            if exc.code == -2015:
+                await self._mark_real_ip_permission_blocked(exc, symbol=trade.pair)
+                raise MarketEntryRejected(
+                    "BINANCE_IP_PERMISSION_BLOCKED",
+                    "Binance menolak egress IP/API permission (-2015); entry tidak dikirim.",
+                    notify=False,
+                ) from exc
             if self._definitive_reject(exc):
                 raise MarketEntryRejected("PREFLIGHT_REJECTED", str(exc)[:400]) from exc
             raise
@@ -7394,6 +7465,17 @@ class TradingEngine:
                 raise
             error = exc
         except Exception as exc:
+            if isinstance(exc, BinanceAPIError) and exc.code == -2015:
+                # A signed MARKET POST rejected with HTTP 401 was not accepted;
+                # do not turn a definitive permission refusal into SUBMIT_UNKNOWN
+                # by attempting a follow-up lookup on the same denied route.
+                self._revert_unsent_entry(trade)
+                await self._mark_real_ip_permission_blocked(exc, symbol=trade.pair)
+                raise MarketEntryRejected(
+                    "BINANCE_IP_PERMISSION_BLOCKED",
+                    "Binance menolak egress IP/API permission (-2015); MARKET order tidak diterima.",
+                    notify=False,
+                ) from exc
             error = exc
 
         if error is not None:
@@ -7500,6 +7582,13 @@ class TradingEngine:
                     return
             except BinanceRateLimitError:
                 break
+            except BinanceAPIError as exc:
+                if exc.code == -2015:
+                    await self._mark_real_ip_permission_blocked(exc, symbol=trade.pair)
+                    return
+                log.warning("[ENTRY] %s proteksi percobaan %s/%s gagal: %s", trade.pair, attempt, MARKET_ENTRY_PROTECTION_ATTEMPTS, exc)
+                if trade.protection_state == "ERROR_REJECTED":
+                    break
             except Exception as exc:
                 log.warning("[ENTRY] %s proteksi percobaan %s/%s gagal: %s", trade.pair, attempt, MARKET_ENTRY_PROTECTION_ATTEMPTS, exc)
                 if trade.protection_state == "ERROR_REJECTED":
@@ -7661,6 +7750,8 @@ class TradingEngine:
     async def _ensure_real_protection_locked(self, trade: Trade) -> None:
         """Install closePosition SL/TP once; confirmed protection is left untouched."""
         if not trade.real_enabled or trade.status != "FILLED" or trade.exchange_adopted:
+            return
+        if self._real_ip_permission_blocked_for_current_route():
             return
         # User-requested behavior: after BOTH protection orders are confirmed,
         # leave them on Binance. Do not poll/replace them from maintenance and do
@@ -8373,6 +8464,8 @@ class TradingEngine:
     async def _reconcile_pending_real(self, trade: Trade) -> None:
         if not trade.real_enabled or trade.status != "PENDING" or trade.entry_inflight:
             return
+        if self._real_ip_permission_blocked_for_current_route():
+            return
         if self._binance_cooldown_remaining() > 0:
             return  # open Binance LIMIT remains untouched; private WS still reports fills.
         if trade.real_state == "REAL_PREPARED":
@@ -8569,6 +8662,8 @@ class TradingEngine:
 
     async def _reconcile_filled_real(self, trade: Trade) -> None:
         if not trade.real_enabled or trade.status != "FILLED":
+            return
+        if self._real_ip_permission_blocked_for_current_route():
             return
         if self._binance_cooldown_remaining() > 0:
             return
@@ -8792,6 +8887,12 @@ class TradingEngine:
                     await self._notify_binance_cooldown(exc, source="STARTUP RECONCILIATION", symbol=trade.pair)
                     log.info("[RECOVERY] reconciliation dijeda oleh rate governor | pair=%s", trade.pair)
                     break
+                except BinanceAPIError as exc:
+                    trade.real_error = str(exc)[:500]
+                    if exc.code == -2015:
+                        await self._mark_real_ip_permission_blocked(exc, symbol=trade.pair)
+                        break
+                    log.exception("[RECOVERY] reconcile %s gagal.", trade.pair)
                 except Exception as exc:
                     trade.real_error = str(exc)[:500]
                     log.exception("[RECOVERY] reconcile %s gagal.", trade.pair)
@@ -8839,7 +8940,11 @@ class TradingEngine:
                     t.real_enabled and t.status in {"PENDING", "FILLED"}
                     for t in self.active_trades.values()
                 )
-                if needs_private_stream and self.user_ws.status == "OFFLINE":
+                if (
+                    needs_private_stream
+                    and self.user_ws.status == "OFFLINE"
+                    and not self._real_ip_permission_blocked_for_current_route()
+                ):
                     if time.monotonic() - self._last_user_stream_start_attempt >= 15.0:
                         self._last_user_stream_start_attempt = time.monotonic()
                         try:
@@ -8847,6 +8952,11 @@ class TradingEngine:
                         except BinanceRateLimitError:
                             await asyncio.sleep(2.0)
                             continue
+                        except BinanceAPIError as exc:
+                            if exc.code == -2015:
+                                await self._mark_real_ip_permission_blocked(exc)
+                            else:
+                                log.warning("[USER WS] start/reconnect ditunda: %s", exc)
                         except Exception:
                             log.exception("[USER WS] start/reconnect ditunda")
 
@@ -8890,6 +9000,11 @@ class TradingEngine:
                             self._was_in_binance_cooldown = True
                             await self._notify_binance_cooldown(exc, source="ORDER RECONCILIATION", symbol=trade.pair)
                             break
+                        except BinanceAPIError as exc:
+                            if exc.code == -2015:
+                                await self._mark_real_ip_permission_blocked(exc, symbol=trade.pair)
+                                break
+                            log.warning("[REAL] pending sync %s gagal: %s", trade.pair, exc)
                         except Exception as exc:
                             log.warning("[REAL] pending sync %s gagal: %s", trade.pair, exc)
                     elif trade.real_enabled and trade.status == "FILLED":
@@ -8899,11 +9014,17 @@ class TradingEngine:
                             self._was_in_binance_cooldown = True
                             await self._notify_binance_cooldown(exc, source="POSITION RECONCILIATION", symbol=trade.pair)
                             break
+                        except BinanceAPIError as exc:
+                            if exc.code == -2015:
+                                await self._mark_real_ip_permission_blocked(exc, symbol=trade.pair)
+                                break
+                            log.warning("[REAL] position sync %s gagal: %s", trade.pair, exc)
                         except Exception as exc:
                             log.warning("[REAL] position sync %s gagal: %s", trade.pair, exc)
 
                 if self._binance_cooldown_remaining() <= 0:
-                    await self._retry_signals()
+                    if not self._real_ip_permission_blocked_for_current_route():
+                        await self._retry_signals()
                     await self._monitor_active_positions()
 
                 # Recovery has now had one complete serialized maintenance pass.
@@ -8996,7 +9117,11 @@ class TradingEngine:
         return
 
     async def _retry_signals(self) -> None:
-        if not self._signal_retries or self._binance_cooldown_remaining() > 0:
+        if (
+            not self._signal_retries
+            or self._binance_cooldown_remaining() > 0
+            or self._real_ip_permission_blocked_for_current_route()
+        ):
             return
         now = now_utc()
         for key, item in list(self._signal_retries.items()):
@@ -9435,6 +9560,8 @@ class TradingEngine:
         """Execute/reconcile one H1 exit while leaving Binance SL/TP armed until flat."""
         if not trade.real_enabled or trade.status != "FILLED":
             return
+        if self._real_ip_permission_blocked_for_current_route():
+            return
         if self._binance_cooldown_remaining() > 0:
             return
         lock = self._ema_exit_close_locks.setdefault(trade.trade_id, asyncio.Lock())
@@ -9487,6 +9614,21 @@ class TradingEngine:
                 trade.ema_exit_last_error = str(exc)[:500]
                 await self._save_active_state()
                 raise
+            except BinanceAPIError as exc:
+                if exc.code == -2015:
+                    if trade.ema_exit_state == "CLOSE_SUBMITTING":
+                        # HTTP 401 means Binance rejected the request; it was not a
+                        # successful/ambiguous close. Keep the confirmed trigger queued.
+                        trade.ema_exit_state = "EXIT_PENDING"
+                    trade.ema_exit_last_error = str(exc)[:500]
+                    await self._save_active_state()
+                    await self._mark_real_ip_permission_blocked(exc, symbol=trade.pair)
+                    return
+                if trade.ema_exit_state == "CLOSE_SUBMITTING":
+                    trade.ema_exit_state = "CLOSE_UNKNOWN"
+                trade.ema_exit_last_error = str(exc)[:500]
+                await self._save_active_state()
+                log.exception("[EMA EXIT] close operation needs reconciliation | %s %s", trade.pair, trade.direction)
             except Exception as exc:
                 if trade.ema_exit_state == "CLOSE_SUBMITTING":
                     trade.ema_exit_state = "CLOSE_UNKNOWN"
@@ -10465,6 +10607,7 @@ class TradingEngine:
             await self.user_ws.start()
             self._last_user_ws_reconnect_count = self.user_ws.reconnect_count
             self.real_mode = True
+            self._clear_real_ip_permission_block_for_current_route()
             if self.autostop_percent is not None:
                 await self._autostop_check(force=True)
             await self._save_runtime_settings()
@@ -12106,6 +12249,18 @@ class TradingEngine:
                 f"⏳ {command} belum dijalankan karena Binance REST cooldown "
                 f"({self._binance_cooldown_remaining():.0f}s). Perintah ini bersifat lokal/read-only dan dapat diulang setelah API pulih."
             )
+        except BinanceAPIError as exc:
+            if exc.code == -2015:
+                already_blocked = self._real_ip_permission_blocked_for_current_route()
+                await self._mark_real_ip_permission_blocked(exc)
+                if already_blocked:
+                    await self.reply(
+                        f"❌ {command} masih ditolak Binance (-2015) pada route ini. "
+                        "Periksa whitelist EXIT IP dan izin Futures API; pengecekan otomatis tetap ditahan."
+                    )
+                return
+            log.exception("Command %s gagal: %s", command, exc)
+            await self.reply(f"❌ {command} gagal: {str(exc)[:1500]}")
         except Exception as exc:
             log.exception("Command %s gagal: %s", command, exc)
             await self.reply(f"❌ {command} gagal: {str(exc)[:1500]}")
