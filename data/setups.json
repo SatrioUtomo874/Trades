@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T09:21:52.156373+00:00",
+  "updated_at": "2026-11-12T09:22:09.020121+00:00",
   "active_trades": [
     {
       "trade_id": "BUSDT-20261112-134406-AD32FB",
@@ -816,7 +816,7 @@
       "tp_client_algo_id": "VTTPSDT-20261112-161114-C97D66",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
