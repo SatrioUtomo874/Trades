@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T14:31:09.068459+00:00",
+  "updated_at": "2026-11-12T14:31:16.722771+00:00",
   "active_trades": [
     {
       "trade_id": "OGUSDT-20261112-200405-38167D",
@@ -805,11 +805,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002109745568,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002109748860,
       "sl_client_algo_id": "VTSLSDT-20261112-213018-AD87E3",
       "tp_client_algo_id": "VTTPSDT-20261112-213018-AD87E3",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
@@ -975,8 +975,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-12T14:31:16.670545+00:00",
+      "entry_trigger_price": "0.008795",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "2.4.0",
       "entry_reason": "Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN; TP baseline 3.0R with farthest unmitigated Volume Liquidity Trend pool extension up to 5.0R",
