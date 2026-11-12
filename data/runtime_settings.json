@@ -62,12 +62,15 @@
     "M15:APEUSDT": 1794488400000,
     "M15:API3USDT": 1794488400000,
     "M15:APRUSDT": 1794488400000,
-    "M15:APTUSDT": 1794488400000
+    "M15:APTUSDT": 1794488400000,
+    "M15:ARBUSDT": 1794488400000,
+    "M15:ARCUSDT": 1794488400000,
+    "M15:ARIAUSDT": 1794488400000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 47,
+  "scan_resume_cursor": 50,
   "scan_resume_boundary_ms": 1794488400000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-12T13:09:52.474333+00:00"
+  "updated_at": "2026-11-12T13:10:08.468190+00:00"
 }
