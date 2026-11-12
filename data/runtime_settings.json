@@ -48,12 +48,18 @@
     "M15:AIOTUSDT": 1794465000000,
     "M15:AIOUSDT": 1794465000000,
     "M15:AIXBTUSDT": 1794465000000,
-    "M15:AKEUSDT": 1794465000000
+    "M15:AKEUSDT": 1794465000000,
+    "M15:AKTUSDT": 1794465000000,
+    "M15:ALCHUSDT": 1794465000000,
+    "M15:ALGOUSDT": 1794465000000,
+    "M15:ALICEUSDT": 1794465000000,
+    "M15:ALLOUSDT": 1794465000000,
+    "M15:ALLUSDT": 1794465000000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 33,
+  "scan_resume_cursor": 39,
   "scan_resume_boundary_ms": 1794465000000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-12T06:37:24.716708+00:00"
+  "updated_at": "2026-11-12T06:37:56.361727+00:00"
 }
