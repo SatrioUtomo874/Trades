@@ -466,7 +466,7 @@
     "M15:TOWNSUSDT": 1794471300000,
     "M15:TRADOORUSDT": 1794471300000,
     "M15:TRBUSDT": 1794471300000,
-    "M15:TREEUSDT": 1794469500000,
+    "M15:TREEUSDT": 1794471300000,
     "M15:TRIAUSDT": 1794469500000,
     "M15:TRUMPUSDT": 1794469500000,
     "M15:TRUSTUSDT": 1794469500000,
@@ -539,8 +539,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 450,
+  "scan_resume_cursor": 451,
   "scan_resume_boundary_ms": 1794471300000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-12T08:18:26.904549+00:00"
+  "updated_at": "2026-11-12T08:18:34.334541+00:00"
 }
