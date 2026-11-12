@@ -115,12 +115,19 @@
     "M15:BMTUSDT": 1794489300000,
     "M15:BNBUSDT": 1794489300000,
     "M15:BNTUSDT": 1794489300000,
-    "M15:BOMEUSDT": 1794489300000
+    "M15:BOMEUSDT": 1794489300000,
+    "M15:BRETTUSDT": 1794489300000,
+    "M15:BREVUSDT": 1794489300000,
+    "M15:BROCCOLI714USDT": 1794489300000,
+    "M15:BROCCOLIF3BUSDT": 1794489300000,
+    "M15:BRUSDT": 1794489300000,
+    "M15:BSBUSDT": 1794489300000,
+    "M15:BSVUSDT": 1794489300000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 100,
+  "scan_resume_cursor": 107,
   "scan_resume_boundary_ms": 1794488400000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-12T13:15:53.206988+00:00"
+  "updated_at": "2026-11-12T13:16:26.936091+00:00"
 }
