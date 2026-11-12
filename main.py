@@ -1291,9 +1291,9 @@ class ProxyFailoverManager:
             kind = ""
             if self._needs_failover and now >= self._retry_at:
                 kind = "failover"
-            elif self.mode != self.home_mode and now >= self._home_check_at:
+            elif self._home_check_useful(now) and now >= self._home_check_at:
                 kind = "home"
-            if self.mode != self.home_mode and now >= self._heartbeat_at:
+            if self.mode == self.AUTO and now >= self._heartbeat_at:
                 self._heartbeat_at = now + 600.0
                 log.info(
                     "[PROXY] status | route=%s | pool=%d sehat | blacklist=%d | switches=%d | cek rute utama tiap %.0fs",
@@ -1306,6 +1306,14 @@ class ProxyFailoverManager:
             target=self._worker, args=(kind, "retry terjadwal" if kind == "failover" else "cek rute utama"),
             name="proxy-failover", daemon=True,
         ).start()
+
+    def _home_check_useful(self, now: float) -> bool:
+        """A return-home probe only makes sense if it could land on a *different* route."""
+        if self.mode == self.AUTO:
+            return True
+        if self.mode == self.DIRECT and self.static_url and now >= self.static_dead_until:
+            return True  # configured proxy's dead window expired; try it again
+        return False
 
     def _worker(self, kind: str, reason: str) -> None:
         try:
@@ -1520,14 +1528,18 @@ class ProxyFailoverManager:
     def _return_home(self) -> None:
         with self._lock:
             self._home_check_at = time.monotonic() + PROXY_HOME_CHECK_SECONDS
-        if not self._home_candidates(exclude_current=False):
+        if not self._home_candidates(exclude_current=True):
             return
         log.info("[PROXY] cek apakah rute utama sudah pulih (route sekarang=%s)", self.describe())
-        self._try_home(exclude_current=False, reason="rute utama sudah pulih")
+        self._try_home(exclude_current=True, reason="rute utama sudah pulih")
 
     # ------------------------------------------------------------- switching
     def _switch(self, kind: str, url: str | None, reason: str, latency_ms: float) -> None:
         with self._lock:
+            if kind == self.mode and (url or "") == self.active_url:
+                self._needs_failover = False
+                log.info("[PROXY] route %s masih sehat; tidak ada pergantian", self.describe())
+                return
             old_egress, old_desc = self.egress_id, self.describe()
             self.mode = kind
             self.active_url = url or ""
