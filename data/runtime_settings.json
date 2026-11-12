@@ -215,12 +215,18 @@
     "M15:FRAXUSDT": 1794465900000,
     "M15:FUSDT": 1794465900000,
     "M15:GALAUSDT": 1794465900000,
-    "M15:GASUSDT": 1794465900000
+    "M15:GASUSDT": 1794465900000,
+    "M15:GENIUSUSDT": 1794465900000,
+    "M15:GIGGLEUSDT": 1794465900000,
+    "M15:GLMUSDT": 1794465900000,
+    "M15:GMTUSDT": 1794465900000,
+    "M15:GMXUSDT": 1794465900000,
+    "M15:GOATUSDT": 1794465900000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 200,
+  "scan_resume_cursor": 206,
   "scan_resume_boundary_ms": 1794465900000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-12T06:54:36.835451+00:00"
+  "updated_at": "2026-11-12T06:55:16.516460+00:00"
 }
