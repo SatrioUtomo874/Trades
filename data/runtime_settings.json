@@ -457,12 +457,20 @@
     "M15:TAKEUSDT": 1794466800000,
     "M15:TAOUSDT": 1794466800000,
     "M15:TAUSDT": 1794466800000,
-    "M15:THETAUSDT": 1794466800000
+    "M15:THETAUSDT": 1794466800000,
+    "M15:THEUSDT": 1794466800000,
+    "M15:TIAUSDT": 1794466800000,
+    "M15:TLMUSDT": 1794466800000,
+    "M15:TNSRUSDT": 1794466800000,
+    "M15:TOSHIUSDT": 1794466800000,
+    "M15:TOWNSUSDT": 1794466800000,
+    "M15:TRADOORUSDT": 1794466800000,
+    "M15:TRBUSDT": 1794466800000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 400,
+  "scan_resume_cursor": 450,
   "scan_resume_boundary_ms": 1794466800000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-12T07:11:37.240907+00:00"
+  "updated_at": "2026-11-12T07:12:01.323028+00:00"
 }
