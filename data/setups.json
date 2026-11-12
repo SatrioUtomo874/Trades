@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T07:48:15.233069+00:00",
+  "updated_at": "2026-11-12T07:48:28.241700+00:00",
   "active_trades": [
     {
       "trade_id": "BUSDT-20261112-134406-AD32FB",
@@ -713,7 +713,7 @@
       "tp_client_algo_id": "VTTPSDT-20261112-144730-68E16D",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
@@ -772,7 +772,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "1175220347:NEW:NEW:0:0",
+      "last_ws_event_key": "1175220347:TRADE:FILLED:506:98491428",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
