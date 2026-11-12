@@ -5517,7 +5517,20 @@ class TradingEngine:
                 if current_ip:
                     self._real_egress_preflight_status[identity] = "PUBLIC_READY"
                 else:
+                    # A route is not usable for whitelist setup until its actual
+                    # public egress IP is known. Quarantine it and let the existing
+                    # failover worker test the next route. Do not notify per candidate.
                     self._real_egress_preflight_status[identity] = "IP_UNKNOWN"
+                    if PROXY_MANAGER.enabled:
+                        PROXY_MANAGER.reject_active_route(
+                            "PUBLIC EGRESS IP UNKNOWN: IP-echo services gagal melalui route ini",
+                            ttl_seconds=600.0,
+                        )
+                    log.warning(
+                        "[PUBLIC PREFLIGHT] IP tidak terdeteksi; route dikarantina dan failover dilanjutkan | route=%s",
+                        info.get("new"),
+                    )
+                    return
                 self._real_ip_permission_blocked_routes.discard(identity)
 
                 risk = (
@@ -5680,12 +5693,20 @@ class TradingEngine:
                     exit_ip = detected_ip
                 if not exit_ip:
                     self._real_egress_preflight_status[identity] = "IP_UNKNOWN"
-                    await notify(
-                        "⚠️ BINANCE / PUBLIC EGRESS BELUM LENGKAP\n"
-                        f"ROUTE : {current_route}\n"
-                        "IP KELUAR : tidak berhasil dideteksi.\n"
-                        "Tes IP publik gagal; tidak ada request private yang dikirim. Coba /IP untuk memeriksa ulang."
+                    log.warning(
+                        "[PUBLIC PREFLIGHT] IP keluar tidak terdeteksi; karantina route dan cari pengganti | route=%s",
+                        current_route,
                     )
+                    if PROXY_MANAGER.enabled:
+                        PROXY_MANAGER.reject_active_route(
+                            "PUBLIC EGRESS IP UNKNOWN: tidak ada IP echo yang berhasil",
+                            ttl_seconds=600.0,
+                        )
+                    else:
+                        await notify(
+                            "⚠️ IP PUBLIK BELUM TERDETEKSI. Route DIRECT tidak dapat diganti otomatis karena failover nonaktif. "
+                            "Tidak ada request private/API-key yang dikirim; REAL tetap OFF."
+                        )
                     return False
 
                 # Three consecutive public REST probes, each below the configured
@@ -12404,13 +12425,27 @@ class TradingEngine:
         checked_at = datetime.now(TZ).strftime("%d-%m-%Y %H:%M:%S WIB")
 
         if not ip:
-            await self.reply(
-                "⚠️ BINANCE OUTBOUND IP BELUM TERDETEKSI\n\n"
-                f"ROUTE     : {mode} · {route}\n"
-                f"EGRESS ID : {egress_id}\n"
-                f"CHECKED   : {checked_at}\n\n"
-                "IP whitelist belum bisa dipastikan. Coba /IP lagi ketika proxy/rute sudah stabil."
-            )
+            if PROXY_MANAGER.enabled:
+                PROXY_MANAGER.reject_active_route(
+                    "Telegram /IP: public egress IP tidak dapat dideteksi melalui route aktif",
+                    ttl_seconds=600.0,
+                )
+                await self.reply(
+                    "⚠️ IP PUBLIK ROUTE INI TIDAK TERDETEKSI\n\n"
+                    f"ROUTE     : {mode} · {route}\n"
+                    f"CHECKED   : {checked_at}\n\n"
+                    "Bot sedang mengarantina route ini dan mencari proxy pengganti. "
+                    "Tidak ada request private Binance/API-key yang dikirim. "
+                    "Tunggu satu pesan ketika IP publik yang valid sudah ditemukan."
+                )
+            else:
+                await self.reply(
+                    "⚠️ BINANCE OUTBOUND IP BELUM TERDETEKSI\n\n"
+                    f"ROUTE     : {mode} · {route}\n"
+                    f"EGRESS ID : {egress_id}\n"
+                    f"CHECKED   : {checked_at} WIB\n\n"
+                    "Failover otomatis nonaktif; route tidak bisa diganti oleh bot. Tidak ada request private yang dikirim."
+                )
             return
 
         route_note = (
