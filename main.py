@@ -25,10 +25,12 @@ import ctypes
 import gc
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import math
 import os
+import random
 import re
 import sqlite3
 import sys
@@ -37,6 +39,7 @@ import threading
 import time
 import traceback
 from collections import deque, OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_UP
@@ -1038,6 +1041,556 @@ def rate_limit_wait(response: Any, offset_ms: int = 0) -> tuple[float, bool]:
     return float(BINANCE_BAN_FALLBACK_SECONDS if status == 418 else BINANCE_RATE_LIMIT_FALLBACK_SECONDS), False
 
 
+# ---------------------------------------------------------------------------
+# Automatic Binance egress failover (DIRECT -> configured proxy -> ProxyScrape)
+# ---------------------------------------------------------------------------
+def _env_flag(name: str, default: str = "1") -> bool:
+    return (os.getenv(name, default) or default).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _env_number(name: str, default: float, low: float, high: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = float(default)
+    return min(high, max(low, value))
+
+
+PROXY_AUTO_FAILOVER = _env_flag("PROXY_AUTO_FAILOVER", "1")
+# ProxyScrape free-list API v4 (no key). Override with PROXYSCRAPE_API_URL; the
+# URL may also return `ip:port`, `scheme://ip:port` or JSON {"proxies": [...]}.
+PROXYSCRAPE_API_URL = (os.getenv("PROXYSCRAPE_API_URL") or (
+    "https://api.proxyscrape.com/v4/free-proxy-list/get"
+    "?request=display_proxies&protocol=http&proxy_format=ipport&format=text&timeout=10000"
+)).strip()
+PROXYSCRAPE_MIRROR_URLS = tuple(
+    item.strip() for item in (os.getenv("PROXYSCRAPE_MIRROR_URLS") or (
+        "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/https/data.txt,"
+        "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/http/data.txt"
+    )).split(",") if item.strip()
+)
+PROXY_POOL_SIZE = int(_env_number("PROXY_POOL_SIZE", 3, 1, 10))
+PROXY_MAX_CANDIDATES = int(_env_number("PROXY_MAX_CANDIDATES", 400, 10, 3000))
+PROXY_TEST_TIMEOUT_SECONDS = _env_number("PROXY_TEST_TIMEOUT_SECONDS", 6.0, 2.0, 30.0)
+PROXY_TEST_CONCURRENCY = int(_env_number("PROXY_TEST_CONCURRENCY", 40, 1, 150))
+PROXY_FAIL_THRESHOLD = int(_env_number("PROXY_FAIL_THRESHOLD", 3, 1, 20))
+PROXY_BLACKLIST_SECONDS = _env_number("PROXY_BLACKLIST_SECONDS", 1800.0, 60.0, 86400.0)
+PROXY_HOME_CHECK_SECONDS = _env_number("PROXY_HOME_CHECK_SECONDS", 120.0, 30.0, 3600.0)
+PROXY_REFETCH_MIN_SECONDS = _env_number("PROXY_REFETCH_MIN_SECONDS", 45.0, 10.0, 900.0)
+# 418 (IP ban) and 451 (restricted location) always trigger a switch; a plain
+# 429 only when the resulting cooldown is long enough to justify a new IP.
+PROXY_SWITCH_MIN_COOLDOWN_SECONDS = _env_number("PROXY_SWITCH_MIN_COOLDOWN_SECONDS", 120.0, 0.0, 86400.0)
+
+
+def mask_proxy_url(url: str | None) -> str:
+    """Never print proxy credentials: scheme://***@host:port."""
+    if not url:
+        return "DIRECT"
+    try:
+        parts = urlsplit(url)
+        auth = "***@" if (parts.username or parts.password) else ""
+        return f"{parts.scheme or 'http'}://{auth}{parts.hostname or '?'}:{parts.port or ''}".rstrip(":")
+    except Exception:
+        return "proxy:?"
+
+
+def parse_proxy_list(text: str, limit: int = 5000) -> list[str]:
+    """Parse ProxyScrape text/JSON into unique http(s) proxy URLs."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        value = str(raw or "").strip()
+        if not value or len(value) > 200:
+            return
+        if "://" not in value:
+            value = f"http://{value}"
+        try:
+            parts = urlsplit(value)
+            port = parts.port
+        except ValueError:
+            return
+        if parts.scheme not in {"http", "https"} or not parts.hostname or not port or not 1 <= port <= 65535:
+            return  # SOCKS is not supported by requests/websockets proxy settings here
+        if not re.fullmatch(r"[A-Za-z0-9.\-]+", parts.hostname):
+            return
+        if value not in seen:
+            seen.add(value)
+            found.append(value)
+
+    body = (text or "").strip()
+    if body[:1] in "{[":
+        try:
+            data = json.loads(body)
+            rows = data.get("proxies") if isinstance(data, dict) else data
+            for row in rows or []:
+                if isinstance(row, dict):
+                    add(row.get("proxy") or (f"{row.get('ip')}:{row.get('port')}" if row.get("ip") and row.get("port") else ""))
+                else:
+                    add(row)
+        except (ValueError, TypeError):
+            pass
+    else:
+        for line in body.splitlines():
+            add(line)
+    return found[:limit]
+
+
+class ProxyFailoverManager:
+    """Switch Binance traffic automatically when the active egress IP is unusable.
+
+    Route order: DIRECT/Render -> configured BINANCE_PROXY_URL -> AUTO pool built
+    from the ProxyScrape API. A route is abandoned on 418/451 (IP ban/geo block),
+    on proxy-side failures (402/407/tunnel errors/repeated transport errors), and
+    the manager returns to the primary route when its ban/dead window expires.
+    Every candidate is validated against Binance /fapi/v1/time over verified TLS
+    before use. All steps are logged with the "[PROXY]" prefix.
+    """
+
+    DIRECT, STATIC, AUTO = "DIRECT", "STATIC", "AUTO"
+    PROXY_FAILURE_MARKERS = (
+        "proxyerror", "unable to connect to proxy", "tunnel connection failed",
+        "proxy authentication", "cannot connect to proxy", "proxy connect", "502 bad gateway",
+        "402 payment required", "407 proxy",
+    )
+
+    def __init__(self) -> None:
+        self.enabled = PROXY_AUTO_FAILOVER
+        self._lock = threading.RLock()
+        self.static_url = BINANCE_PROXY_URL or ""
+        self._direct_egress = "direct" if self.static_url else BINANCE_EGRESS_ID
+        self._static_egress = BINANCE_EGRESS_ID if self.static_url else ""
+        self.mode = self.STATIC if self.static_url else self.DIRECT
+        self.active_url: str = self.static_url
+        self.egress_id: str = self._static_egress if self.static_url else self._direct_egress
+        self.generation = 0
+        self.fail_count = 0
+        self.pool: list[tuple[str, float]] = []  # (url, latency_ms) best first
+        self.blacklist: dict[str, float] = {}
+        self.static_dead_until = 0.0
+        self.direct_ban_until = 0.0
+        self._needs_failover = False
+        self._retry_at = 0.0
+        self._retry_backoff = 60.0
+        self._last_fetch = 0.0
+        self._home_check_at = 0.0
+        self._heartbeat_at = 0.0
+        self._worker_running = False
+        self._pending_reason = ""
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._listener: Any = None
+        self.switch_count = 0
+        self.last_switch_at = 0.0
+        # Test seam: tests replace these with fakes (no network).
+        self._probe_fn = self._probe_binance
+        self._fetch_fn = self._fetch_candidates
+        self.exit_ip = ""  # public IP Binance sees for the active route (for API-key IP whitelist)
+        self._exit_ip_fn = self._lookup_exit_ip
+
+    # ------------------------------------------------------------ accessors
+    def request_proxies(self) -> dict[str, str] | None:
+        url = self.active_url
+        return {"http": url, "https": url} if url else None
+
+    def ws_kwargs(self) -> dict[str, str]:
+        url = self.active_url
+        return {"proxy": url} if url else {}
+
+    @property
+    def home_mode(self) -> str:
+        return self.STATIC if self.static_url else self.DIRECT
+
+    def describe(self) -> str:
+        return f"{self.mode}:{mask_proxy_url(self.active_url)} egress={self.egress_id}"
+
+    def bind(self, loop: asyncio.AbstractEventLoop | None, listener: Any) -> None:
+        self._loop = loop
+        self._listener = listener
+
+    # ------------------------------------------------------------- observers
+    def observe_http(self, status: int | None, cooldown_seconds: float = 0.0) -> None:
+        """Called for every Binance HTTP response (status only)."""
+        if not self.enabled or status is None:
+            return
+        status = int(status)
+        if status in (418, 451) or (status == 429 and cooldown_seconds >= PROXY_SWITCH_MIN_COOLDOWN_SECONDS):
+            self._on_blocked(status, cooldown_seconds)
+        elif status < 500 and status != 429:
+            self.fail_count = 0
+
+    def observe_transport_error(self, text: str) -> None:
+        """Called for Binance transport failures (requests/websocket exceptions)."""
+        if not self.enabled or self.mode == self.DIRECT:
+            return  # without a proxy a transport error is not a proxy problem
+        low = str(text or "").lower()
+        fatal_billing = "402 payment required" in low or "407 proxy" in low or "proxy authentication" in low
+        proxy_side = fatal_billing or any(marker in low for marker in self.PROXY_FAILURE_MARKERS)
+        with self._lock:
+            self.fail_count += 1
+            count = self.fail_count
+            url, mode = self.active_url, self.mode
+        if not (proxy_side or count >= PROXY_FAIL_THRESHOLD):
+            log.info("[PROXY] transport error #%d/%d via %s: %s", count, PROXY_FAIL_THRESHOLD, mask_proxy_url(url), low[:160])
+            return
+        now = time.monotonic()
+        if fatal_billing:
+            ttl = 6 * 3600.0
+            why = "HTTP 402/407 dari proxy (saldo/kuota/izin proxy habis atau ditolak)"
+        else:
+            ttl = PROXY_BLACKLIST_SECONDS if mode == self.AUTO else 600.0
+            why = "proxy tidak dapat dipakai (%s)" % (low[:120] or "transport error")
+        with self._lock:
+            if url != self.active_url:
+                return  # route already changed by another thread
+            if mode == self.STATIC:
+                self.static_dead_until = max(self.static_dead_until, now + ttl)
+            else:
+                self.blacklist[url] = now + ttl
+            self.pool = [item for item in self.pool if item[0] != url]
+        log.warning("[PROXY] %s mati: %s | diblokir %.0f menit", mask_proxy_url(url), why, ttl / 60.0)
+        self._schedule(f"{mode} proxy {mask_proxy_url(url)} gagal: {why}")
+
+    def _on_blocked(self, status: int, seconds: float) -> None:
+        now = time.monotonic()
+        ttl = max(float(seconds or 0.0), 600.0 if status == 451 else 60.0)
+        with self._lock:
+            mode, url = self.mode, self.active_url
+            if mode == self.DIRECT:
+                self.direct_ban_until = max(self.direct_ban_until, now + ttl)
+            elif mode == self.STATIC:
+                self.static_dead_until = max(self.static_dead_until, now + ttl)
+            else:
+                self.blacklist[url] = max(self.blacklist.get(url, 0.0), now + ttl)
+                self.pool = [item for item in self.pool if item[0] != url]
+            if self._needs_failover and self._worker_running:
+                return
+        label = {418: "IP BANNED (HTTP 418)", 451: "LOKASI DIBLOKIR (HTTP 451)"}.get(status, f"RATE LIMIT PANJANG (HTTP {status})")
+        log.warning("[PROXY] Binance menolak egress %s: %s, ban/cooldown %.0fs", self.describe(), label, ttl)
+        self._schedule(f"egress {mode} {mask_proxy_url(url)} -> {label}")
+
+    # ------------------------------------------------------------- scheduling
+    def _schedule(self, reason: str) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._needs_failover = True
+            if self._worker_running:
+                self._pending_reason = reason
+                return
+            self._worker_running = True
+        threading.Thread(target=self._worker, args=("failover", reason), name="proxy-failover", daemon=True).start()
+
+    def tick(self) -> None:
+        """Cheap periodic hook from the maintenance loop."""
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if self._worker_running:
+                return
+            kind = ""
+            if self._needs_failover and now >= self._retry_at:
+                kind = "failover"
+            elif self.mode != self.home_mode and now >= self._home_check_at:
+                kind = "home"
+            if self.mode != self.home_mode and now >= self._heartbeat_at:
+                self._heartbeat_at = now + 600.0
+                log.info(
+                    "[PROXY] status | route=%s | pool=%d sehat | blacklist=%d | switches=%d | cek rute utama tiap %.0fs",
+                    self.describe(), len(self.pool), len(self.blacklist), self.switch_count, PROXY_HOME_CHECK_SECONDS,
+                )
+            if not kind:
+                return
+            self._worker_running = True
+        threading.Thread(
+            target=self._worker, args=(kind, "retry terjadwal" if kind == "failover" else "cek rute utama"),
+            name="proxy-failover", daemon=True,
+        ).start()
+
+    def _worker(self, kind: str, reason: str) -> None:
+        try:
+            if kind == "failover":
+                self._failover(reason)
+            else:
+                self._return_home()
+        except Exception:
+            log.exception("[PROXY] worker error")
+        finally:
+            with self._lock:
+                self._worker_running = False
+                pending = self._pending_reason
+                self._pending_reason = ""
+            if pending and self._needs_failover:
+                self._schedule(pending)
+
+    # ------------------------------------------------------------- probing
+    @staticmethod
+    def _probe_binance(url: str | None, timeout: float) -> tuple[bool, str, float]:
+        """GET /fapi/v1/time through `url` (None=direct). Returns (ok, detail, latency_ms)."""
+        proxies = {"http": url, "https": url} if url else None
+        started = time.monotonic()
+        try:
+            response = requests.get(
+                f"{BINANCE_REST_BASE}/fapi/v1/time", proxies=proxies, timeout=(timeout, timeout),
+                headers={"Accept": "application/json"},
+            )
+        except requests.RequestException as exc:
+            return False, f"{type(exc).__name__}: {str(exc)[:100]}", 0.0
+        latency = (time.monotonic() - started) * 1000.0
+        if response.status_code == 200:
+            try:
+                if isinstance(response.json().get("serverTime"), int):
+                    return True, "OK", latency
+            except (ValueError, AttributeError):
+                pass
+            return False, "respons bukan JSON Binance", latency
+        if response.status_code in (418, 429, 451):
+            return False, f"Binance HTTP {response.status_code}", latency
+        return False, f"HTTP {response.status_code}", latency
+
+    @staticmethod
+    def _lookup_exit_ip(url: str | None) -> str:
+        """Public egress IP of a route (None=direct), via echo services; '' if unknown."""
+        proxies = {"http": url, "https": url} if url else None
+        for service in ("https://api.ipify.org", "https://checkip.amazonaws.com", "https://ifconfig.me/ip"):
+            try:
+                text = requests.get(service, proxies=proxies, timeout=(8, 8)).text.strip()
+                ipaddress.ip_address(text)
+                return text
+            except (requests.RequestException, ValueError):
+                continue
+        return ""
+
+    def refresh_exit_ip(self, reason: str = "") -> str:
+        """Resolve and log the exit IP of the active route (blocking; run in a thread)."""
+        url, mode = self.active_url, self.mode
+        ip = self._exit_ip_fn(url or None)
+        with self._lock:
+            if url == self.active_url:
+                self.exit_ip = ip
+        if ip:
+            log.info("[PROXY] IP KELUAR terdeteksi: %s | route=%s %s | %s", ip, mode, mask_proxy_url(url), reason)
+        else:
+            log.warning("[PROXY] IP keluar route %s tidak bisa dideteksi (%s)", self.describe(), reason)
+        return ip
+
+    def refresh_exit_ip_async(self, reason: str = "") -> None:
+        threading.Thread(target=self.refresh_exit_ip, args=(reason,), name="proxy-exit-ip", daemon=True).start()
+
+    def _probe(self, url: str | None, timeout: float | None = None) -> tuple[bool, str, float]:
+        return self._probe_fn(url, timeout or PROXY_TEST_TIMEOUT_SECONDS)
+
+    def _fetch_candidates(self) -> list[str]:
+        sources = [("ProxyScrape API v4", PROXYSCRAPE_API_URL)] + [
+            (f"mirror {index + 1}", url) for index, url in enumerate(PROXYSCRAPE_MIRROR_URLS)
+        ]
+        for label, url in sources:
+            try:
+                started = time.monotonic()
+                response = requests.get(url, timeout=20, headers={"Accept": "text/plain,application/json"})
+                if response.status_code != 200:
+                    log.warning("[PROXY] %s HTTP %s", label, response.status_code)
+                    continue
+                items = parse_proxy_list(response.text)
+                log.info("[PROXY] %s -> %d proxy dalam %.1fs", label, len(items), time.monotonic() - started)
+                if items:
+                    return items
+            except requests.RequestException as exc:
+                log.warning("[PROXY] %s gagal: %s", label, str(exc)[:160])
+        return []
+
+    # ------------------------------------------------------------- failover
+    def _usable(self, url: str) -> bool:
+        return self.blacklist.get(url, 0.0) <= time.monotonic() and url != self.static_url
+
+    def _home_candidates(self, exclude_current: bool) -> list[tuple[str, str | None]]:
+        now = time.monotonic()
+        rows: list[tuple[str, str | None]] = []
+        if self.static_url and now >= self.static_dead_until and not (exclude_current and self.mode == self.STATIC):
+            rows.append((self.STATIC, self.static_url))
+        if now >= self.direct_ban_until and not (exclude_current and self.mode == self.DIRECT):
+            rows.append((self.DIRECT, None))
+        return rows
+
+    def _try_home(self, exclude_current: bool, reason: str) -> bool:
+        for kind, url in self._home_candidates(exclude_current):
+            label = "DIRECT (IP Render)" if kind == self.DIRECT else f"proxy terkonfigurasi {mask_proxy_url(url)}"
+            log.info("[PROXY] STEP uji rute utama: %s", label)
+            ok, detail, latency = self._probe(url)
+            if ok:
+                self._switch(kind, url, reason, latency)
+                return True
+            log.info("[PROXY] rute %s belum bisa: %s", label, detail)
+            if "418" in detail or "451" in detail or "429" in detail:
+                with self._lock:
+                    if kind == self.DIRECT:
+                        self.direct_ban_until = time.monotonic() + (600.0 if "451" in detail else 300.0)
+                    else:
+                        self.static_dead_until = time.monotonic() + 300.0
+        return False
+
+    def _failover(self, reason: str) -> None:
+        started = time.monotonic()
+        log.info("[PROXY] ===== FAILOVER MULAI | alasan=%s | route sekarang=%s =====", reason, self.describe())
+        if self._try_home(exclude_current=True, reason=reason):
+            return
+        # AUTO pool: reuse validated entries first, otherwise refresh via ProxyScrape.
+        refreshed = False
+        for _ in range(4):
+            candidate = self._next_pool_entry()
+            if candidate is None:
+                if refreshed or time.monotonic() - self._last_fetch < PROXY_REFETCH_MIN_SECONDS and self._last_fetch:
+                    break
+                refreshed = True
+                self._refresh_pool()
+                candidate = self._next_pool_entry()
+                if candidate is None:
+                    break
+            url, latency = candidate
+            ok, detail, latency_now = self._probe(url)
+            if ok:
+                self._switch(self.AUTO, url, reason, latency_now or latency)
+                return
+            log.info("[PROXY] kandidat %s gagal uji ulang: %s", mask_proxy_url(url), detail)
+            with self._lock:
+                self.blacklist[url] = time.monotonic() + PROXY_BLACKLIST_SECONDS
+                self.pool = [item for item in self.pool if item[0] != url]
+        with self._lock:
+            self._retry_at = time.monotonic() + self._retry_backoff
+            wait = self._retry_backoff
+            self._retry_backoff = min(300.0, self._retry_backoff * 2)
+        log.error(
+            "[PROXY] ===== FAILOVER GAGAL setelah %.1fs: tidak ada rute Binance yang sehat. Coba lagi %.0fs lagi "
+            "(route tetap %s) =====", time.monotonic() - started, wait, self.describe(),
+        )
+        self._notify({"kind": "exhausted", "reason": reason, "retry_seconds": wait, "route": self.describe()})
+
+    def _next_pool_entry(self) -> tuple[str, float] | None:
+        with self._lock:
+            now = time.monotonic()
+            self.blacklist = {k: v for k, v in self.blacklist.items() if v > now}
+            for url, latency in self.pool:
+                if self._usable(url) and not (self.mode == self.AUTO and url == self.active_url):
+                    return url, latency
+        return None
+
+    def _refresh_pool(self) -> None:
+        self._last_fetch = time.monotonic()
+        log.info("[PROXY] STEP ambil daftar proxy dari ProxyScrape ...")
+        raw = self._fetch_fn()
+        with self._lock:
+            candidates = [url for url in raw if self._usable(url) and url != self.active_url]
+        if not candidates:
+            log.warning("[PROXY] daftar proxy kosong / semua sudah diblokir")
+            return
+        random.shuffle(candidates)
+        candidates = candidates[:PROXY_MAX_CANDIDATES]
+        log.info(
+            "[PROXY] STEP validasi %d kandidat ke Binance /fapi/v1/time (concurrency=%d, timeout=%.0fs, target=%d sehat)",
+            len(candidates), PROXY_TEST_CONCURRENCY, PROXY_TEST_TIMEOUT_SECONDS, PROXY_POOL_SIZE,
+        )
+        healthy: list[tuple[str, float]] = []
+        tested = failed = 0
+        executor = ThreadPoolExecutor(max_workers=PROXY_TEST_CONCURRENCY, thread_name_prefix="proxy-test")
+        try:
+            futures = {executor.submit(self._probe, url): url for url in candidates}
+            for future in as_completed(futures):
+                url = futures[future]
+                tested += 1
+                try:
+                    ok, detail, latency = future.result()
+                except Exception as exc:  # pragma: no cover - defensive
+                    ok, detail, latency = False, f"error {exc}", 0.0
+                if ok:
+                    healthy.append((url, latency))
+                    log.info("[PROXY] OK   %s | %.0f ms (%d/%d sehat)", mask_proxy_url(url), latency, len(healthy), PROXY_POOL_SIZE)
+                    if len(healthy) >= PROXY_POOL_SIZE:
+                        break
+                else:
+                    failed += 1
+                    if "Binance HTTP" in detail:
+                        log.info("[PROXY] BAN %s | %s", mask_proxy_url(url), detail)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        healthy.sort(key=lambda item: item[1])
+        with self._lock:
+            self.pool = healthy
+        log.info("[PROXY] validasi selesai | diuji=%d | gagal=%d | sehat=%d", tested, failed, len(healthy))
+
+    def _return_home(self) -> None:
+        with self._lock:
+            self._home_check_at = time.monotonic() + PROXY_HOME_CHECK_SECONDS
+        if not self._home_candidates(exclude_current=False):
+            return
+        log.info("[PROXY] cek apakah rute utama sudah pulih (route sekarang=%s)", self.describe())
+        self._try_home(exclude_current=False, reason="rute utama sudah pulih")
+
+    # ------------------------------------------------------------- switching
+    def _switch(self, kind: str, url: str | None, reason: str, latency_ms: float) -> None:
+        with self._lock:
+            old_egress, old_desc = self.egress_id, self.describe()
+            self.mode = kind
+            self.active_url = url or ""
+            if kind == self.DIRECT:
+                self.egress_id = self._direct_egress
+            elif kind == self.STATIC:
+                self.egress_id = self._static_egress
+            else:
+                parts = urlsplit(self.active_url)
+                self.egress_id = f"auto-proxy:{parts.hostname}:{parts.port or 0}"
+            self.generation += 1
+            self.switch_count += 1
+            self.fail_count = 0
+            self._needs_failover = False
+            self._retry_at = 0.0
+            self._retry_backoff = 60.0
+            self._home_check_at = time.monotonic() + PROXY_HOME_CHECK_SECONDS
+            self.last_switch_at = time.time()
+            new_egress, new_desc = self.egress_id, self.describe()
+            if kind == self.STATIC:
+                self.static_dead_until = 0.0
+            if kind == self.DIRECT:
+                self.direct_ban_until = 0.0
+        BINANCE_COOLDOWN.rebind(old_egress, new_egress)
+        old_ip = self.exit_ip
+        self.exit_ip = ""
+        new_ip = self.refresh_exit_ip(f"setelah switch ({reason})")
+        log.warning(
+            "[PROXY] ===== SWITCH EGRESS: %s  ->  %s | IP KELUAR BARU=%s (sebelumnya %s) | latency=%.0fms | alasan=%s "
+            "| pasang ke REST + WebSocket =====",
+            old_desc, new_desc, new_ip or "tidak terdeteksi", old_ip or "?", latency_ms, reason,
+        )
+        self._notify({
+            "kind": "switched", "reason": reason, "old": old_desc, "new": new_desc,
+            "mode": kind, "latency_ms": latency_ms, "generation": self.generation,
+            "exit_ip": new_ip, "old_ip": old_ip,
+        })
+
+    def _notify(self, info: dict[str, Any]) -> None:
+        loop, listener = self._loop, self._listener
+        if loop is None or listener is None or loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(listener(info), loop)
+        except Exception:
+            log.debug("[PROXY] listener gagal dijadwalkan", exc_info=True)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            now = time.monotonic()
+            return {
+                "enabled": self.enabled, "mode": self.mode, "route": mask_proxy_url(self.active_url),
+                "egress_id": self.egress_id, "pool": [mask_proxy_url(url) for url, _ in self.pool],
+                "blacklist": sum(1 for v in self.blacklist.values() if v > now),
+                "static_dead_s": max(0.0, self.static_dead_until - now),
+                "direct_ban_s": max(0.0, self.direct_ban_until - now),
+                "switches": self.switch_count, "exit_ip": self.exit_ip,
+            }
+
+
+PROXY_MANAGER = ProxyFailoverManager()
+
+
 class BinanceCooldownGate:
     """One IP-wide cooldown shared by public REST and signed Futures REST.
 
@@ -1057,6 +1610,9 @@ class BinanceCooldownGate:
         # Fresh-engine policy: cooldown is process/session memory only.
         # Do not load a previous process' IP ban marker on /try.
         self._state_path = BASE_DIR / "data" / "binance_cooldown_state.json"
+        # Cooldowns belong to one egress IP. When the proxy manager changes the
+        # route, the old IP's cooldown is parked here and the new IP starts clean.
+        self._parked: dict[str, tuple[float, str]] = {}
 
     def _restore_persisted_cooldown(self) -> None:
         """Restore a server IP ban and its historical time range."""
@@ -1065,11 +1621,11 @@ class BinanceCooldownGate:
             if not isinstance(payload, dict):
                 return
             saved_egress = str(payload.get("egress_id") or "").strip()
-            if not saved_egress or saved_egress != BINANCE_EGRESS_ID:
+            if not saved_egress or saved_egress != PROXY_MANAGER.egress_id:
                 log.info(
                     "[BINANCE] persisted cooldown diabaikan: egress berbeda/legacy "
                     "(saved=%s, current=%s).",
-                    saved_egress or "unknown", BINANCE_EGRESS_ID,
+                    saved_egress or "unknown", PROXY_MANAGER.egress_id,
                 )
                 return
             now_epoch = time.time()
@@ -1104,11 +1660,11 @@ class BinanceCooldownGate:
         if not isinstance(payload, dict):
             return
         saved_egress = str(payload.get("egress_id") or "").strip()
-        if not saved_egress or saved_egress != BINANCE_EGRESS_ID:
+        if not saved_egress or saved_egress != PROXY_MANAGER.egress_id:
             log.info(
                 "[BINANCE] cooldown snapshot eksternal diabaikan: egress berbeda/legacy "
                 "(saved=%s, current=%s).",
-                saved_egress or "unknown", BINANCE_EGRESS_ID,
+                saved_egress or "unknown", PROXY_MANAGER.egress_id,
             )
             return
         try:
@@ -1161,7 +1717,7 @@ class BinanceCooldownGate:
             if self._until > 0:
                 self._until_epoch = max(self._until_epoch, now_epoch + remaining)
             payload = {
-                "egress_id": BINANCE_EGRESS_ID,
+                "egress_id": PROXY_MANAGER.egress_id,
                 "started_epoch": self._started_epoch,
                 "until_epoch": self._until_epoch,
                 "ban_intervals": self._ban_intervals[-64:],
@@ -1174,6 +1730,22 @@ class BinanceCooldownGate:
             os.replace(temp, self._state_path)
         except Exception:
             log.warning("[BINANCE] gagal menyimpan cooldown marker lokal", exc_info=True)
+
+    def rebind(self, old_egress: str, new_egress: str) -> None:
+        """Park the old egress cooldown and load the new egress' (usually none)."""
+        if old_egress == new_egress:
+            return
+        with self._lock:
+            now = time.monotonic()
+            if self._until > now:
+                self._parked[old_egress] = (self._until, self._reason)
+            parked = self._parked.pop(new_egress, None)
+            if parked and parked[0] > now:
+                self._until, self._reason = parked
+                log.info("[PROXY] cooldown egress %s dipulihkan: %.0fs tersisa", new_egress, parked[0] - now)
+            else:
+                self._until, self._reason = 0.0, ""
+                log.info("[PROXY] cooldown Binance dikosongkan untuk egress baru %s (cooldown lama %s disimpan)", new_egress, old_egress)
 
     def remaining(self) -> float:
         with self._lock:
@@ -1407,8 +1979,6 @@ class BinanceREST:
         # Reuse TCP/TLS connections for sequential REST calls; request lock means
         # this session is never used concurrently by the public market-data client.
         self._session = requests.Session()
-        if BINANCE_REQUEST_PROXIES:
-            self._session.proxies.update(BINANCE_REQUEST_PROXIES)
         self._last_request_monotonic = 0.0
         self._rest_cooldown_until = 0.0
         # Bounded LRU and ephemeral-disk cache for repeated H4/D1 kline requests.
@@ -1559,6 +2129,7 @@ class BinanceREST:
                 def request() -> tuple[int, Any, dict[str, str], str]:
                     response = self._session.get(
                         f"{self.base_url}{path}", params=params,
+                        proxies=PROXY_MANAGER.request_proxies(),
                         timeout=HTTP_REQUEST_SECONDS,
                     )
                     try:
@@ -1570,6 +2141,7 @@ class BinanceREST:
                 try:
                     status, payload, headers, body_text = await asyncio.to_thread(request)
                 except requests.RequestException as exc:
+                    PROXY_MANAGER.observe_transport_error(str(exc))
                     raise BinanceAPIError(
                         f"Transport error Binance REST {path}: {exc}",
                         status_code=None, code=None, endpoint=path,
@@ -1597,6 +2169,7 @@ class BinanceREST:
                     cooldown = max(1.0, server_seconds + rate_limit_safety(status))
                     self._rest_cooldown_until = max(self._rest_cooldown_until, time.monotonic() + cooldown)
                     BINANCE_COOLDOWN.extend(cooldown, f"HTTP {status} {path}: {message}")
+                    PROXY_MANAGER.observe_http(status, cooldown)
                     raise BinanceRateLimitError(
                         f"Binance REST {path}: HTTP {status}, code={code}, {message}",
                         status_code=status or 429,
@@ -1608,6 +2181,7 @@ class BinanceREST:
                     )
 
         # `code` and `message` are set for every HTTP response above.
+        PROXY_MANAGER.observe_http(status)
         if status >= 400:
             raise BinanceAPIError(
                 f"Binance REST {path}: HTTP {status}: {message}",
@@ -2558,7 +3132,7 @@ class BinanceRealClient:
                 response = requests.request(
                     method.upper(),
                     f"{self.base_url}{path}",
-                    proxies=BINANCE_REQUEST_PROXIES,
+                    proxies=PROXY_MANAGER.request_proxies(),
                     **kwargs,
                 )
             finally:
@@ -2579,6 +3153,7 @@ class BinanceRealClient:
                 try:
                     response = await asyncio.to_thread(request_once)
                 except requests.RequestException as exc:
+                    PROXY_MANAGER.observe_transport_error(str(exc))
                     raise BinanceAPIError(
                         f"Transport error Binance: {exc}", endpoint=path,
                     ) from exc
@@ -2605,6 +3180,7 @@ class BinanceRealClient:
                     bot_seconds = max(1.0, server_seconds + rate_limit_safety(response.status_code))
                     self.apply_cooldown(server_seconds, bot_seconds)
                     BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {msg}")
+                    PROXY_MANAGER.observe_http(response.status_code, bot_seconds)
                     raise BinanceRateLimitError(
                         msg,
                         status_code=response.status_code or 429,
@@ -2615,6 +3191,7 @@ class BinanceRealClient:
                         retry_after_known=retry_known,
                     )
 
+        PROXY_MANAGER.observe_http(response.status_code)
         if response.status_code >= 400:
             code, msg = self._extract_binance_error(response)
             if code == -1021 and retry_timestamp_error:
@@ -2757,13 +3334,14 @@ class BinanceRealClient:
                         method.upper(), f"{self.base_url}{path}",
                         headers={"X-MBX-APIKEY": self.api_key, "Accept": "application/json"},
                         params=params or None,
-                        proxies=BINANCE_REQUEST_PROXIES,
+                        proxies=PROXY_MANAGER.request_proxies(),
                         timeout=HTTP_REQUEST_SECONDS,
                     )
 
                 try:
                     response = await asyncio.to_thread(request_once)
                 except requests.RequestException as exc:
+                    PROXY_MANAGER.observe_transport_error(str(exc))
                     raise BinanceAPIError(f"User stream transport error: {exc}", endpoint=path) from exc
                 BINANCE_COOLDOWN.record_request()
 
@@ -2784,11 +3362,13 @@ class BinanceRealClient:
                     bot_seconds = max(1.0, server_seconds + rate_limit_safety(response.status_code))
                     self.apply_cooldown(server_seconds, bot_seconds)
                     BINANCE_COOLDOWN.extend(bot_seconds, f"HTTP {response.status_code} {path}: {message}")
+                    PROXY_MANAGER.observe_http(response.status_code, bot_seconds)
                     raise BinanceRateLimitError(
                         message, status_code=response.status_code or 429, code=code, endpoint=path,
                         server_cooldown_seconds=server_seconds, bot_cooldown_seconds=bot_seconds,
                         retry_after_known=retry_known,
                     )
+        PROXY_MANAGER.observe_http(response.status_code)
         if response.status_code >= 400:
             code, message = self._extract_binance_error(response)
             raise BinanceAPIError(message, status_code=response.status_code, code=code, endpoint=path)
@@ -3524,7 +4104,7 @@ class BinanceWebSocket:
 
                 async with ws_connect(
                     BINANCE_WS_BASE,
-                    **BINANCE_WS_PROXY_KWARGS,
+                    **PROXY_MANAGER.ws_kwargs(),
                     # Binance sends server ping frames; websockets automatically replies.
                     # Disable client keepalive to avoid client/server ping races that can
                     # produce a misleading 1011 keepalive timeout during command sends.
@@ -3619,6 +4199,7 @@ class BinanceWebSocket:
             except Exception as exc:
                 if self._stop.is_set():
                     break
+                PROXY_MANAGER.observe_transport_error(f"WS market: {exc}")
 
                 log.exception(
                     "Error Binance WebSocket: %s",
@@ -3764,7 +4345,7 @@ class BinanceUserDataWebSocket:
             "params": {"apiKey": self.real.api_key},
         }
         async with ws_connect(
-            BINANCE_WS_API_BASE, **BINANCE_WS_PROXY_KWARGS,
+            BINANCE_WS_API_BASE, **PROXY_MANAGER.ws_kwargs(),
             ping_interval=None, ping_timeout=None, close_timeout=3, max_queue=16,
         ) as ws:
             await ws.send(json.dumps(payload))
@@ -3834,7 +4415,7 @@ class BinanceUserDataWebSocket:
                 url = f"{BINANCE_PRIVATE_WS_BASE}?{query}"
                 log.info("[USER WS] connecting private order stream")
                 async with ws_connect(
-                    url, **BINANCE_WS_PROXY_KWARGS,
+                    url, **PROXY_MANAGER.ws_kwargs(),
                     ping_interval=None, ping_timeout=None, close_timeout=3, max_queue=2048,
                 ) as ws:
                     self._ws = ws
@@ -3880,9 +4461,11 @@ class BinanceUserDataWebSocket:
                 log.info("[USER WS] listenKey operation ditahan rate governor | remaining=%.0fs | %s", BINANCE_COOLDOWN.remaining(), exc)
             except (ConnectionClosed, asyncio.TimeoutError, ConnectionError, OSError) as exc:
                 if not self._stop.is_set():
+                    PROXY_MANAGER.observe_transport_error(f"WS user: {exc}")
                     log.warning("[USER WS] disconnected: %s", exc)
             except Exception as exc:
                 if not self._stop.is_set():
+                    PROXY_MANAGER.observe_transport_error(f"WS user: {exc}")
                     log.exception("[USER WS] unexpected error: %s", exc)
             finally:
                 self.connected = False
@@ -4795,6 +5378,50 @@ class TradingEngine:
         await self._remove_deferred_command(str(item.get("command_id") or ""))
         await self.reply(f"✅ Perintah tertunda selesai diproses: {command_text}")
 
+    async def _on_egress_changed(self, info: dict[str, Any]) -> None:
+        """Apply a proxy-manager decision: reset local cooldown copies, reconnect sockets, tell Telegram."""
+        try:
+            if info.get("kind") == "switched":
+                if BINANCE_COOLDOWN.remaining() <= 0:
+                    # The new egress is clean: drop per-client copies of the old IP's cooldown.
+                    self.rest._rest_cooldown_until = 0.0
+                    self.real._cooldown_until = 0.0
+                    self.real._server_cooldown_until = 0.0
+                    self.real._early_cooldown_until = 0.0
+                for label, sock in (("market", self.ws), ("user", self.user_ws)):
+                    raw_ws = getattr(sock, "_ws", None)
+                    if raw_ws is not None:
+                        try:
+                            await raw_ws.close()
+                            log.info("[PROXY] WebSocket %s ditutup agar tersambung ulang lewat route baru", label)
+                        except Exception:
+                            log.debug("[PROXY] gagal menutup WS %s", label, exc_info=True)
+                if info.get("mode") == PROXY_MANAGER.AUTO:
+                    risk = "\nCatatan: proxy gratis tidak dijamin stabil; bot berotasi otomatis bila gagal."
+                else:
+                    risk = ""
+                await self.reply(
+                    "╔══ BINANCE / EGRESS SWITCH ══╗\n"
+                    f"DARI      : {info.get('old')}\n"
+                    f"KE        : {info.get('new')}\n"
+                    f"IP KELUAR : {info.get('exit_ip') or 'tidak terdeteksi'}  <- whitelist IP ini di Binance API key\n"
+                    f"IP LAMA   : {info.get('old_ip') or '?'}\n"
+                    f"LATENSI   : {float(info.get('latency_ms') or 0):.0f} ms (uji /fapi/v1/time OK)\n"
+                    f"ALASAN    : {str(info.get('reason'))[:300]}\n"
+                    "TERPASANG : REST + market WS + user WS (reconnect otomatis)"
+                    f"{risk}"
+                )
+            elif info.get("kind") == "exhausted":
+                await self.reply(
+                    "╔══ BINANCE / EGRESS FAILOVER GAGAL ══╗\n"
+                    f"ALASAN    : {str(info.get('reason'))[:300]}\n"
+                    f"ROUTE     : {info.get('route')}\n"
+                    f"RETRY     : {float(info.get('retry_seconds') or 0):.0f}s lagi\n"
+                    "Tidak ada proxy sehat yang lolos uji ke Binance. Order LIMIT yang sudah ada tetap aman di Binance."
+                )
+        except Exception:
+            log.exception("[PROXY] gagal memproses perubahan egress")
+
     def _binance_cooldown_remaining(self) -> float:
         return max(
             BINANCE_COOLDOWN.remaining(),
@@ -5087,8 +5714,16 @@ class TradingEngine:
         self._running = True
         log.info(
             "[BINANCE] outbound route configured | egress_id=%s | proxy=%s (REST + WebSocket)",
-            BINANCE_EGRESS_ID, "ON" if BINANCE_PROXY_URL else "OFF",
+            PROXY_MANAGER.egress_id, "ON" if PROXY_MANAGER.active_url else "OFF",
         )
+        log.info(
+            "[PROXY] auto-failover=%s | route=%s | home=%s | sumber=ProxyScrape | pool=%d | uji<=%d kandidat, timeout=%.0fs | "
+            "urutan: DIRECT/Render -> BINANCE_PROXY_URL -> pool ProxyScrape (divalidasi ke Binance sebelum dipakai)",
+            "ON" if PROXY_MANAGER.enabled else "OFF", PROXY_MANAGER.describe(), PROXY_MANAGER.home_mode,
+            PROXY_POOL_SIZE, PROXY_MAX_CANDIDATES, PROXY_TEST_TIMEOUT_SECONDS,
+        )
+        PROXY_MANAGER.bind(asyncio.get_running_loop(), self._on_egress_changed)
+        PROXY_MANAGER.refresh_exit_ip_async("startup")
         self.real_mode = False
         self.scan_enabled = False
         self._scan_trigger_now = False
@@ -5213,6 +5848,7 @@ class TradingEngine:
         if not self._running:
             return
         self._running = False
+        PROXY_MANAGER.bind(None, None)
         self.scan_enabled = False
         self._scan_trigger_now = False
         self.scan_schedule_slots = ()
@@ -8139,6 +8775,7 @@ class TradingEngine:
         """Serialized recovery loop: never poll REST during an IP cooldown."""
         while self._running:
             try:
+                PROXY_MANAGER.tick()  # non-blocking; worker thread does fetch/validate/switch
                 # Local-only guard runs even while Binance REST is rate-limited.
                 await self._autostop_check()
                 cooldown = self._binance_cooldown_remaining()
