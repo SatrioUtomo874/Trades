@@ -114,12 +114,13 @@
     "M15:BLURUSDT": 1794465900000,
     "M15:BMTUSDT": 1794465900000,
     "M15:BNBUSDT": 1794465900000,
-    "M15:BNTUSDT": 1794465900000
+    "M15:BNTUSDT": 1794465900000,
+    "M15:BOMEUSDT": 1794465900000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 99,
+  "scan_resume_cursor": 100,
   "scan_resume_boundary_ms": 1794465900000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-12T06:49:08.119027+00:00"
+  "updated_at": "2026-11-12T06:49:10.651889+00:00"
 }
