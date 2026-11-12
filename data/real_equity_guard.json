@@ -3,9 +3,9 @@
   "real_equity_baseline": "8.59844609",
   "realized_since_baseline": "1.106339491",
   "autostop_percent": "55",
-  "autostop_peak_equity": "12.0757554979793",
-  "autostop_last_equity": "12.0652179009793",
+  "autostop_peak_equity": "12.0835672409793",
+  "autostop_last_equity": "12.0619257309793",
   "autostop_triggered": false,
   "autostop_source": "REAL",
-  "updated_at": "2026-11-12T06:56:19.992241+00:00"
+  "updated_at": "2026-11-12T06:57:25.556128+00:00"
 }
