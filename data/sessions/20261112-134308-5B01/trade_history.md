@@ -24,3 +24,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-12T09:48:42.081621+00:00 | Reason: PREFLIGHT_REJECTED
+## MEGAUSDT SHORT — CANCELED
+- Trade ID: `MEGAUSDT-20261112-171751-77B4CF`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-12T10:18:05.938847+00:00 | Reason: PREFLIGHT_REJECTED
