@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T14:30:50.730297+00:00",
+  "updated_at": "2026-11-12T14:31:04.553678+00:00",
   "active_trades": [
     {
       "trade_id": "OGUSDT-20261112-200405-38167D",
@@ -804,11 +804,11 @@
       "liquidity_pool_price": null,
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002109745568,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261112-213018-AD87E3",
       "tp_client_algo_id": "VTTPSDT-20261112-213018-AD87E3",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
@@ -869,7 +869,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "456184250:NEW:NEW:0:0",
+      "last_ws_event_key": "456184250:TRADE:FILLED:153:41132050",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
