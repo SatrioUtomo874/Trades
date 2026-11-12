@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T09:20:42.138380+00:00",
+  "updated_at": "2026-11-12T09:20:45.540967+00:00",
   "active_trades": [
     {
       "trade_id": "BUSDT-20261112-134406-AD32FB",
@@ -1031,7 +1031,7 @@
       "ema_filter_value": "2.104163640619641",
       "ema_filter_slow_value": "2.1125820194871143",
       "ema_filter_passed": true,
-      "ema_exit_state": "UNINITIALIZED",
+      "ema_exit_state": "INITIALIZING",
       "ema_exit_last_open_ms": 0,
       "ema_exit_last_fast": null,
       "ema_exit_last_slow": null,
