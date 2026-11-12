@@ -1,11 +1,11 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T12:54:23.440986+00:00",
+  "updated_at": "2026-11-12T13:04:05.569902+00:00",
   "active_trades": [
     {
-      "trade_id": "TRXUSDT-20261112-195423-8CBA9A",
-      "session_id": "20261112-195358-E63F",
+      "trade_id": "TRXUSDT-20261112-200405-2024B1",
+      "session_id": "20261112-200120-DEE0",
       "pair": "TRXUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -71,7 +71,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "17",
-      "margin_usdt": "0.537268",
+      "margin_usdt": "0.53727351",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.38288",
@@ -101,8 +101,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "OGUSDT-20261112-195423-E7F664",
-      "session_id": "20261112-195358-E63F",
+      "trade_id": "OGUSDT-20261112-200405-38167D",
+      "session_id": "20261112-200120-DEE0",
       "pair": "OGUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -168,7 +168,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "2.6",
-      "margin_usdt": "0.54081409",
+      "margin_usdt": "0.53893017",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.4288",
@@ -198,8 +198,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "SUNUSDT-20261112-195423-F6FD0F",
-      "session_id": "20261112-195358-E63F",
+      "trade_id": "SUNUSDT-20261112-200405-AD109E",
+      "session_id": "20261112-200120-DEE0",
       "pair": "SUNUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -265,7 +265,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "360",
-      "margin_usdt": "0.548766",
+      "margin_usdt": "0.548802",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.49612",
@@ -295,8 +295,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "AWEUSDT-20261112-195423-1E2EF3",
-      "session_id": "20261112-195358-E63F",
+      "trade_id": "AWEUSDT-20261112-200405-B764C9",
+      "session_id": "20261112-200120-DEE0",
       "pair": "AWEUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -362,7 +362,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "90",
-      "margin_usdt": "0.55135368",
+      "margin_usdt": "0.54931905",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5224",
@@ -392,8 +392,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "SKRUSDT-20261112-195423-69B8CE",
-      "session_id": "20261112-195358-E63F",
+      "trade_id": "SKRUSDT-20261112-200405-A1E017",
+      "session_id": "20261112-200120-DEE0",
       "pair": "SKRUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -459,7 +459,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "506",
-      "margin_usdt": "0.54214004",
+      "margin_usdt": "0.54088668",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.498702",
@@ -489,8 +489,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "JCTUSDT-20261112-195423-037697",
-      "session_id": "20261112-195358-E63F",
+      "trade_id": "JCTUSDT-20261112-200405-BDE5DA",
+      "session_id": "20261112-200120-DEE0",
       "pair": "JCTUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -556,7 +556,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "897",
-      "margin_usdt": "0.2794155",
+      "margin_usdt": "0.28146156",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.4940559999793",
@@ -586,8 +586,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "VELVETUSDT-20261112-195423-591D0F",
-      "session_id": "20261112-195358-E63F",
+      "trade_id": "VELVETUSDT-20261112-200405-7684A9",
+      "session_id": "20261112-200120-DEE0",
       "pair": "VELVETUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -653,7 +653,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "117",
-      "margin_usdt": "0.537732",
+      "margin_usdt": "0.53796601",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.50368",
@@ -683,8 +683,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the signal; no exchange order exists while waiting."
     },
     {
-      "trade_id": "GRASSUSDT-20261112-195423-046352",
-      "session_id": "20261112-195358-E63F",
+      "trade_id": "GRASSUSDT-20261112-200405-A085B4",
+      "session_id": "20261112-200120-DEE0",
       "pair": "GRASSUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -750,7 +750,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "12.1",
-      "margin_usdt": "0.53704298",
+      "margin_usdt": "0.538571",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.50913",
