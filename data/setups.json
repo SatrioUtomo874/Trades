@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T13:16:21.550905+00:00",
+  "updated_at": "2026-11-12T13:16:24.935601+00:00",
   "active_trades": [
     {
       "trade_id": "TRXUSDT-20261112-200405-2024B1",
@@ -822,7 +822,7 @@
       "ema_filter_value": "0.004274551082538685",
       "ema_filter_slow_value": "0.004316548917315534",
       "ema_filter_passed": true,
-      "ema_exit_state": "UNINITIALIZED",
+      "ema_exit_state": "INITIALIZING",
       "ema_exit_last_open_ms": 0,
       "ema_exit_last_fast": null,
       "ema_exit_last_slow": null,
