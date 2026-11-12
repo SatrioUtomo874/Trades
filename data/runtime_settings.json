@@ -166,8 +166,8 @@
     "M15:CYSUSDT": 1794474900000,
     "M15:DASHUSDT": 1794474900000,
     "M15:DATAIPUSDT": 1794474900000,
-    "M15:DEEPUSDT": 1794474000000,
-    "M15:DEXEUSDT": 1794474000000,
+    "M15:DEEPUSDT": 1794474900000,
+    "M15:DEXEUSDT": 1794474900000,
     "M15:DIAUSDT": 1794474000000,
     "M15:DODOXUSDT": 1794474000000,
     "M15:DOGEUSDT": 1794474000000,
@@ -539,8 +539,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 150,
+  "scan_resume_cursor": 152,
   "scan_resume_boundary_ms": 1794474900000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-12T09:16:09.736035+00:00"
+  "updated_at": "2026-11-12T09:16:15.140227+00:00"
 }
