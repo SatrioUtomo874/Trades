@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T22:50:33.783122+00:00",
+  "updated_at": "2026-11-12T22:50:43.636477+00:00",
   "active_trades": [
     {
       "trade_id": "SUNUSDT-20261112-200405-AD109E",
@@ -965,7 +965,7 @@
       "target_notional": "10",
       "actual_notional": "0.2684538",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 1562282273,
       "entry_client_order_id": "VT04b151b774c7fb94f7bfe5942060",
