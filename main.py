@@ -1072,6 +1072,9 @@ PROXYSCRAPE_MIRROR_URLS = tuple(
 PROXY_POOL_SIZE = int(_env_number("PROXY_POOL_SIZE", 3, 1, 10))
 PROXY_MAX_CANDIDATES = int(_env_number("PROXY_MAX_CANDIDATES", 400, 10, 3000))
 PROXY_TEST_TIMEOUT_SECONDS = _env_number("PROXY_TEST_TIMEOUT_SECONDS", 6.0, 2.0, 30.0)
+PROXY_HEALTH_SAMPLES = int(_env_number("PROXY_HEALTH_SAMPLES", 3, 1, 5))
+PROXY_HEALTH_MAX_LATENCY_MS = _env_number("PROXY_HEALTH_MAX_LATENCY_MS", 3000.0, 250.0, 30000.0)
+PROXY_PREFLIGHT_MAX_AUTO_SWITCHES = int(_env_number("PROXY_PREFLIGHT_MAX_AUTO_SWITCHES", 6, 1, 20))
 PROXY_TEST_CONCURRENCY = int(_env_number("PROXY_TEST_CONCURRENCY", 40, 1, 150))
 PROXY_FAIL_THRESHOLD = int(_env_number("PROXY_FAIL_THRESHOLD", 3, 1, 20))
 PROXY_BLACKLIST_SECONDS = _env_number("PROXY_BLACKLIST_SECONDS", 1800.0, 60.0, 86400.0)
@@ -1386,7 +1389,56 @@ class ProxyFailoverManager:
         threading.Thread(target=self.refresh_exit_ip, args=(reason,), name="proxy-exit-ip", daemon=True).start()
 
     def _probe(self, url: str | None, timeout: float | None = None) -> tuple[bool, str, float]:
-        return self._probe_fn(url, timeout or PROXY_TEST_TIMEOUT_SECONDS)
+        """Require repeated fast Binance responses, not a one-off lucky success."""
+        request_timeout = timeout if timeout is not None else PROXY_TEST_TIMEOUT_SECONDS
+        worst_latency = 0.0
+        for sample in range(1, PROXY_HEALTH_SAMPLES + 1):
+            ok, detail, latency = self._probe_fn(url, request_timeout)
+            if not ok:
+                return False, f"sampel {sample}/{PROXY_HEALTH_SAMPLES}: {detail}", latency
+            worst_latency = max(worst_latency, float(latency or 0.0))
+            if latency and latency > PROXY_HEALTH_MAX_LATENCY_MS:
+                return (
+                    False,
+                    f"latensi terlalu tinggi {latency:.0f} ms "
+                    f"> batas {PROXY_HEALTH_MAX_LATENCY_MS:.0f} ms",
+                    latency,
+                )
+            if sample < PROXY_HEALTH_SAMPLES:
+                time.sleep(0.15)
+        return True, f"OK {PROXY_HEALTH_SAMPLES}x; max {worst_latency:.0f} ms", worst_latency
+
+    def reject_active_route(self, reason: str, *, ttl_seconds: float = 1800.0) -> bool:
+        """Quarantine the active egress and immediately start trying another route."""
+        if not self.enabled:
+            return False
+        now = time.monotonic()
+        ttl = max(60.0, float(ttl_seconds))
+        with self._lock:
+            mode, url = self.mode, self.active_url
+            if mode == self.DIRECT:
+                self.direct_ban_until = max(self.direct_ban_until, now + ttl)
+            elif mode == self.STATIC:
+                self.static_dead_until = max(self.static_dead_until, now + ttl)
+            elif url:
+                self.blacklist[url] = max(self.blacklist.get(url, 0.0), now + ttl)
+                self.pool = [item for item in self.pool if item[0] != url]
+        log.warning(
+            "[PROXY] route ditolak preflight | route=%s | quarantine=%.0fs | alasan=%s",
+            self.describe(), ttl, str(reason)[:220],
+        )
+        self._schedule(reason)
+        return True
+
+    def mark_active_route_healthy(self) -> None:
+        """Clear a prior quarantine after an explicit successful preflight."""
+        with self._lock:
+            if self.mode == self.DIRECT:
+                self.direct_ban_until = 0.0
+            elif self.mode == self.STATIC:
+                self.static_dead_until = 0.0
+            elif self.active_url:
+                self.blacklist.pop(self.active_url, None)
 
     def _fetch_candidates(self) -> list[str]:
         sources = [("ProxyScrape API v4", PROXYSCRAPE_API_URL)] + [
@@ -1429,12 +1481,18 @@ class ProxyFailoverManager:
                 self._switch(kind, url, reason, latency)
                 return True
             log.info("[PROXY] rute %s belum bisa: %s", label, detail)
-            if "418" in detail or "451" in detail or "429" in detail:
-                with self._lock:
-                    if kind == self.DIRECT:
-                        self.direct_ban_until = time.monotonic() + (600.0 if "451" in detail else 300.0)
-                    else:
-                        self.static_dead_until = time.monotonic() + 300.0
+            with self._lock:
+                retry_ttl = 600.0
+                if "418" in detail:
+                    retry_ttl = 300.0
+                elif "451" in detail:
+                    retry_ttl = 1800.0
+                elif "429" in detail:
+                    retry_ttl = 300.0
+                if kind == self.DIRECT:
+                    self.direct_ban_until = max(self.direct_ban_until, time.monotonic() + retry_ttl)
+                else:
+                    self.static_dead_until = max(self.static_dead_until, time.monotonic() + retry_ttl)
         return False
 
     def _failover(self, reason: str) -> None:
@@ -4977,6 +5035,14 @@ class TradingEngine:
         # Remember denied egress routes for this process so maintenance does not
         # hammer every active position with the same invalid-IP/permission check.
         self._real_ip_permission_blocked_routes: set[str] = set()
+        # One read-only signed Futures-account preflight per active egress route.
+        # It detects both unusable proxy paths and API-key/IP permission failures
+        # before the user enables REAL; it never places a test order.
+        self._real_egress_preflight_lock = asyncio.Lock()
+        self._real_egress_preflight_status: dict[str, str] = {}
+        self._real_egress_preflight_task: asyncio.Task | None = None
+        self._real_egress_preflight_rejections = 0
+        self._real_egress_preflight_exhausted_notice = False
 
     # ----------------------- Telegram and persistence --------------------
     async def reply(self, message: str) -> None:
@@ -5429,18 +5495,23 @@ class TradingEngine:
                     risk = "\nCatatan: proxy gratis tidak dijamin stabil; bot berotasi otomatis bila gagal."
                 else:
                     risk = ""
-                await self.reply(
-                    "╔══ BINANCE / EGRESS SWITCH ══╗\n"
-                    f"DARI      : {info.get('old')}\n"
-                    f"KE        : {info.get('new')}\n"
-                    f"IP KELUAR : {info.get('exit_ip') or 'tidak terdeteksi'}  <- whitelist IP ini di Binance API key\n"
-                    f"IP LAMA   : {info.get('old_ip') or '?'}\n"
-                    f"LATENSI   : {float(info.get('latency_ms') or 0):.0f} ms (uji /fapi/v1/time OK)\n"
-                    f"ALASAN    : {str(info.get('reason'))[:300]}\n"
-                    "TERPASANG : REST + market WS + user WS (reconnect otomatis)\n"
-                    "SCANNER   : ⛔ OFF — IP berganti. Whitelist IP baru bila perlu, lalu kirim /scan on"
-                    f"{risk}"
-                )
+                preflight_switch = str(info.get("reason") or "").startswith("REAL PREFLIGHT:")
+                if preflight_switch:
+                    log.info("[REAL PREFLIGHT] route diganti; pemeriksaan izin akan dilanjutkan pada route baru")
+                else:
+                    await self.reply(
+                        "╔══ BINANCE / EGRESS SWITCH ══╗\n"
+                        f"DARI      : {info.get('old')}\n"
+                        f"KE        : {info.get('new')}\n"
+                        f"IP KELUAR : {info.get('exit_ip') or 'tidak terdeteksi'}  <- whitelist IP ini di Binance API key\n"
+                        f"IP LAMA   : {info.get('old_ip') or '?'}\n"
+                        f"LATENSI   : {float(info.get('latency_ms') or 0):.0f} ms (uji stabil Binance OK)\n"
+                        f"ALASAN    : {str(info.get('reason'))[:300]}\n"
+                        "TERPASANG : REST + market WS + user WS (reconnect otomatis)\n"
+                        "SCANNER   : ⛔ OFF — IP berganti. Whitelist IP baru bila perlu, lalu kirim /scan on"
+                        f"{risk}"
+                    )
+                self._schedule_real_egress_preflight("egress switch")
             elif info.get("kind") == "exhausted":
                 await self.reply(
                     "╔══ BINANCE / EGRESS FAILOVER GAGAL ══╗\n"
@@ -5511,6 +5582,206 @@ class TradingEngine:
             for trade in self.active_trades.values():
                 if trade.real_enabled and trade.status in {"PENDING", "FILLED"}:
                     trade.last_real_check_monotonic = 0.0
+
+    def _schedule_real_egress_preflight(self, reason: str) -> None:
+        """Queue a background, read-only Futures permission check for this route."""
+        if not self._running or not self.real.configured or not REAL_EXECUTION_ENABLED:
+            return
+        identity, _exit_ip, _route = self._real_permission_route_identity()
+        if self._real_egress_preflight_status.get(identity) in {"READY", "TESTING"}:
+            return
+        try:
+            task = asyncio.create_task(
+                self._run_real_egress_preflight(reason),
+                name="real-egress-preflight",
+            )
+            self._real_egress_preflight_task = task
+        except RuntimeError:
+            log.debug("[REAL PREFLIGHT] event loop belum tersedia")
+
+    async def _run_real_egress_preflight(self, reason: str, *, force: bool = False) -> bool:
+        """Check proxy quality and signed Futures account access without placing orders."""
+        if not self.real.configured or not REAL_EXECUTION_ENABLED:
+            return False
+        async with self._real_egress_preflight_lock:
+            identity, exit_ip, route = self._real_permission_route_identity()
+            status = self._real_egress_preflight_status.get(identity)
+            if status == "READY" and not force:
+                return True
+            if status == "TESTING" and not force:
+                return False
+            cooldown = self._binance_cooldown_remaining()
+            if cooldown > 0:
+                self._real_egress_preflight_status[identity] = "RATE_LIMITED"
+                log.info(
+                    "[REAL PREFLIGHT] ditunda; Binance cooldown %.0fs masih aktif | route=%s",
+                    cooldown, route,
+                )
+                return False
+            self._real_egress_preflight_status[identity] = "TESTING"
+            route_url = PROXY_MANAGER.active_url or None
+            log.info(
+                "[REAL PREFLIGHT] mulai | route=%s | exit_ip=%s | alasan=%s",
+                route, exit_ip or "belum terdeteksi", reason,
+            )
+
+            # First prove that the active route can reach Binance repeatedly and
+            # quickly. One lucky HTTP 200 is not enough to admit a proxy.
+            try:
+                ok, detail, latency = await asyncio.to_thread(PROXY_MANAGER._probe, route_url)
+            except Exception as exc:
+                ok, detail, latency = False, f"probe error {type(exc).__name__}: {exc}", 0.0
+            current_identity, current_ip, current_route = self._real_permission_route_identity()
+            if current_identity != identity:
+                log.info("[REAL PREFLIGHT] route berubah saat probe; hasil lama diabaikan")
+                return False
+            if not ok:
+                if "429" in str(detail):
+                    self._real_egress_preflight_status[identity] = "RATE_LIMITED"
+                    log.warning("[REAL PREFLIGHT] Binance rate-limit saat menguji route; route tidak dirotasi: %s", detail)
+                    return False
+                self._real_egress_preflight_status[identity] = "NETWORK_REJECTED"
+                self._real_egress_preflight_rejections += 1
+                log.warning(
+                    "[REAL PREFLIGHT] route tidak lolos | route=%s | ip=%s | detail=%s",
+                    current_route, current_ip or "?", detail,
+                )
+                if (
+                    PROXY_MANAGER.enabled
+                    and self._real_egress_preflight_rejections < PROXY_PREFLIGHT_MAX_AUTO_SWITCHES
+                ):
+                    PROXY_MANAGER.reject_active_route(
+                        f"REAL PREFLIGHT: koneksi/latensi tidak layak ({detail})",
+                        ttl_seconds=600.0,
+                    )
+                else:
+                    self._notify_real_preflight_exhausted(current_ip, current_route, detail)
+                return False
+
+            try:
+                # One public time sample refreshes signature timestamp, then one
+                # signed read-only account request verifies key/IP/Futures access.
+                await self.real.sync_server_time(force=True, samples=1)
+                await self.real.get_account_info()
+                await self.real.get_account_config()
+                current_identity, current_ip, current_route = self._real_permission_route_identity()
+                if current_identity != identity:
+                    log.info("[REAL PREFLIGHT] route berubah saat tes akun; hasil lama diabaikan")
+                    return False
+                self._real_egress_preflight_status[identity] = "READY"
+                self._real_ip_permission_blocked_routes.discard(identity)
+                self._real_egress_preflight_rejections = 0
+                self._real_egress_preflight_exhausted_notice = False
+                PROXY_MANAGER.mark_active_route_healthy()
+                log.info(
+                    "[REAL PREFLIGHT] READY | route=%s | exit_ip=%s | latency_max=%.0fms | signed Futures account OK",
+                    current_route, current_ip or "?", latency,
+                )
+                await self.reply(
+                    "╔══ REAL PREFLIGHT / EGRESS READY ══╗\n"
+                    f"EXIT IP    : {current_ip or 'tidak terdeteksi'}\n"
+                    f"ROUTE      : {current_route}\n"
+                    f"LATENSI    : maks. {latency:.0f} ms · {PROXY_HEALTH_SAMPLES} tes Binance OK\n"
+                    "API FUTURES: signed account + account config OK\n"
+                    "STATUS     : IP/key lolos pemeriksaan awal; REAL masih OFF.\n"
+                    "Tes ini hanya membaca akun, tidak mengirim order."
+                )
+                return True
+            except BinanceRateLimitError as exc:
+                self._real_egress_preflight_status[identity] = "RATE_LIMITED"
+                log.warning("[REAL PREFLIGHT] ditunda rate limit: %s", exc)
+                return False
+            except BinanceAPIError as exc:
+                current_identity, current_ip, current_route = self._real_permission_route_identity()
+                if current_identity != identity:
+                    return False
+                if exc.code == -2015 or exc.status_code == 401:
+                    self._real_egress_preflight_status[identity] = "PERMISSION_REJECTED"
+                    self._real_ip_permission_blocked_routes.add(identity)
+                    self._real_egress_preflight_rejections += 1
+                    detail = str(exc)
+                    log.warning(
+                        "[REAL PREFLIGHT] Binance menolak API key/IP | ip=%s | route=%s | %s",
+                        current_ip or "?", current_route, detail,
+                    )
+                    if (
+                        PROXY_MANAGER.enabled
+                        and self._real_egress_preflight_rejections < PROXY_PREFLIGHT_MAX_AUTO_SWITCHES
+                    ):
+                        PROXY_MANAGER.reject_active_route(
+                            f"REAL PREFLIGHT: Binance -2015 / API-key-IP permission ditolak ({detail[:160]})",
+                            ttl_seconds=6 * 3600.0,
+                        )
+                    else:
+                        self._notify_real_preflight_exhausted(
+                            current_ip, current_route,
+                            "Binance menolak API key/IP (-2015). Tidak ada route lain yang tersisa untuk diuji.",
+                        )
+                    return False
+                error_text = str(exc).lower()
+                if any(marker in error_text for marker in (
+                    "transport error", "connection reset", "connection aborted",
+                    "connecttimeout", "readtimeout", "proxyerror", "unable to connect",
+                )):
+                    self._real_egress_preflight_status[identity] = "TRANSPORT_ERROR"
+                    self._real_egress_preflight_rejections += 1
+                    log.warning("[REAL PREFLIGHT] koneksi akun gagal pada route %s: %s", current_route, exc)
+                    if (
+                        PROXY_MANAGER.enabled
+                        and self._real_egress_preflight_rejections < PROXY_PREFLIGHT_MAX_AUTO_SWITCHES
+                    ):
+                        PROXY_MANAGER.reject_active_route(
+                            f"REAL PREFLIGHT: signed account transport error ({str(exc)[:160]})",
+                            ttl_seconds=600.0,
+                        )
+                    else:
+                        self._notify_real_preflight_exhausted(current_ip, current_route, str(exc))
+                    return False
+                self._real_egress_preflight_status[identity] = "API_ERROR"
+                log.warning("[REAL PREFLIGHT] gagal pada endpoint akun: %s", exc)
+                await self.reply(
+                    "⚠️ REAL PREFLIGHT BELUM LOLOS\n"
+                    f"ROUTE : {current_route}\nIP : {current_ip or '?'}\n"
+                    f"DETAIL: {str(exc)[:500]}\n"
+                    "REAL tetap OFF. Bot tidak mengirim order percobaan."
+                )
+                return False
+            except Exception as exc:
+                current_identity, current_ip, current_route = self._real_permission_route_identity()
+                self._real_egress_preflight_status[identity] = "TRANSPORT_ERROR"
+                log.warning("[REAL PREFLIGHT] transport/exception: %s", exc)
+                if (
+                    current_identity == identity
+                    and PROXY_MANAGER.enabled
+                    and self._real_egress_preflight_rejections < PROXY_PREFLIGHT_MAX_AUTO_SWITCHES
+                ):
+                    self._real_egress_preflight_rejections += 1
+                    PROXY_MANAGER.reject_active_route(
+                        f"REAL PREFLIGHT: transport error ({str(exc)[:160]})",
+                        ttl_seconds=600.0,
+                    )
+                else:
+                    self._notify_real_preflight_exhausted(current_ip, current_route, str(exc))
+                return False
+
+    def _notify_real_preflight_exhausted(self, exit_ip: str, route: str, detail: str) -> None:
+        if self._real_egress_preflight_exhausted_notice:
+            return
+        self._real_egress_preflight_exhausted_notice = True
+        log.error(
+            "[REAL PREFLIGHT] tidak menemukan route siap | ip=%s | route=%s | detail=%s",
+            exit_ip or "?", route, detail,
+        )
+        try:
+            asyncio.create_task(self.reply(
+                "╔══ REAL PREFLIGHT / BELUM READY ══╗\n"
+                f"IP TERAKHIR : {exit_ip or '?'}\nROUTE       : {route}\n"
+                f"HASIL       : {str(detail)[:250]}\n"
+                "Pemeriksaan route yang tersedia belum menemukan IP yang lolos.\n"
+                "REAL tetap OFF. Periksa whitelist IP dan kestabilan proxy; setelah diperbaiki kirim /real on untuk tes ulang."
+            ))
+        except RuntimeError:
+            pass
 
     @staticmethod
     def _short_duration(seconds: float) -> str:
@@ -5789,12 +6060,17 @@ class TradingEngine:
         /try is intentionally a clean boot: no runtime settings, history, notes,
         active-trade snapshots, deferred commands, cooldown markers, saved
         listenKeys, scanner cursors, or previous Autostop state are imported.
-        Exchange market data is fetched only after an explicit /scan on; private
-        account data is fetched only after an explicit /real on.
+        Exchange market data is fetched only after an explicit /scan on. A
+        lightweight read-only signed Futures account preflight is the sole
+        intentional private REST exception; it checks API-key/IP access before
+        /real on and never loads positions/orders or places trades.
         """
         if self._running:
             return
         self._running = True
+        self._real_egress_preflight_status.clear()
+        self._real_egress_preflight_rejections = 0
+        self._real_egress_preflight_exhausted_notice = False
         log.info(
             "[BINANCE] outbound route configured | egress_id=%s | proxy=%s (REST + WebSocket)",
             PROXY_MANAGER.egress_id, "ON" if PROXY_MANAGER.active_url else "OFF",
@@ -5875,8 +6151,9 @@ class TradingEngine:
             log.addHandler(self._telegram_error_handler)
             self._telegram_error_handler_added = True
 
-        # No exchangeInfo, market WS, private WS, account, or GitHub state request
-        # is performed during startup. Telegram remains responsive and scanner OFF.
+        # Startup does not load exchangeInfo, wallet baseline, open orders, private
+        # WS, or GitHub state. A separate read-only account permission preflight is
+        # scheduled after this startup announcement; it does not adopt positions.
         self._real_equity_baseline = None
         self._realized_since_baseline = Decimal("0")
         self._autostop_notice_state = None
@@ -5916,10 +6193,12 @@ class TradingEngine:
             "Active        : 0\n"
             "Market WS     : OFF — aktif saat scanner dimulai\n"
             "Private WS    : OFF — aktif setelah /real on\n"
-            "Startup I/O   : tidak mengambil exchangeInfo, balance, posisi, order, atau snapshot GitHub.\n\n"
+            "Startup I/O   : hanya preflight read-only untuk izin API; tidak mengadopsi posisi/order atau membuat baseline balance.\n\n"
             "PERHATIAN: posisi dan order LIVE yang masih ada di Binance tidak diadopsi oleh sesi baru. "
-            "Periksa akun Binance sebelum mengaktifkan /real on."
+            "Periksa akun Binance sebelum mengaktifkan /real on.\n"
+            "REAL PREFLIGHT: bot akan menguji kestabilan route dan akses baca API Futures secara otomatis."
         )
+        self._schedule_real_egress_preflight("startup")
 
     async def stop(self) -> None:
         """Immediately stop this in-memory engine session without touching exchange or saved data.
@@ -5932,6 +6211,9 @@ class TradingEngine:
             return
         self._running = False
         PROXY_MANAGER.bind(None, None)
+        preflight_task = self._real_egress_preflight_task
+        if preflight_task is not None and not preflight_task.done():
+            preflight_task.cancel()
         self.scan_enabled = False
         self._scan_trigger_now = False
         self.scan_schedule_slots = ()
@@ -10566,6 +10848,32 @@ class TradingEngine:
             if not self.real.configured:
                 await self.reply("❌ BINANCE_API_KEY / BINANCE_API_SECRET belum lengkap.")
                 return
+            # The active egress is preflighted in the background at startup and
+            # after every route change. A manual command can force one fresh test
+            # (e.g. after the user has just updated Binance IP whitelist).
+            egress_identity, _egress_ip, egress_route = self._real_permission_route_identity()
+            egress_status = self._real_egress_preflight_status.get(egress_identity)
+            if egress_status != "READY":
+                if egress_status != "TESTING":
+                    self._real_egress_preflight_rejections = 0
+                    self._real_egress_preflight_exhausted_notice = False
+                    await self._run_real_egress_preflight("manual /real on", force=True)
+                    egress_identity, _egress_ip, egress_route = self._real_permission_route_identity()
+                    egress_status = self._real_egress_preflight_status.get(egress_identity)
+                if egress_status != "READY":
+                    if egress_status == "RATE_LIMITED":
+                        next_step = "Binance sedang rate-limit; tunggu cooldown selesai, lalu kirim /real on lagi."
+                    elif egress_status in {"API_ERROR", "TRANSPORT_ERROR", "NETWORK_REJECTED", "PERMISSION_REJECTED"}:
+                        next_step = "Bot belum mendapat route yang lolos. Auto-failover akan mencoba alternatif yang tersedia; tunggu notifikasi READY."
+                    else:
+                        next_step = "Pemeriksaan route masih berjalan. Tunggu notifikasi READY, lalu kirim /real on lagi."
+                    await self.reply(
+                        "⛔ REAL BELUM DIAKTIFKAN.\n"
+                        f"ROUTE : {egress_route}\n"
+                        f"PREFLIGHT : {egress_status or 'BELUM DIUJI'}\n"
+                        f"{next_step}"
+                    )
+                    return
             # Restore only the REAL equity ledger, never scanner/trade state. The
             # first /real on takes one wallet-balance baseline; later process starts
             # retain that baseline and the locally accumulated realized PnL.
