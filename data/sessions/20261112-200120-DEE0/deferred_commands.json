@@ -1,5 +1,14 @@
 {
   "strategy": "VOLUMATIC_TREND",
-  "commands": [],
-  "updated_at": "2026-11-12T13:02:30.533013+00:00"
+  "commands": [
+    {
+      "command_id": "a1e33697bc804a5883f2731bf50c88da",
+      "command": "/real on",
+      "queued_at": "2026-11-12T20:52:48.522628+00:00",
+      "attempts": 0,
+      "next_retry_at": "",
+      "last_error": "HTTP 418 | code -1003 | /fapi/v1/time: Way too many requests; IP(74.220.52.251) banned until 1794553679947. Please use the websocket for live updates to avoid bans."
+    }
+  ],
+  "updated_at": "2026-11-12T20:52:48.522648+00:00"
 }
