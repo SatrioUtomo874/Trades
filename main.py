@@ -3842,6 +3842,7 @@ class BinanceWebSocket:
         self.connected = False
         self.last_message_at: datetime | None = None
         self.reconnect_count = 0
+        self._outage_notice_active = False
 
     @property
     def status(self) -> str:
@@ -4189,6 +4190,9 @@ class BinanceWebSocket:
                     self.connected = True
                     self.last_message_at = now_utc()
                     self.reconnect_count += 1
+                    if self._outage_notice_active:
+                        log.warning("BINANCE MARKET WS RECOVERED: koneksi tersambung kembali setelah gangguan.")
+                        self._outage_notice_active = False
 
                     log.info(
                         "Binance WebSocket connected. reconnect=%s",
@@ -4265,11 +4269,9 @@ class BinanceWebSocket:
                 if self._expected_route_disconnect:
                     self._expected_route_disconnect = False
                     log.info("[WS MARKET] koneksi lama ditutup normal karena route berganti; reconnect melalui egress baru")
-                else:
-                    log.warning(
-                        "Binance WebSocket terputus: %s",
-                        exc,
-                    )
+                elif not self._outage_notice_active:
+                    self._outage_notice_active = True
+                    log.warning("Binance WebSocket terputus; reconnect otomatis berjalan: %s", exc)
 
             except Exception as exc:
                 if self._stop.is_set():
@@ -4321,6 +4323,7 @@ class BinanceUserDataWebSocket:
         self._stop = asyncio.Event()
         self._ws = None
         self._expected_route_disconnect = False
+        self._outage_notice_active = False
         self._start_lock = asyncio.Lock()
         # listenKey is a short-lived bearer credential. Store only on the local
         # runtime filesystem (never GitHub) so a process restart during an IP ban
@@ -4499,6 +4502,9 @@ class BinanceUserDataWebSocket:
                     self.connected = True
                     self.last_message_at = now_utc()
                     self.reconnect_count += 1
+                    if self._outage_notice_active:
+                        log.warning("[USER WS] RECOVERED: koneksi private tersambung kembali setelah gangguan.")
+                        self._outage_notice_active = False
                     backoff = WS_RECONNECT_MIN
                     log.info("[USER WS] connected; reconnect=%s", self.reconnect_count)
 
@@ -4541,9 +4547,10 @@ class BinanceUserDataWebSocket:
                     if self._expected_route_disconnect:
                         self._expected_route_disconnect = False
                         log.info("[USER WS] koneksi lama ditutup normal karena route berganti; reconnect melalui egress baru")
-                    else:
+                    elif not self._outage_notice_active:
+                        self._outage_notice_active = True
                         PROXY_MANAGER.observe_transport_error(f"WS user: {exc}")
-                        log.warning("[USER WS] disconnected: %s", exc)
+                        log.warning("[USER WS] terputus; reconnect otomatis berjalan: %s", exc)
             except Exception as exc:
                 if not self._stop.is_set():
                     if self._expected_route_disconnect:
@@ -5056,6 +5063,9 @@ class TradingEngine:
         self._real_egress_preflight_lock = asyncio.Lock()
         self._real_egress_preflight_status: dict[str, str] = {}
         self._real_egress_preflight_task: asyncio.Task | None = None
+        # After an egress switch, hold authenticated REAL maintenance until the
+        # user has had time to whitelist the announced exit IP and explicitly retries /real on.
+        self._real_route_waiting_user = False
 
     # ----------------------- Telegram and persistence --------------------
     async def reply(self, message: str) -> None:
@@ -5477,6 +5487,7 @@ class TradingEngine:
         """Apply a pre-tested public route switch and send one consolidated notice."""
         try:
             if info.get("kind") == "switched":
+                self._real_route_waiting_user = True
                 if BINANCE_COOLDOWN.remaining() <= 0:
                     # The new egress is clean: drop per-client copies of the old IP's cooldown.
                     self.rest._rest_cooldown_until = 0.0
@@ -5550,6 +5561,7 @@ class TradingEngine:
                     f"{public_result}\n"
                     "API KEY    : BELUM DITES (tidak ada request private)\n"
                     "ACTION     : masukkan IP BARU ke Binance API Management. Setelah selesai, kirim /real on.\n"
+                    "STATUS     : route ditahan; REST REAL menunggu whitelist dan /real on.\n"
                     f"SCANNER    : OFF — kirim /scan on setelah whitelist/route siap"
                     f"{risk}"
                 )
@@ -5594,6 +5606,7 @@ class TradingEngine:
         if identity in self._real_ip_permission_blocked_routes:
             return
         self._real_ip_permission_blocked_routes.add(identity)
+        self._real_route_waiting_user = True
         log.info(
             "[REAL] REST permission blocked for egress=%s ip=%s endpoint=%s; repeated checks suppressed",
             identity, exit_ip or "unknown", exc.endpoint or "REST",
@@ -7546,7 +7559,7 @@ class TradingEngine:
         never start a second MARKET execution.
         """
         if (
-            not self._running or trade.status != "PENDING" or not trade.real_intent
+            not self._running or self._real_route_waiting_user or trade.status != "PENDING" or not trade.real_intent
             or trade.real_enabled or trade.entry_inflight
         ):
             return
@@ -9269,6 +9282,8 @@ class TradingEngine:
                         self._scan_trigger_now = True
                     log.info("[SCAN] capacity slot released; scanner resumed.")
                 for trade in list(self.active_trades.values()):
+                    if self._real_route_waiting_user and trade.real_enabled:
+                        continue
                     if self._binance_cooldown_remaining() > 0:
                         break
                     if trade.status == "FILLED" and not trade.real_enabled and not trade.exchange_adopted and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}:
@@ -9303,7 +9318,7 @@ class TradingEngine:
                             log.warning("[REAL] position sync %s gagal: %s", trade.pair, exc)
 
                 if self._binance_cooldown_remaining() <= 0:
-                    if not self._real_ip_permission_blocked_for_current_route():
+                    if not self._real_route_waiting_user and not self._real_ip_permission_blocked_for_current_route():
                         await self._retry_signals()
                     await self._monitor_active_positions()
 
@@ -9399,6 +9414,7 @@ class TradingEngine:
     async def _retry_signals(self) -> None:
         if (
             not self._signal_retries
+            or self._real_route_waiting_user
             or self._binance_cooldown_remaining() > 0
             or self._real_ip_permission_blocked_for_current_route()
         ):
@@ -10922,6 +10938,7 @@ class TradingEngine:
             await self.user_ws.start()
             self._last_user_ws_reconnect_count = self.user_ws.reconnect_count
             self.real_mode = True
+            self._real_route_waiting_user = False
             self._clear_real_ip_permission_block_for_current_route()
             if self.autostop_percent is not None:
                 await self._autostop_check(force=True)
