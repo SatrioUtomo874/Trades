@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T18:25:05.424468+00:00",
+  "updated_at": "2026-11-12T18:25:11.812858+00:00",
   "active_trades": [
     {
       "trade_id": "OGUSDT-20261112-200405-38167D",
@@ -955,12 +955,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.001976",
       "realized_r": null,
-      "quantity": "35",
-      "margin_usdt": "0.0270585",
+      "quantity": "1293",
+      "margin_usdt": "0.9996183",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10",
-      "actual_notional": "0.270585",
+      "actual_notional": "9.996183",
       "real_enabled": true,
       "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
@@ -968,7 +968,7 @@
       "entry_client_order_id": "VT6f55b8fed042900888ba12075e7b",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "35",
+      "entry_executed_qty": "1293",
       "entry_order_status": "PARTIALLY_FILLED",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
