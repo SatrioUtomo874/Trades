@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-12T17:58:44.300840+00:00",
+  "updated_at": "2026-11-12T18:00:00.196401+00:00",
   "active_trades": [
     {
       "trade_id": "OGUSDT-20261112-200405-38167D",
@@ -629,9 +629,9 @@
       "ema_filter_slow_value": "0.004316548917315534",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794499200000,
-      "ema_exit_last_fast": "0.004233189890696522",
-      "ema_exit_last_slow": "0.0042524351293191445",
+      "ema_exit_last_open_ms": 1794502800000,
+      "ema_exit_last_fast": "0.004220751912557217",
+      "ema_exit_last_slow": "0.004245031935744677",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
