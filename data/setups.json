@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T08:25:25.810346+00:00",
+  "updated_at": "2026-11-13T08:25:25.871249+00:00",
   "active_trades": [
     {
       "trade_id": "PIEVERSEUSDT-20261113-145810-9FE7F2",
@@ -377,12 +377,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.0098",
       "realized_r": null,
-      "quantity": "30",
-      "margin_usdt": "1.0056",
+      "quantity": "20",
+      "margin_usdt": "0.6704",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10",
-      "actual_notional": "10.056",
+      "actual_notional": "6.704",
       "real_enabled": true,
       "real_state": "REAL_FILLED",
       "position_side": "BOTH",
@@ -390,7 +390,7 @@
       "entry_client_order_id": "VT47b2a8449b301874cc9c033bbe61",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "30",
+      "entry_executed_qty": "20",
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
