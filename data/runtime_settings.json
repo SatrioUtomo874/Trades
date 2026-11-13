@@ -31,8 +31,8 @@
   "max_portfolio_risk_pct": "10.5",
   "daily_loss_limit_pct": "15",
   "max_concurrent_positions": 12,
-  "daily_risk_date": null,
-  "daily_start_equity": null,
+  "daily_risk_date": "2026-11-13",
+  "daily_start_equity": "8.32039541896",
   "daily_loss_triggered": false,
   "supertrend_atr_length": 14,
   "supertrend_factor": 2.5,
@@ -48,5 +48,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-13T13:14:19.178154+00:00"
+  "updated_at": "2026-11-13T13:14:21.360352+00:00"
 }
