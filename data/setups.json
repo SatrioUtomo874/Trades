@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T09:00:24.613522+00:00",
+  "updated_at": "2026-11-13T09:00:28.117085+00:00",
   "active_trades": [
     {
       "trade_id": "GENIUSUSDT-20261113-152157-9687E1",
@@ -333,8 +333,8 @@
       "sl_client_algo_id": "VTSLSDT-20261113-152649-D4D1BA",
       "tp_client_algo_id": "VTTPSDT-20261113-152649-D4D1BA",
       "sl_algo_status": "EXPIRED",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
