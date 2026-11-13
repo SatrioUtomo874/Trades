@@ -48,3 +48,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-13T22:30:00.471958+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## TURTLEUSDT SHORT — EXPIRED
+- Trade ID: `TURTLEUSDT-20261114-054803-4D17FC`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-13T23:30:01.990442+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
