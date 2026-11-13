@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T04:18:00.539382+00:00",
+  "updated_at": "2026-11-13T04:18:01.322589+00:00",
   "active_trades": [
     {
       "trade_id": "ACTUSDT-20261113-104320-D0D067",
@@ -762,7 +762,7 @@
       "target_notional": "10",
       "actual_notional": "5.504953",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 2788919300,
       "entry_client_order_id": "VTe7e8acfe27d2c6653dffa0222a70",
