@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T03:00:03.849379+00:00",
+  "updated_at": "2026-11-13T03:00:06.792476+00:00",
   "active_trades": [
     {
       "trade_id": "MOCAUSDT-20261113-085930-DD3434",
@@ -732,9 +732,9 @@
       "ema_filter_slow_value": "1.0463595503266432",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794531600000,
-      "ema_exit_last_fast": "1.0332778542154113",
-      "ema_exit_last_slow": "1.033411217408183",
+      "ema_exit_last_open_ms": 1794535200000,
+      "ema_exit_last_fast": "1.030022283372329",
+      "ema_exit_last_slow": "1.0319192885528936",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
