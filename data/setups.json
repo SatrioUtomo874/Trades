@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T02:03:10.474564+00:00",
+  "updated_at": "2026-11-13T02:03:17.508598+00:00",
   "active_trades": [
     {
       "trade_id": "MOCAUSDT-20261113-085930-DD3434",
@@ -769,7 +769,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "3998537085:NEW:NEW:0:0",
+      "last_ws_event_key": "3998537085:TRADE:FILLED:1095:324662176",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
