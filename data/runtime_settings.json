@@ -27,7 +27,7 @@
     0.1
   ],
   "sizing_mode": "RISK",
-  "risk_per_trade_pct": "0.35",
+  "risk_per_trade_pct": "3.5",
   "max_portfolio_risk_pct": "1.05",
   "daily_loss_limit_pct": "1.5",
   "max_concurrent_positions": 12,
@@ -48,5 +48,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-13T13:14:02.096160+00:00"
+  "updated_at": "2026-11-13T13:14:05.349830+00:00"
 }
