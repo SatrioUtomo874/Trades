@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T09:00:14.347557+00:00",
+  "updated_at": "2026-11-13T09:00:14.635173+00:00",
   "active_trades": [
     {
       "trade_id": "GENIUSUSDT-20261113-152157-9687E1",
@@ -350,7 +350,7 @@
       "ema_filter_value": "0.03501314830055174",
       "ema_filter_slow_value": "0.03622103498295098",
       "ema_filter_passed": true,
-      "ema_exit_state": "CLOSE_SUBMITTING",
+      "ema_exit_state": "CLOSE_VERIFY",
       "ema_exit_last_open_ms": 1794559500000,
       "ema_exit_last_fast": "0.034479262069861405",
       "ema_exit_last_slow": null,
@@ -358,8 +358,8 @@
       "ema_exit_trigger_price": "0.03464",
       "ema_exit_reason": "EMA3_M15_BREAK_UP",
       "ema_exit_client_order_id": "emaexitab50f5f9ff32ff4fadf4ce",
-      "ema_exit_order_id": null,
-      "ema_exit_order_status": "NOT_SUBMITTED",
+      "ema_exit_order_id": 2547936747,
+      "ema_exit_order_status": "FILLED",
       "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-13T09:26:49.135153+00:00",
