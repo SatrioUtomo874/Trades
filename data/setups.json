@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T18:00:17.207258+00:00",
+  "updated_at": "2026-11-13T18:00:20.009349+00:00",
   "active_trades": [
     {
       "trade_id": "ARCUSDT-20261113-210215-22385D",
@@ -250,9 +250,9 @@
       "ema_filter_slow_value": "0.35150211500935025",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794585600000,
-      "ema_exit_last_fast": "0.3397757746546761",
-      "ema_exit_last_slow": "0.34208376122910095",
+      "ema_exit_last_open_ms": 1794589200000,
+      "ema_exit_last_fast": "0.3395606197237409",
+      "ema_exit_last_slow": "0.34177614657190997",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
