@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T17:00:01.278734+00:00",
+  "updated_at": "2026-11-13T17:00:01.545855+00:00",
   "active_trades": [
     {
       "trade_id": "ARCUSDT-20261113-210215-22385D",
@@ -155,10 +155,10 @@
       "ema_exit_trigger_close_ms": 1794589200000,
       "ema_exit_trigger_price": "0.07472",
       "ema_exit_reason": "EMA_H1_BULLISH_CROSS",
-      "ema_exit_client_order_id": null,
+      "ema_exit_client_order_id": "emaexit2de86894ae27055ae821a7",
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
-      "ema_exit_attempts": 0,
+      "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-13T15:30:00+00:00",
       "status": "FILLED",
