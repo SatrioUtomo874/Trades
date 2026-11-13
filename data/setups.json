@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T06:53:22.630667+00:00",
+  "updated_at": "2026-11-13T06:53:24.531794+00:00",
   "active_trades": [
     {
       "trade_id": "ONUSDT-20261113-135249-F8DF65",
@@ -26,11 +26,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002117570864,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002117571348,
       "sl_client_algo_id": "VTSLSDT-20261113-135249-F8DF65",
       "tp_client_algo_id": "VTTPSDT-20261113-135249-F8DF65",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
