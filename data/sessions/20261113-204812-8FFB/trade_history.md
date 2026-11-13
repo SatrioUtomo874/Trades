@@ -6,3 +6,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-13T15:15:26.142758+00:00 | Reason: PRICE_BEYOND_SL_BEFORE_ENTRY
+## AZTECUSDT SHORT — EXPIRED
+- Trade ID: `AZTECUSDT-20261113-220028-D824DC`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-13T15:45:01.749238+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
