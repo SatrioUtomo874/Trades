@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T07:59:16.370490+00:00",
+  "updated_at": "2026-11-13T07:59:19.837478+00:00",
   "active_trades": [
     {
       "trade_id": "PIEVERSEUSDT-20261113-145810-9FE7F2",
@@ -81,7 +81,7 @@
       "target_notional": "10",
       "actual_notional": "6.5",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 2081758141,
       "entry_client_order_id": "VT48a0cf910dd9edea2b2ffe56deee",
