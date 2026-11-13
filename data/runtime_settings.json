@@ -107,12 +107,19 @@
     "M15:BIGTIMEUSDT": 1794541500000,
     "M15:BILLUSDT": 1794541500000,
     "M15:BIOUSDT": 1794541500000,
-    "M15:BIRBUSDT": 1794541500000
+    "M15:BIRBUSDT": 1794541500000,
+    "M15:BLESSUSDT": 1794541500000,
+    "M15:BLUAIUSDT": 1794541500000,
+    "M15:BLURUSDT": 1794541500000,
+    "M15:BMTUSDT": 1794541500000,
+    "M15:BNBUSDT": 1794541500000,
+    "M15:BNTUSDT": 1794541500000,
+    "M15:BOMEUSDT": 1794541500000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 93,
+  "scan_resume_cursor": 100,
   "scan_resume_boundary_ms": 1794540600000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-13T03:46:33.286552+00:00"
+  "updated_at": "2026-11-13T03:46:41.064014+00:00"
 }
