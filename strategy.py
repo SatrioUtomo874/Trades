@@ -283,29 +283,33 @@ def normalize_trend_length(value: Any) -> int:
     return length
 
 
-def normalize_ema_filter_length(value: Any) -> int | tuple[int, int] | None:
+def normalize_ema_filter_length(value: Any) -> int | tuple[int, int] | tuple[int, int, int] | None:
     """Normalize /EMA configuration with unrestricted positive integer periods.
 
     - None/off disables filtering.
-    - Any single positive integer keeps the close-vs-one-EMA rule.
+    - One positive integer keeps the close-vs-one-EMA rule.
     - Two positive integers enable EMA alignment. They are sorted so the
       numerically smaller period is always fast and the larger is slow.
+    - Three positive integers enable triple EMA: the first two are sorted into
+      fast/slow exactly like dual mode, and the THIRD number as typed is EMA3
+      (extra entry condition on H4 and forced-close level on closed M15).
+      All three periods must be distinct.
     """
     if value is None or (isinstance(value, str) and value.strip().lower() in {"off", "none", "0", ""}):
         return None
 
     if isinstance(value, str):
         raw_parts = value.replace(",", " ").split()
-        if len(raw_parts) == 2:
+        if len(raw_parts) in (2, 3):
             value = raw_parts
         elif len(raw_parts) == 1:
             value = raw_parts[0]
         else:
-            raise ValueError("Gunakan /EMA <angka>, /EMA off, atau /EMA <angka1> <angka2>.")
+            raise ValueError("Gunakan /EMA <angka>, /EMA off, /EMA <angka1> <angka2>, atau /EMA <angka1> <angka2> <angka3>.")
 
     if isinstance(value, (tuple, list)):
-        if len(value) != 2:
-            raise ValueError("Mode EMA ganda membutuhkan tepat dua angka: /EMA FAST SLOW.")
+        if len(value) not in (2, 3):
+            raise ValueError("Mode EMA ganda/triple membutuhkan dua atau tiga angka: /EMA FAST SLOW [EMA3].")
         parsed: list[int] = []
         for item in value:
             if isinstance(item, bool):
@@ -320,8 +324,11 @@ def normalize_ema_filter_length(value: Any) -> int | tuple[int, int] | None:
             if not MIN_EMA_FILTER_LENGTH <= period <= MAX_EMA_FILTER_LENGTH:
                 raise ValueError("Periode EMA harus lebih besar dari 0 dan masih dalam batas integer 64-bit.")
             parsed.append(period)
-        if parsed[0] == parsed[1]:
-            raise ValueError("Mode dual EMA membutuhkan dua periode berbeda, contoh: /EMA 89 95.")
+        if len(set(parsed)) != len(parsed):
+            raise ValueError("Mode dual/triple EMA membutuhkan periode yang berbeda semua, contoh: /EMA 89 95 200.")
+        if len(parsed) == 3:
+            fast, slow = sorted(parsed[:2])
+            return (fast, slow, parsed[2])
         return tuple(sorted(parsed))
 
     if isinstance(value, bool):
@@ -344,11 +351,11 @@ def format_ema_filter_length(value: Any) -> str:
     if selected is None:
         return "OFF"
     if isinstance(selected, tuple):
-        return f"EMA{selected[0]}/EMA{selected[1]}"
+        return "/".join(f"EMA{p}" for p in selected)
     return f"EMA{selected}"
 
 
-def ema_filter_lengths(value: Any) -> tuple[int, int] | tuple[int] | tuple[()]:
+def ema_filter_lengths(value: Any) -> tuple[int, ...]:
     selected = normalize_ema_filter_length(value)
     if selected is None:
         return ()
@@ -919,7 +926,7 @@ def trade_result_r(direction: str, entry_price: float, exit_price: float, initia
 __all__ = [
     "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "DEFAULT_TREND_LENGTH",
     "EMA_TIMEFRAME", "SIGNAL_TIMEFRAME", "SUPERTREND_ATR_LENGTH", "SUPERTREND_FACTOR", "RR_TARGET", "RR_MIN", "RR_MAX",
-    "MAX_RR_VALUE", "h1_ema_filter_state", "H1_MS", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal",
+    "MAX_RR_VALUE", "ema_third_period", "ema_third_value", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal",
     "MIN_TREND_LENGTH", "MAX_TREND_LENGTH", "normalize_trend_length", "ATR_LENGTH",
     "MIN_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_FACTOR",
     "normalize_supertrend_atr_length", "normalize_supertrend_factor",
@@ -1252,69 +1259,26 @@ def _btc_ema_filter_state(
     )
 
 
-H1_MS = 3_600_000
-
-
-def h1_ema_filter_state(
-    h1_closed: Any | None,
-    ema_config: int | tuple[int, int] | None,
-    direction: str,
-    signal_close_time_ms: int,
-) -> dict[str, Any]:
-    """Directional EMA gate on the latest fully closed H1 candle at signal close.
-
-    Same rule as the H4 filter, using the same /EMA periods:
-    dual  -> LONG only if fast > slow, SHORT only if fast < slow;
-    single-> LONG only if H1 close > EMA, SHORT only if H1 close < EMA;
-    OFF   -> always passes. `h1_closed` must contain completed H1 candles only.
-    """
+def ema_third_period(ema_config: Any) -> int | None:
+    """Return the third (EMA3) period when /EMA is in triple mode, else None."""
     selected = normalize_ema_filter_length(ema_config)
-    out: dict[str, Any] = {
-        "h1_ema_checked": True,
-        "h1_ema_filter_length": list(selected) if isinstance(selected, tuple) else selected,
-        "h1_ema_filter_value": None, "h1_ema_filter_slow_value": None,
-        "h1_ema_filter_ready": False, "h1_ema_filter_passed": False,
-        "h1_ema_open_time_ms": None, "h1_ema_reference_close": None,
-        "h1_ema_filter_reason": "H1_DATA_UNAVAILABLE",
-    }
-    if selected is None:
-        out.update(h1_ema_filter_ready=True, h1_ema_filter_passed=True, h1_ema_filter_reason="OK")
-        return out
-    if h1_closed is None:
-        return out
-    try:
-        ts, _o, _h, _l, close, _v = _extract_columns(h1_closed)
-    except (TypeError, ValueError, IndexError):
-        out["h1_ema_filter_reason"] = "H1_DATA_INVALID"
-        return out
-    idx = int(np.searchsorted(ts, int(signal_close_time_ms) - H1_MS, side="right") - 1)
-    if idx < 0 or idx >= len(close):
-        out["h1_ema_filter_reason"] = "H1_CANDLE_NOT_READY"
-        return out
-    expected_open = (int(signal_close_time_ms) // H1_MS) * H1_MS - H1_MS
-    out["h1_ema_open_time_ms"] = int(ts[idx])
-    out["h1_ema_reference_close"] = float(close[idx])
-    if int(ts[idx]) != expected_open:
-        out["h1_ema_filter_reason"] = "H1_CANDLE_STALE"
-        return out
-    fast, slow, ready, _ = _ema_pair_from_config(close[:idx + 1], selected)
-    if not ready or fast is None or (isinstance(selected, tuple) and slow is None):
-        out["h1_ema_filter_reason"] = "H1_EMA_NOT_READY"
-        return out
-    ref = float(close[idx])
-    side = str(direction).upper()
-    if isinstance(selected, tuple):
-        passed = (fast > slow) if side == "LONG" else (fast < slow) if side == "SHORT" else False
-    else:
-        passed = (ref > fast) if side == "LONG" else (ref < fast) if side == "SHORT" else False
-    out.update(
-        h1_ema_filter_value=float(fast),
-        h1_ema_filter_slow_value=(float(slow) if slow is not None else None),
-        h1_ema_filter_ready=True, h1_ema_filter_passed=bool(passed),
-        h1_ema_filter_reason="OK" if passed else "H1_EMA_DIRECTION_NOT_ALIGNED",
-    )
-    return out
+    if isinstance(selected, tuple) and len(selected) == 3:
+        return int(selected[2])
+    return None
 
+
+def ema_third_value(closes: Any, period: int) -> float | None:
+    """EMA3 on the last element of `closes` (same smoothing as the H4 filter)."""
+    arr = np.asarray(closes, dtype=float)
+    period = int(period)
+    if not len(arr) or period <= 0:
+        return None
+    ema = _backtest_smooth(arr, period, 2.0 / (period + 1.0))
+    return float(ema[-1]) if np.isfinite(ema[-1]) else None
+
+
+BUBBLE_TRACE_MAX_AGE_MS = 3_600_000  # 1 hour = 4 M15 candles, counted from bubble formation
+BUBBLE_TRACE_MAX_CANDLES = 4
 
 
 def detect_backtest_signal(
@@ -1381,26 +1345,54 @@ def detect_backtest_signal(
     closed_high = mh[:-1]
     closed_low = ml[:-1]
     events, ema1, ema2 = _backtest_volumatic_events(closed_close, length)
-    signal_index = len(events) - 1
-    code = int(events[signal_index])
-    if code == 0:
+    # Signal trace: the newest bubble stays alive for at most 1 hour (4 M15
+    # candles) counted from the bubble's own formation (its candle close), not
+    # from when the scan started. A later bubble of the opposite colour is the
+    # newest event, so an older bubble is automatically cancelled by it.
+    event_indexes = np.flatnonzero(events)
+    if not len(event_indexes):
         return reject("NO_NEW_BUBBLE")
+    signal_index = int(event_indexes[-1])
+    code = int(events[signal_index])
+    signal_open_ms = int(mt[signal_index])
+    signal_close_ms = signal_open_ms + 900_000
+    bubble_age_ms = int(entry_open_ms - signal_close_ms)
+    if bubble_age_ms >= BUBBLE_TRACE_MAX_AGE_MS:
+        if diagnostics is not None:
+            diagnostics["bubble_expired"] = True
+        return reject("NO_NEW_BUBBLE")
+    bubble_candles_old = int(bubble_age_ms // 900_000)
 
-    # H4 EMA filter: latest fully closed H4 candle at this M15 signal close.
-    h4_index = int(np.searchsorted(ht, signal_close_ms - 14_400_000, side="right") - 1)
+    # H4 EMA filter: latest fully closed H4 candle at the current evaluation time
+    # (the open of the M15 entry candle).
+    h4_index = int(np.searchsorted(ht, entry_open_ms - 14_400_000, side="right") - 1)
     if h4_index < 0 or h4_index >= len(hc):
         return reject("H4_CANDLE_NOT_READY")
     h4_closes = hc[:h4_index + 1]
     fast_value, slow_value, filter_ready, _ = _ema_pair_from_config(h4_closes, filter_config)
     direction = "LONG" if code == 1 else "SHORT"
-    signal_close = float(closed_close[-1])
+    signal_close = float(closed_close[signal_index])
     h4_reference_close = float(hc[h4_index])
+    signal_last_close = float(closed_close[-1])
+    third_period = ema_third_period(filter_config)
+    # EMA3 is evaluated on closed M15 candles (entry: last closed M15 close must
+    # still be on the correct side of EMA3; forced close: a closed M15 breaks it).
+    third_value = ema_third_value(closed_close, third_period) if third_period else None
     if filter_config is None:
         filter_passed = True
     elif not filter_ready or fast_value is None:
         filter_passed = False
     elif isinstance(filter_config, tuple):
         filter_passed = bool(fast_value > slow_value) if direction == "LONG" else bool(fast_value < slow_value)
+        if third_period:
+            # Triple EMA: extra entry condition, last closed M15 close vs EMA3.
+            if third_value is None:
+                filter_ready = False
+                filter_passed = False
+            elif direction == "LONG":
+                filter_passed = filter_passed and bool(signal_last_close > third_value)
+            else:
+                filter_passed = filter_passed and bool(signal_last_close < third_value)
     else:
         filter_passed = bool(h4_reference_close > fast_value) if direction == "LONG" else bool(h4_reference_close < fast_value)
 
@@ -1408,7 +1400,7 @@ def detect_backtest_signal(
         btc_fast_value, btc_slow_value, btc_filter_ready, btc_filter_passed,
         btc_h4_open_time_ms, btc_h4_reference_close, btc_filter_reason,
     ) = _btc_ema_filter_state(
-        btc_h4_closed, filter_config, direction, signal_close_ms
+        btc_h4_closed, filter_config, direction, entry_open_ms
     )
 
     st_line, st_direction = _backtest_supertrend(
@@ -1432,7 +1424,7 @@ def detect_backtest_signal(
     target_rr = base_rr
     liquidity_pool_price = None
 
-    # Use the M15 signal candle only (the final, fully closed row). The
+    # Use closed candles only (the final, fully closed row). The
     # currently-forming entry candle is excluded from trend/liquidity state.
     closed_open = mo[:-1]
     closed_volume = _mv[:-1]
@@ -1453,7 +1445,7 @@ def detect_backtest_signal(
 
     # Backtest.py's bubble event occurs on this closed M15 index; EMA1[i-1]
     # is retained only as a visual/debug reference, not as the entry price.
-    bubble_price = float(ema1[-2]) if len(ema1) >= 2 and np.isfinite(ema1[-2]) else signal_close
+    bubble_price = float(ema1[signal_index - 1]) if signal_index >= 1 and np.isfinite(ema1[signal_index - 1]) else signal_close
     atr_for_record = _backtest_atr(closed_high, closed_low, closed_close, int(supertrend_atr_length))[-1]
     selected_meta = list(filter_config) if isinstance(filter_config, tuple) else filter_config
     if diagnostics is not None:
@@ -1496,9 +1488,15 @@ def detect_backtest_signal(
         "supertrend_atr_length": int(supertrend_atr_length),
         "supertrend_factor": float(supertrend_factor),
         "ema_filter_length": selected_meta,
-        "ema_filter_mode": "DUAL" if isinstance(filter_config, tuple) else ("SINGLE" if filter_config is not None else "OFF"),
+        "ema_filter_mode": ("TRIPLE" if third_period else "DUAL") if isinstance(filter_config, tuple) else ("SINGLE" if filter_config is not None else "OFF"),
         "ema_filter_value": fast_value,
         "ema_filter_slow_value": slow_value,
+        "ema_third_period": third_period,
+        "ema_filter_third_value": third_value,
+        "ema_third_m15_close": signal_last_close,
+        "bubble_age_ms": bubble_age_ms,
+        "bubble_candles_old": bubble_candles_old,
+        "bubble_expires_at_ms": int(signal_close_ms + BUBBLE_TRACE_MAX_AGE_MS),
         "ema_reference_close": h4_reference_close,
         "ema_filter_passed": bool(filter_passed),
         "ema_filter_ready": bool(filter_ready),
