@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T15:17:01.439907+00:00",
+  "updated_at": "2026-11-13T15:17:04.795413+00:00",
   "active_trades": [
     {
       "trade_id": "ARCUSDT-20261113-210215-22385D",
@@ -990,7 +990,7 @@
       "target_notional": "10",
       "actual_notional": "9.986262",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 2579499071,
       "entry_client_order_id": "VT831589e5806151fc421c9f89f4d9",
