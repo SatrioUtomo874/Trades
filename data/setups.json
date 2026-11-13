@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T01:46:35.034220+00:00",
+  "updated_at": "2026-11-13T01:46:43.338621+00:00",
   "active_trades": [
     {
       "trade_id": "SOLVUSDT-20261113-083950-1699CD",
@@ -710,7 +710,7 @@
       "tp_client_algo_id": "VTTPSDT-20261113-084533-936F6B",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
@@ -759,7 +759,7 @@
       "target_notional": "10",
       "actual_notional": "6.529586",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 2171608931,
       "entry_client_order_id": "VT63ca4af33fae62065e44f07c28c4",
