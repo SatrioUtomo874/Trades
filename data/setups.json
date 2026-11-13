@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T02:18:43.404540+00:00",
+  "updated_at": "2026-11-13T02:18:50.064500+00:00",
   "active_trades": [
     {
       "trade_id": "MOCAUSDT-20261113-085930-DD3434",
@@ -905,11 +905,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002115065984,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002115066922,
       "sl_client_algo_id": "VTSLSDT-20261113-091806-05B44B",
       "tp_client_algo_id": "VTTPSDT-20261113-091806-05B44B",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
