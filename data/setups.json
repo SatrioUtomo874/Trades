@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T07:18:31.338001+00:00",
+  "updated_at": "2026-11-13T07:18:39.730112+00:00",
   "active_trades": [
     {
       "trade_id": "ONUSDT-20261113-135249-F8DF65",
@@ -75,7 +75,7 @@
       "initial_risk": "0.0037",
       "realized_r": null,
       "quantity": "119",
-      "margin_usdt": "1.02045916",
+      "margin_usdt": "1.01983",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10",
