@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T08:39:59.919644+00:00",
+  "updated_at": "2026-11-13T08:45:00.381813+00:00",
   "active_trades": [
     {
       "trade_id": "GENIUSUSDT-20261113-152157-9687E1",
@@ -250,8 +250,8 @@
       "ema_filter_slow_value": "0.35285107394313114",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794557700000,
-      "ema_exit_last_fast": "0.34402082022902775",
+      "ema_exit_last_open_ms": 1794558600000,
+      "ema_exit_last_fast": "0.3437533370827914",
       "ema_exit_last_slow": null,
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
