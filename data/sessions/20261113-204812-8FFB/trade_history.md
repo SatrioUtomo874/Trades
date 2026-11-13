@@ -18,3 +18,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-13T15:45:03.088550+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## TAGUSDT SHORT — EXPIRED
+- Trade ID: `TAGUSDT-20261113-220307-69C508`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-13T15:45:15.034100+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
