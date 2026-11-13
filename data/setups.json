@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T16:24:40.249259+00:00",
+  "updated_at": "2026-11-13T16:24:46.763738+00:00",
   "active_trades": [
     {
       "trade_id": "ARCUSDT-20261113-210215-22385D",
@@ -935,11 +935,11 @@
       "liquidity_pool_price": null,
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002121821929,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261113-232415-438969",
       "tp_client_algo_id": "VTTPSDT-20261113-232415-438969",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
@@ -1000,7 +1000,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "17579432821:NEW:NEW:0:0",
+      "last_ws_event_key": "17579432821:TRADE:FILLED:159:819943003",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
