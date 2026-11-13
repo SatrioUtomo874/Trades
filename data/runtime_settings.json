@@ -28,7 +28,7 @@
   ],
   "sizing_mode": "RISK",
   "risk_per_trade_pct": "3.5",
-  "max_portfolio_risk_pct": "1.05",
+  "max_portfolio_risk_pct": "10.5",
   "daily_loss_limit_pct": "1.5",
   "max_concurrent_positions": 12,
   "daily_risk_date": "2026-11-13",
@@ -57,12 +57,15 @@
     "M15:1000XECUSDT": 1794574800000,
     "M15:1INCHUSDT": 1794574800000,
     "M15:1MBABYDOGEUSDT": 1794574800000,
-    "M15:2ZUSDT": 1794574800000
+    "M15:2ZUSDT": 1794574800000,
+    "M15:4USDT": 1794574800000,
+    "M15:AAVEUSDT": 1794574800000,
+    "M15:ACEUSDT": 1794574800000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 15,
+  "scan_resume_cursor": 18,
   "scan_resume_boundary_ms": 1794574800000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-13T13:06:29.801397+00:00"
+  "updated_at": "2026-11-13T13:06:38.135170+00:00"
 }
