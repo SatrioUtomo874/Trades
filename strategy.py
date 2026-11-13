@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Volumatic M15 with modular H4/H1/BTC EMA filters and risk controls.
+"""Volumatic M15 + H4 EMA filter + M15 Supertrend protection.
 
-The original ChartPrime-derived EMA-SWMA bubble logic is retained. The live
-strategy requires a newly confirmed M15 bubble, closed-candle H4/H1/BTC EMA
-alignment, an M15 entry-EMA confirmation, a frozen Supertrend SL, and a
-Volume Liquidity Trend target constrained by configurable RR_MIN/RR_MAX.
-Only the immediately following M15 candle is eligible for entry.
+The original ChartPrime-derived EMA-SWMA bubble logic is retained. This module
+adds the closed-candle execution model used by backtest.py: a confirmed M15
+bubble is filtered by the latest fully closed H4 EMA state, enters at the next
+M15 candle open, takes the M15 Supertrend line as SL, and starts TP at 3R before extending it
+to the farthest unmitigated Volume Liquidity Trend pool inside the 3R-4R cap.
 No intrabar/visual-offset Mode-B signal is used by the live engine.
 
 Original indicator attribution/license notice: © ChartPrime, MPL-2.0.
@@ -18,7 +18,7 @@ from typing import Any, Mapping
 import numpy as np
 
 STRATEGY_NAME = "VOLUMATIC_TREND"
-STRATEGY_VERSION = "3.0.0"
+STRATEGY_VERSION = "2.4.0"
 DEFAULT_TREND_LENGTH = 100
 TREND_LENGTH = DEFAULT_TREND_LENGTH  # backward-compatible public default
 MIN_TREND_LENGTH = 1
@@ -28,23 +28,14 @@ REFERENCE_BUFFER_ATR = 0.30
 SUPPORTED_EMA_FILTERS = ()  # kept for backward compatibility; all positive periods are accepted
 MIN_EMA_FILTER_LENGTH = 1
 MAX_EMA_FILTER_LENGTH = (2 ** 63) - 1
-MAX_MTF_EMA_PERIOD = 1480  # Keep dedicated live filters within Binance kline history limits.
-DEFAULT_EMA_FILTER_LENGTH = 100  # legacy compatibility only; champion uses dedicated MTF periods
-DEFAULT_H4_EMA_PERIODS = (9, 21, 50)
-DEFAULT_H1_EMA_PERIODS = (9, 21)
-DEFAULT_BTC_H4_EMA_PERIODS = (9, 21)
-DEFAULT_M15_ENTRY_EMA_PERIOD = 50
-DEFAULT_RISK_PER_TRADE_PCT = 0.35
-DEFAULT_MAX_PORTFOLIO_RISK_PCT = 1.05
-DEFAULT_DAILY_LOSS_LIMIT_PCT = 1.5
-DEFAULT_MAX_CONCURRENT_POSITIONS = 3
-TIMEFRAME_MS = {"M5": 300_000, "M15": 900_000, "H1": 3_600_000, "H4": 14_400_000, "D1": 86_400_000}
-TIMEFRAME_INTERVALS = {"M5": "5m", "M15": "15m", "H1": "1h", "H4": "4h", "D1": "1d"}
+DEFAULT_EMA_FILTER_LENGTH = 100
+TIMEFRAME_MS = {"M15": 900_000, "H4": 14_400_000, "D1": 86_400_000}
+TIMEFRAME_INTERVALS = {"M15": "15m", "H4": "4h", "D1": "1d"}
 SUPPORTED_TIMEFRAMES = ("M15",)
 EMA_TIMEFRAME = "H4"
 SIGNAL_TIMEFRAME = "M15"
-SUPERTREND_ATR_LENGTH = 14
-SUPERTREND_FACTOR = 2.5
+SUPERTREND_ATR_LENGTH = 10
+SUPERTREND_FACTOR = 3.0
 MIN_SUPERTREND_ATR_LENGTH = 1
 # Binance Futures returns at most 1,500 klines per request; reserve 20 bars
 # beyond the configured ATR window for adjacent indicator calculations.
@@ -52,7 +43,7 @@ MAX_SUPERTREND_ATR_LENGTH = 1480
 MAX_SUPERTREND_FACTOR = 1000.0
 RR_TARGET = 3.0  # legacy alias for the default RR_MIN
 RR_MIN = 3.0
-RR_MAX = 5.0
+RR_MAX = 4.0
 MAX_RR_VALUE = 1000.0
 LIQ_K = 0.05
 LIQ_LENGTH = 1
@@ -115,85 +106,6 @@ def normalize_supertrend_factor(value: Any) -> float:
     if not np.isfinite(factor) or factor <= 0 or factor > MAX_SUPERTREND_FACTOR:
         raise ValueError(f"SuperTrend Factor harus lebih besar dari 0 dan maksimal {MAX_SUPERTREND_FACTOR:g}.")
     return factor
-
-
-def normalize_ema_periods(value: Any, count: int, field_name: str = "EMA") -> tuple[int, ...]:
-    """Normalize a dedicated EMA stack (sorted fast-to-slow, all periods distinct)."""
-    required = int(count)
-    if required < 1 or required > 3:
-        raise ValueError("Jumlah periode EMA harus 1–3.")
-    if isinstance(value, str):
-        parts = value.replace(",", " ").split()
-    elif isinstance(value, (tuple, list)):
-        parts = list(value)
-    else:
-        parts = [value]
-    if len(parts) != required:
-        raise ValueError(f"{field_name} membutuhkan tepat {required} periode EMA.")
-    parsed: list[int] = []
-    for item in parts:
-        if isinstance(item, bool):
-            raise ValueError(f"{field_name} harus berupa bilangan bulat positif.")
-        raw = str(item).strip()
-        try:
-            period = int(raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{field_name} harus berupa bilangan bulat positif.") from exc
-        if raw not in {str(period), f"+{period}"} or not 1 <= period <= MAX_MTF_EMA_PERIOD:
-            raise ValueError(
-                f"{field_name} harus antara 1 dan {MAX_MTF_EMA_PERIOD}; batas ini mengikuti maksimum history Binance 1.500 candle."
-            )
-        parsed.append(period)
-    if len(set(parsed)) != required:
-        raise ValueError(f"{field_name} harus memakai periode yang berbeda semua.")
-    return tuple(sorted(parsed))
-
-
-def normalize_m15_entry_ema_period(value: Any) -> int:
-    """Validate the single M15 EMA used to confirm the signal candle close."""
-    return normalize_ema_periods(value, 1, "M15 Entry EMA")[0]
-
-
-def normalize_liquidity_config(
-    k: Any = LIQ_K,
-    previous_value_bars_back: Any = LIQ_LENGTH,
-    atr_length: Any = LIQ_ATR_LEN,
-    atr_multiplier: Any = LIQ_ATR_MULT,
-    normalized_volume_cutoff: Any = LIQ_VOL_CUTOFF,
-) -> tuple[float, int, int, float, float]:
-    """Validate the five configurable Volume Liquidity Trend parameters."""
-    def positive_float(raw: Any, name: str, *, maximum: float = 1000.0) -> float:
-        if isinstance(raw, bool):
-            raise ValueError(f"{name} harus berupa angka finite yang valid.")
-        try:
-            value = float(str(raw).strip().replace(",", "."))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{name} harus berupa angka finite yang valid.") from exc
-        if not np.isfinite(value) or value <= 0 or value > maximum:
-            raise ValueError(f"{name} harus > 0 dan maksimal {maximum:g}.")
-        return value
-
-    k_value = positive_float(k, "LIQ K", maximum=1.0)
-    if isinstance(previous_value_bars_back, bool):
-        raise ValueError("LIQ previous-value bars back harus bilangan bulat positif.")
-    raw_back = str(previous_value_bars_back).strip()
-    try:
-        back = int(raw_back)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("LIQ previous-value bars back harus bilangan bulat positif.") from exc
-    if raw_back not in {str(back), f"+{back}"} or back < 1 or back > 1480:
-        raise ValueError("LIQ previous-value bars back harus 1–1480.")
-    atr_len = normalize_supertrend_atr_length(atr_length)
-    atr_mult = positive_float(atr_multiplier, "LIQ ATR multiplier")
-    if isinstance(normalized_volume_cutoff, bool):
-        raise ValueError("LIQ normalized volume cutoff harus 0 sampai kurang dari 1.")
-    try:
-        cutoff = float(str(normalized_volume_cutoff).strip().replace(",", "."))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("LIQ normalized volume cutoff harus 0 sampai kurang dari 1.") from exc
-    if not np.isfinite(cutoff) or cutoff < 0 or cutoff >= 1:
-        raise ValueError("LIQ normalized volume cutoff harus 0 sampai kurang dari 1.")
-    return k_value, back, atr_len, atr_mult, cutoff
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,33 +283,29 @@ def normalize_trend_length(value: Any) -> int:
     return length
 
 
-def normalize_ema_filter_length(value: Any) -> int | tuple[int, int] | tuple[int, int, int] | None:
+def normalize_ema_filter_length(value: Any) -> int | tuple[int, int] | None:
     """Normalize /EMA configuration with unrestricted positive integer periods.
 
     - None/off disables filtering.
-    - One positive integer keeps the close-vs-one-EMA rule.
+    - Any single positive integer keeps the close-vs-one-EMA rule.
     - Two positive integers enable EMA alignment. They are sorted so the
       numerically smaller period is always fast and the larger is slow.
-    - Three positive integers enable triple EMA: the first two are sorted into
-      fast/slow exactly like dual mode, and the THIRD number as typed is EMA3
-      (extra entry condition on H4 and forced-close level on closed M15).
-      All three periods must be distinct.
     """
     if value is None or (isinstance(value, str) and value.strip().lower() in {"off", "none", "0", ""}):
         return None
 
     if isinstance(value, str):
         raw_parts = value.replace(",", " ").split()
-        if len(raw_parts) in (2, 3):
+        if len(raw_parts) == 2:
             value = raw_parts
         elif len(raw_parts) == 1:
             value = raw_parts[0]
         else:
-            raise ValueError("Gunakan /EMA <angka>, /EMA off, /EMA <angka1> <angka2>, atau /EMA <angka1> <angka2> <angka3>.")
+            raise ValueError("Gunakan /EMA <angka>, /EMA off, atau /EMA <angka1> <angka2>.")
 
     if isinstance(value, (tuple, list)):
-        if len(value) not in (2, 3):
-            raise ValueError("Mode EMA ganda/triple membutuhkan dua atau tiga angka: /EMA FAST SLOW [EMA3].")
+        if len(value) != 2:
+            raise ValueError("Mode EMA ganda membutuhkan tepat dua angka: /EMA FAST SLOW.")
         parsed: list[int] = []
         for item in value:
             if isinstance(item, bool):
@@ -412,11 +320,8 @@ def normalize_ema_filter_length(value: Any) -> int | tuple[int, int] | tuple[int
             if not MIN_EMA_FILTER_LENGTH <= period <= MAX_EMA_FILTER_LENGTH:
                 raise ValueError("Periode EMA harus lebih besar dari 0 dan masih dalam batas integer 64-bit.")
             parsed.append(period)
-        if len(set(parsed)) != len(parsed):
-            raise ValueError("Mode dual/triple EMA membutuhkan periode yang berbeda semua, contoh: /EMA 89 95 200.")
-        if len(parsed) == 3:
-            fast, slow = sorted(parsed[:2])
-            return (fast, slow, parsed[2])
+        if parsed[0] == parsed[1]:
+            raise ValueError("Mode dual EMA membutuhkan dua periode berbeda, contoh: /EMA 89 95.")
         return tuple(sorted(parsed))
 
     if isinstance(value, bool):
@@ -439,11 +344,11 @@ def format_ema_filter_length(value: Any) -> str:
     if selected is None:
         return "OFF"
     if isinstance(selected, tuple):
-        return "/".join(f"EMA{p}" for p in selected)
+        return f"EMA{selected[0]}/EMA{selected[1]}"
     return f"EMA{selected}"
 
 
-def ema_filter_lengths(value: Any) -> tuple[int, ...]:
+def ema_filter_lengths(value: Any) -> tuple[int, int] | tuple[int] | tuple[()]:
     selected = normalize_ema_filter_length(value)
     if selected is None:
         return ()
@@ -1014,13 +919,14 @@ def trade_result_r(direction: str, entry_price: float, exit_price: float, initia
 __all__ = [
     "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "DEFAULT_TREND_LENGTH",
     "EMA_TIMEFRAME", "SIGNAL_TIMEFRAME", "SUPERTREND_ATR_LENGTH", "SUPERTREND_FACTOR", "RR_TARGET", "RR_MIN", "RR_MAX",
-    "MAX_RR_VALUE", "ema_third_period", "ema_third_value", "normalize_rr_value", "normalize_rr_range", "normalize_liquidity_config", "detect_backtest_signal",
+    "MAX_RR_VALUE", "h1_ema_filter_state", "H1_MS", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal",
     "MIN_TREND_LENGTH", "MAX_TREND_LENGTH", "normalize_trend_length", "ATR_LENGTH",
     "MIN_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_FACTOR",
     "normalize_supertrend_atr_length", "normalize_supertrend_factor",
     "REFERENCE_BUFFER_ATR", "TIMEFRAME_MS", "TIMEFRAME_INTERVALS", "SUPPORTED_TIMEFRAMES", "VolumaticSignal",
     "SUPPORTED_EMA_FILTERS", "MIN_EMA_FILTER_LENGTH", "MAX_EMA_FILTER_LENGTH", "DEFAULT_EMA_FILTER_LENGTH", "normalize_ema_filter_length", "format_ema_filter_length", "ema_filter_lengths",
     "calculate_indicators", "detect_latest_signal", "detect_signals_since", "signals_since", "analyze",
+    "confirmed_bubble_events_since", "prepare_bubble_trace_state", "advance_bubble_trace_state",
     "prepare_live_visual_context", "evaluate_live_visual_context", "detect_live_visual_signal",
     "reference_risk", "trade_result_r",
 ]
@@ -1088,6 +994,137 @@ def _backtest_volumatic_events(close: np.ndarray, length: int) -> tuple[np.ndarr
     return events, ema1, ema2
 
 
+def confirmed_bubble_events_since(
+    candles: Any,
+    *,
+    after_open_time_ms: int = 0,
+    trend_length: int = DEFAULT_TREND_LENGTH,
+    interval_ms: int = 900_000,
+) -> list[dict[str, Any]]:
+    """Return confirmed BLUE/RED M15 bubbles after a candle-open checkpoint.
+
+    Bubble time is the open timestamp of the closed M15 candle on which the
+    Volumatic trend flip is confirmed by the backtest/live signal model. It is
+    independent of when a caller starts tracking the resulting signal trace.
+    """
+    length = normalize_trend_length(trend_length)
+    timestamps, _opens, _highs, _lows, closes, _volumes = _extract_columns(candles)
+    events, _ema1, _ema2 = _backtest_volumatic_events(closes, length)
+    checkpoint = int(after_open_time_ms or 0)
+    output: list[dict[str, Any]] = []
+    for index in np.flatnonzero(events).tolist():
+        # The confirmed backtest/live signal model locates the bubble on the
+        # same closed M15 candle that confirms the Volumatic trend flip.
+        bubble_time_ms = int(timestamps[index])
+        if bubble_time_ms <= checkpoint:
+            continue
+        code = int(events[index])
+        output.append({
+            "signal": "BLUE" if code > 0 else "RED",
+            "direction": "LONG" if code > 0 else "SHORT",
+            "bubble_time_ms": bubble_time_ms,
+            "bubble_close_time_ms": bubble_time_ms + int(interval_ms),
+            "signal_index": int(index),
+        })
+    return output
+
+
+def prepare_bubble_trace_state(
+    candles: Any,
+    *,
+    trend_length: int = DEFAULT_TREND_LENGTH,
+) -> dict[str, Any] | None:
+    """Build a compact EMA state for detecting the next closed-candle bubble.
+
+    Three prior closes are sufficient to calculate the next SWMA value. The
+    EMA values and current trend are seeded from the full history supplied by
+    the scanner, while subsequent M15 WebSocket closes can be processed with
+    constant-time scalar math.
+    """
+    length = normalize_trend_length(trend_length)
+    timestamps, _opens, _highs, _lows, closes, _volumes = _extract_columns(candles)
+    if len(closes) < 5:
+        return None
+    _events, ema1, ema2 = _backtest_volumatic_events(closes, length)
+    if not (np.isfinite(ema1[-1]) and np.isfinite(ema2[-1]) and np.isfinite(ema1[-2])):
+        return None
+    trend = 1 if float(ema1[-2]) < float(ema2[-1]) else -1
+    return {
+        "trend_length": int(length),
+        "last_candle_open_time_ms": int(timestamps[-1]),
+        "ema1": float(ema1[-1]),
+        "ema2": float(ema2[-1]),
+        "trend": int(trend),
+        "last_closes": [float(value) for value in closes[-3:]],
+    }
+
+
+def advance_bubble_trace_state(
+    state: Mapping[str, Any],
+    *,
+    open_time_ms: int,
+    close_price: float,
+    interval_ms: int = 900_000,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Advance one contiguous closed M15 candle and return any new bubble.
+
+    A timestamp gap invalidates the incremental state; the caller should wait
+    for the next scanner history refresh instead of manufacturing a signal.
+    """
+    try:
+        length = normalize_trend_length(state.get("trend_length"))
+        previous_open = int(state.get("last_candle_open_time_ms") or 0)
+        previous_ema1 = float(state.get("ema1"))
+        previous_ema2 = float(state.get("ema2"))
+        previous_trend = int(state.get("trend"))
+        closes = [float(value) for value in state.get("last_closes", [])][-3:]
+        current_open = int(open_time_ms)
+        current_close = float(close_price)
+    except (TypeError, ValueError, OverflowError):
+        return None, None
+    if previous_open and current_open <= previous_open:
+        # Ignore duplicate/out-of-order close events. They do not invalidate
+        # the latest valid EMA state and should not force an unnecessary REST reseed.
+        return dict(state), None
+    if (
+        not previous_open
+        or current_open != previous_open + int(interval_ms)
+        or previous_trend not in (-1, 1)
+        or not np.isfinite(previous_ema1)
+        or not np.isfinite(previous_ema2)
+        or not np.isfinite(current_close)
+        or current_close <= 0
+        or len(closes) != 3
+        or not all(np.isfinite(value) for value in closes)
+    ):
+        return None, None
+
+    alpha = 2.0 / (float(length) + 1.0)
+    swma = (closes[0] + 2.0 * closes[1] + 2.0 * closes[2] + current_close) / 6.0
+    current_ema1 = alpha * swma + (1.0 - alpha) * previous_ema1
+    current_ema2 = alpha * current_close + (1.0 - alpha) * previous_ema2
+    current_trend = 1 if previous_ema1 < current_ema2 else -1
+
+    next_state = {
+        "trend_length": int(length),
+        "last_candle_open_time_ms": current_open,
+        "ema1": float(current_ema1),
+        "ema2": float(current_ema2),
+        "trend": int(current_trend),
+        "last_closes": (closes + [current_close])[-3:],
+    }
+    event = None
+    if current_trend != previous_trend:
+        event = {
+            "signal": "BLUE" if current_trend > 0 else "RED",
+            "direction": "LONG" if current_trend > 0 else "SHORT",
+            # The confirmed M15 model anchors the bubble to this closed candle.
+            "bubble_time_ms": current_open,
+            "bubble_close_time_ms": current_open + int(interval_ms),
+        }
+    return next_state, event
+
+
 def _backtest_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, length: int) -> np.ndarray:
     n = len(close)
     if not n:
@@ -1119,11 +1156,6 @@ def _volume_liquidity_state(
     low: np.ndarray,
     close: np.ndarray,
     volume: np.ndarray,
-    *,
-    k: float = LIQ_K,
-    previous_value_bars_back: int = LIQ_LENGTH,
-    atr_length: int = LIQ_ATR_LEN,
-    atr_multiplier: float = LIQ_ATR_MULT,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Recreate Volume Liquidity Trend's active trend segment and pool state.
 
@@ -1143,9 +1175,9 @@ def _volume_liquidity_state(
         empty_f = np.asarray([], dtype=np.float64)
         return empty_i, empty_f, empty_f, empty_f, empty_f
 
-    kalman = _liquidity_kalman(c, k, previous_value_bars_back)
-    atr = _backtest_atr(h, l, c, atr_length)
-    band = atr * atr_multiplier
+    kalman = _liquidity_kalman(c, LIQ_K, LIQ_LENGTH)
+    atr = _backtest_atr(h, l, c, LIQ_ATR_LEN)
+    band = atr * LIQ_ATR_MULT
     upper = kalman + band
     lower = kalman - band
 
@@ -1174,7 +1206,6 @@ def _volume_liquidity_target(
     risk: float,
     rr_min: float = RR_MIN,
     rr_max: float = RR_MAX,
-    normalized_volume_cutoff: float = LIQ_VOL_CUTOFF,
 ) -> tuple[float | None, float | None]:
     """Choose the FARTHEST unmitigated pool in [rr_min, rr_max], otherwise no pool.
 
@@ -1205,7 +1236,7 @@ def _volume_liquidity_target(
     else:
         in_range = (segment_levels <= rr_low) & (segment_levels >= rr_high)
     candidates = np.flatnonzero(
-        in_range & (segment_volume / max_volume > float(normalized_volume_cutoff))
+        in_range & (segment_volume / max_volume > LIQ_VOL_CUTOFF)
     )
     if candidates.size == 0:
         return None, None
@@ -1353,82 +1384,69 @@ def _btc_ema_filter_state(
     )
 
 
-def ema_third_period(ema_config: Any) -> int | None:
-    """Return the third (EMA3) period when /EMA is in triple mode, else None."""
-    selected = normalize_ema_filter_length(ema_config)
-    if isinstance(selected, tuple) and len(selected) == 3:
-        return int(selected[2])
-    return None
+H1_MS = 3_600_000
 
 
-def ema_third_value(closes: Any, period: int) -> float | None:
-    """EMA3 on the last element of `closes` (same smoothing as the H4 filter)."""
-    arr = np.asarray(closes, dtype=float)
-    period = int(period)
-    if not len(arr) or period <= 0:
-        return None
-    ema = _backtest_smooth(arr, period, 2.0 / (period + 1.0))
-    return float(ema[-1]) if np.isfinite(ema[-1]) else None
-
-
-BUBBLE_TRACE_MAX_AGE_MS = 3_600_000  # 1 hour = 4 M15 candles, counted from bubble formation
-BUBBLE_TRACE_MAX_CANDLES = 4
-
-
-def _closed_ema_snapshot(
-    candles: Any,
-    timeframe: str,
-    as_of_close_time_ms: int,
-    periods: tuple[int, ...],
+def h1_ema_filter_state(
+    h1_closed: Any | None,
+    ema_config: int | tuple[int, int] | None,
+    direction: str,
+    signal_close_time_ms: int,
 ) -> dict[str, Any]:
-    """Return EMA values from the latest candle fully closed by the given time."""
-    tf = str(timeframe).upper()
-    if tf not in TIMEFRAME_MS:
-        return {"ready": False, "periods": list(periods), "values": [], "reason": "TIMEFRAME_UNSUPPORTED"}
-    try:
-        ts, _o, _h, _l, closes, _v = _extract_columns(candles)
-    except (TypeError, ValueError, IndexError):
-        return {"ready": False, "periods": list(periods), "values": [], "reason": "DATA_INVALID"}
-    span = int(TIMEFRAME_MS[tf])
-    last_closed_open = int(as_of_close_time_ms) - span
-    index = int(np.searchsorted(ts, last_closed_open, side="right") - 1)
-    if index < 0 or index >= len(closes):
-        return {"ready": False, "periods": list(periods), "values": [], "reason": "CANDLE_NOT_READY"}
-    # Guard against stale history: the selected candle must be the most recent
-    # candle whose close timestamp does not exceed the decision timestamp.
-    expected_open = (int(as_of_close_time_ms) // span) * span - span
-    if int(ts[index]) != expected_open:
-        return {
-            "ready": False, "periods": list(periods), "values": [],
-            "reason": "CANDLE_STALE", "open_time_ms": int(ts[index]),
-        }
-    selected_close = np.asarray(closes[:index + 1], dtype=np.float64)
-    values: list[float] = []
-    for period in periods:
-        ema = _backtest_smooth(selected_close, int(period), 2.0 / (float(period) + 1.0))
-        value = float(ema[-1]) if ema.size else float("nan")
-        if not np.isfinite(value):
-            return {
-                "ready": False, "periods": list(periods), "values": values,
-                "reason": f"EMA{period}_WARMUP", "open_time_ms": int(ts[index]),
-            }
-        values.append(value)
-    return {
-        "ready": True, "periods": list(periods), "values": values,
-        "close": float(closes[index]), "open_time_ms": int(ts[index]),
-        "close_time_ms": int(ts[index]) + span,
+    """Directional EMA gate on the latest fully closed H1 candle at signal close.
+
+    Same rule as the H4 filter, using the same /EMA periods:
+    dual  -> LONG only if fast > slow, SHORT only if fast < slow;
+    single-> LONG only if H1 close > EMA, SHORT only if H1 close < EMA;
+    OFF   -> always passes. `h1_closed` must contain completed H1 candles only.
+    """
+    selected = normalize_ema_filter_length(ema_config)
+    out: dict[str, Any] = {
+        "h1_ema_checked": True,
+        "h1_ema_filter_length": list(selected) if isinstance(selected, tuple) else selected,
+        "h1_ema_filter_value": None, "h1_ema_filter_slow_value": None,
+        "h1_ema_filter_ready": False, "h1_ema_filter_passed": False,
+        "h1_ema_open_time_ms": None, "h1_ema_reference_close": None,
+        "h1_ema_filter_reason": "H1_DATA_UNAVAILABLE",
     }
+    if selected is None:
+        out.update(h1_ema_filter_ready=True, h1_ema_filter_passed=True, h1_ema_filter_reason="OK")
+        return out
+    if h1_closed is None:
+        return out
+    try:
+        ts, _o, _h, _l, close, _v = _extract_columns(h1_closed)
+    except (TypeError, ValueError, IndexError):
+        out["h1_ema_filter_reason"] = "H1_DATA_INVALID"
+        return out
+    idx = int(np.searchsorted(ts, int(signal_close_time_ms) - H1_MS, side="right") - 1)
+    if idx < 0 or idx >= len(close):
+        out["h1_ema_filter_reason"] = "H1_CANDLE_NOT_READY"
+        return out
+    expected_open = (int(signal_close_time_ms) // H1_MS) * H1_MS - H1_MS
+    out["h1_ema_open_time_ms"] = int(ts[idx])
+    out["h1_ema_reference_close"] = float(close[idx])
+    if int(ts[idx]) != expected_open:
+        out["h1_ema_filter_reason"] = "H1_CANDLE_STALE"
+        return out
+    fast, slow, ready, _ = _ema_pair_from_config(close[:idx + 1], selected)
+    if not ready or fast is None or (isinstance(selected, tuple) and slow is None):
+        out["h1_ema_filter_reason"] = "H1_EMA_NOT_READY"
+        return out
+    ref = float(close[idx])
+    side = str(direction).upper()
+    if isinstance(selected, tuple):
+        passed = (fast > slow) if side == "LONG" else (fast < slow) if side == "SHORT" else False
+    else:
+        passed = (ref > fast) if side == "LONG" else (ref < fast) if side == "SHORT" else False
+    out.update(
+        h1_ema_filter_value=float(fast),
+        h1_ema_filter_slow_value=(float(slow) if slow is not None else None),
+        h1_ema_filter_ready=True, h1_ema_filter_passed=bool(passed),
+        h1_ema_filter_reason="OK" if passed else "H1_EMA_DIRECTION_NOT_ALIGNED",
+    )
+    return out
 
-
-def _ema_alignment(values: list[float], direction: str) -> bool:
-    """Strict ascending/descending stack; equal EMA values fail closed."""
-    if len(values) < 2 or not all(np.isfinite(float(x)) for x in values):
-        return False
-    if str(direction).upper() == "LONG":
-        return all(float(a) > float(b) for a, b in zip(values, values[1:]))
-    if str(direction).upper() == "SHORT":
-        return all(float(a) < float(b) for a, b in zip(values, values[1:]))
-    return False
 
 
 def detect_backtest_signal(
@@ -1436,39 +1454,25 @@ def detect_backtest_signal(
     h4_closed: Any,
     *,
     symbol: str,
-    h1_closed: Any | None = None,
     trend_length: int = DEFAULT_TREND_LENGTH,
-    h4_ema_periods: Any = DEFAULT_H4_EMA_PERIODS,
-    h1_ema_periods: Any = DEFAULT_H1_EMA_PERIODS,
-    h1_filter_enabled: bool = True,
-    btc_ema_periods: Any = DEFAULT_BTC_H4_EMA_PERIODS,
-    m15_entry_ema_period: int = DEFAULT_M15_ENTRY_EMA_PERIOD,
+    ema_filter_length: int | tuple[int, int] | None = DEFAULT_EMA_FILTER_LENGTH,
     supertrend_atr_length: int = SUPERTREND_ATR_LENGTH,
     supertrend_factor: float = SUPERTREND_FACTOR,
     rr_target: float | None = None,
     rr_min: float = RR_MIN,
     rr_max: float = RR_MAX,
-    liquidity_k: float = LIQ_K,
-    liquidity_length: int = LIQ_LENGTH,
-    liquidity_atr_length: int = LIQ_ATR_LEN,
-    liquidity_atr_multiplier: float = LIQ_ATR_MULT,
-    liquidity_volume_cutoff: float = LIQ_VOL_CUTOFF,
     btc_h4_closed: Any | None = None,
-    # Legacy input is accepted to avoid breaking external backtest utilities;
-    # the V0576 live path uses the dedicated per-timeframe configuration above.
-    ema_filter_length: int | tuple[int, int] | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Detect one newly confirmed M15 bubble and prepare its next-open entry.
+    """Detect a confirmed M15 flip and prepare its next-open entry.
 
-    Mandatory direction gates are:
-      1) pair H4 EMA fast/mid/slow stack,
-      2) optional pair H1 EMA fast/slow alignment,
-      3) BTC H4 EMA fast/slow alignment,
-      4) signal-candle M15 close on the correct side of the configured EMA.
+    `m15_with_forming` contains closed M15 candles plus one current forming row.
+    Both `h4_closed` and `btc_h4_closed` contain completed H4 candles only.
+    The altcoin and BTC H4 samples are aligned to the same M15 signal-close time.
+    The BTC fast/slow EMA gate is mandatory and uses the /EMA dual periods.
 
-    Only the immediately preceding, fully closed M15 candle may be the bubble.
-    H4/H1/BTC filters use the latest candles fully closed at the M15 decision time.
+    When ``diagnostics`` is supplied, it is cleared and populated with a stable
+    ``reason`` code. This does not change the legacy return value or signal math.
     """
     if diagnostics is not None:
         diagnostics.clear()
@@ -1479,115 +1483,69 @@ def detect_backtest_signal(
         return None
 
     length = normalize_trend_length(trend_length)
-    h4_periods = normalize_ema_periods(h4_ema_periods, 3, "H4 EMA")
-    h1_periods = normalize_ema_periods(h1_ema_periods, 2, "H1 EMA")
-    btc_periods = normalize_ema_periods(btc_ema_periods, 2, "BTC H4 EMA")
-    m15_ema_period = normalize_m15_entry_ema_period(m15_entry_ema_period)
-    st_length = normalize_supertrend_atr_length(supertrend_atr_length)
-    st_factor = normalize_supertrend_factor(supertrend_factor)
-    liq_k, liq_back, liq_atr_len, liq_atr_mult, liq_vol_cutoff = normalize_liquidity_config(
-        liquidity_k, liquidity_length, liquidity_atr_length,
-        liquidity_atr_multiplier, liquidity_volume_cutoff,
-    )
-    # rr_target remains a backwards-compatible alias for old callers.
+    filter_config = normalize_ema_filter_length(ema_filter_length)
+    supertrend_atr_length = normalize_supertrend_atr_length(supertrend_atr_length)
+    supertrend_factor = normalize_supertrend_factor(supertrend_factor)
+    # rr_target is retained as a backward-compatible alias for older callers.
     if rr_target is not None and rr_min == RR_MIN:
         rr_min = rr_target
     rr_min, rr_max = normalize_rr_range(rr_min, rr_max)
-
-    mt, mo, mh, ml, mc, mv = _extract_columns(m15_with_forming)
-    if len(mt) < max(12, length + 8, st_length + 2, m15_ema_period + 1, liq_atr_len + 2):
+    mt, mo, mh, ml, mc, _mv = _extract_columns(m15_with_forming)
+    ht, ho, hh, hl, hc, _hv = _extract_columns(h4_closed)
+    if len(mt) < max(12, length + 8):
         return reject("M15_HISTORY_TOO_SHORT")
-    if h1_filter_enabled and h1_closed is None:
-        return reject("H1_HISTORY_UNAVAILABLE")
-    try:
-        ht, _ho, _hh, _hl, hc, _hv = _extract_columns(h4_closed)
-        if h1_closed is not None:
-            h1t, _h1o, _h1h, _h1l, h1c, _h1v = _extract_columns(h1_closed)
-        else:
-            h1t = np.asarray([], dtype=np.int64)
-        bt, _bo, _bh, _bl, bc, _bv = _extract_columns(btc_h4_closed)
-    except (TypeError, ValueError, IndexError):
-        return reject("MTF_HISTORY_INVALID")
-    if len(ht) < max(h4_periods):
+    if len(ht) < 3:
         return reject("H4_HISTORY_TOO_SHORT")
-    if h1_filter_enabled and len(h1t) < max(h1_periods):
-        return reject("H1_HISTORY_TOO_SHORT")
-    if len(bt) < max(btc_periods):
-        return reject("BTC_H4_HISTORY_TOO_SHORT")
-
-    # Last row is the current/forming M15 entry candle; all preceding rows are closed.
-    entry_open_ms = int(mt[-1])
-    entry_close_ms = entry_open_ms + TIMEFRAME_MS["M15"]
-    signal_index = len(mc) - 2  # last closed candle within original m15 input
-    if signal_index < 1:
+    if len(mt) < 2:
         return reject("M15_HISTORY_TOO_SHORT")
-    signal_close_ms = int(mt[-2]) + TIMEFRAME_MS["M15"]
+    # Verify that the last M15 row really is the immediately following entry bar.
+    signal_open_ms = int(mt[-2])
+    signal_close_ms = signal_open_ms + 900_000
+    entry_open_ms = int(mt[-1])
+    entry_close_ms = entry_open_ms + 900_000
     if entry_open_ms != signal_close_ms:
         return reject("M15_ENTRY_CANDLE_MISMATCH")
     now_ms = int(__import__("time").time() * 1000)
     if not (entry_open_ms <= now_ms < entry_close_ms):
         return reject("M15_ENTRY_WINDOW_EXPIRED")
 
-    closed_open = mo[:-1]
+    closed_close = mc[:-1]
     closed_high = mh[:-1]
     closed_low = ml[:-1]
-    closed_close = mc[:-1]
-    closed_volume = mv[:-1]
-    events, ema1, _ema2 = _backtest_volumatic_events(closed_close, length)
-    event_indexes = np.flatnonzero(events)
-    if not event_indexes.size:
+    events, ema1, ema2 = _backtest_volumatic_events(closed_close, length)
+    signal_index = len(events) - 1
+    code = int(events[signal_index])
+    if code == 0:
         return reject("NO_NEW_BUBBLE")
-    latest_event = int(event_indexes[-1])
-    # A confirmed flip is eligible only at the immediately following M15 open.
-    # Do not reuse a prior bubble during the next 3 candles as a late entry.
-    if latest_event != len(closed_close) - 1:
-        return reject("NO_NEW_BUBBLE_NEXT_CANDLE_ONLY")
-    code = int(events[latest_event])
+
+    # H4 EMA filter: latest fully closed H4 candle at this M15 signal close.
+    h4_index = int(np.searchsorted(ht, signal_close_ms - 14_400_000, side="right") - 1)
+    if h4_index < 0 or h4_index >= len(hc):
+        return reject("H4_CANDLE_NOT_READY")
+    h4_closes = hc[:h4_index + 1]
+    fast_value, slow_value, filter_ready, _ = _ema_pair_from_config(h4_closes, filter_config)
     direction = "LONG" if code == 1 else "SHORT"
-    signal_open_ms = int(mt[latest_event])
-    signal_close_ms = signal_open_ms + TIMEFRAME_MS["M15"]
-    signal_close = float(closed_close[latest_event])
+    signal_close = float(closed_close[-1])
+    h4_reference_close = float(hc[h4_index])
+    if filter_config is None:
+        filter_passed = True
+    elif not filter_ready or fast_value is None:
+        filter_passed = False
+    elif isinstance(filter_config, tuple):
+        filter_passed = bool(fast_value > slow_value) if direction == "LONG" else bool(fast_value < slow_value)
+    else:
+        filter_passed = bool(h4_reference_close > fast_value) if direction == "LONG" else bool(h4_reference_close < fast_value)
 
-    # Evaluate all higher-timeframe filters as of the signal candle close.
-    h4_snapshot = _closed_ema_snapshot(h4_closed, "H4", signal_close_ms, h4_periods)
-    if not h4_snapshot["ready"]:
-        return reject("H4_EMA_NOT_READY_" + str(h4_snapshot.get("reason") or "UNKNOWN"))
-    h1_snapshot = (
-        _closed_ema_snapshot(h1_closed, "H1", signal_close_ms, h1_periods)
-        if h1_closed is not None else
-        {"ready": False, "periods": list(h1_periods), "values": [], "reason": "FILTER_DISABLED"}
+    (
+        btc_fast_value, btc_slow_value, btc_filter_ready, btc_filter_passed,
+        btc_h4_open_time_ms, btc_h4_reference_close, btc_filter_reason,
+    ) = _btc_ema_filter_state(
+        btc_h4_closed, filter_config, direction, signal_close_ms
     )
-    if h1_filter_enabled and not h1_snapshot["ready"]:
-        return reject("H1_EMA_NOT_READY_" + str(h1_snapshot.get("reason") or "UNKNOWN"))
-    btc_snapshot = _closed_ema_snapshot(btc_h4_closed, "H4", signal_close_ms, btc_periods)
-    if not btc_snapshot["ready"]:
-        return reject("BTC_H4_EMA_NOT_READY_" + str(btc_snapshot.get("reason") or "UNKNOWN"))
 
-    h4_passed = _ema_alignment(h4_snapshot["values"], direction)
-    if not h4_passed:
-        return reject("H4_EMA_STACK_NOT_ALIGNED")
-    h1_passed = (not h1_filter_enabled) or _ema_alignment(h1_snapshot["values"], direction)
-    if not h1_passed:
-        return reject("H1_EMA_NOT_ALIGNED")
-    btc_passed = _ema_alignment(btc_snapshot["values"], direction)
-    if not btc_passed:
-        return reject("BTC_H4_EMA_NOT_ALIGNED")
-
-    # Entry confirmation uses only M15 EMA50 versus the signal-candle close.
-    ema_m15 = _backtest_smooth(
-        closed_close[:latest_event + 1], m15_ema_period,
-        2.0 / (float(m15_ema_period) + 1.0),
-    )
-    m15_entry_ema = float(ema_m15[-1]) if ema_m15.size else float("nan")
-    if not np.isfinite(m15_entry_ema):
-        return reject("M15_ENTRY_EMA_NOT_READY")
-    m15_entry_passed = signal_close > m15_entry_ema if direction == "LONG" else signal_close < m15_entry_ema
-    if not m15_entry_passed:
-        return reject("M15_ENTRY_EMA_NOT_ALIGNED")
-
-    # Supertrend SL is frozen from the fully closed signal candle, never trailed.
     st_line, st_direction = _backtest_supertrend(
-        closed_high, closed_low, closed_close, st_length, st_factor,
+        closed_high, closed_low, closed_close,
+        int(supertrend_atr_length), float(supertrend_factor),
     )
     stop = float(st_line[-1]) if len(st_line) else float("nan")
     entry = float(mo[-1])
@@ -1599,51 +1557,53 @@ def detect_backtest_signal(
     risk = abs(entry - stop)
     if not np.isfinite(risk) or risk <= max(1e-12, entry * 1e-12):
         return reject("INVALID_RISK")
-
     side = 1 if direction == "LONG" else -1
-    target = entry + side * float(rr_min) * risk
+    base_rr = float(rr_min)
+    target = entry + side * base_rr * risk
     target_source = "RR_MIN_BASE"
-    target_rr = float(rr_min)
+    target_rr = base_rr
     liquidity_pool_price = None
+
+    # Use the M15 signal candle only (the final, fully closed row). The
+    # currently-forming entry candle is excluded from trend/liquidity state.
+    closed_open = mo[:-1]
+    closed_volume = _mv[:-1]
     liquidity = _volume_liquidity_state(
-        closed_open, closed_high, closed_low, closed_close, closed_volume,
-        k=liq_k, previous_value_bars_back=liq_back,
-        atr_length=liq_atr_len, atr_multiplier=liq_atr_mult,
+        closed_open, closed_high, closed_low, closed_close, closed_volume
     )
     pool_price, pool_rr = _volume_liquidity_target(
-        liquidity, len(closed_close) - 1, side, entry, risk,
-        rr_min, rr_max, liq_vol_cutoff,
+        liquidity, len(closed_close) - 1, side, entry, risk, rr_min, rr_max
     )
     if pool_price is not None and pool_rr is not None and rr_min <= pool_rr <= rr_max:
         target = float(pool_price)
         target_source = "VOLUME_LIQUIDITY"
         target_rr = float(pool_rr)
         liquidity_pool_price = float(pool_price)
+
     if not np.isfinite(target) or target <= 0:
         return reject("INVALID_TARGET")
 
-    atr_for_record = _backtest_atr(closed_high, closed_low, closed_close, st_length)[-1]
+    # Backtest.py's bubble event occurs on this closed M15 index; EMA1[i-1]
+    # is retained only as a visual/debug reference, not as the entry price.
+    bubble_price = float(ema1[-2]) if len(ema1) >= 2 and np.isfinite(ema1[-2]) else signal_close
+    atr_for_record = _backtest_atr(closed_high, closed_low, closed_close, int(supertrend_atr_length))[-1]
+    selected_meta = list(filter_config) if isinstance(filter_config, tuple) else filter_config
     if diagnostics is not None:
-        diagnostics.update({
-            "reason": "OK", "h4_ema_values": h4_snapshot["values"],
-            "h1_ema_values": h1_snapshot["values"], "h1_filter_enabled": bool(h1_filter_enabled),
-            "btc_h4_ema_values": btc_snapshot["values"],
-            "m15_entry_ema": m15_entry_ema,
-        })
+        diagnostics["reason"] = "OK"
     return {
         "strategy": STRATEGY_NAME,
         "strategy_version": STRATEGY_VERSION,
         "signal_mode": "CONFIRMED_M15_NEXT_OPEN",
         "symbol": str(symbol).upper(),
         "timeframe": "M15",
-        "ema_timeframe": "H4+H1",
+        "ema_timeframe": "H4",
         "signal": "BLUE" if code == 1 else "RED",
         "direction": direction,
-        "signal_index": int(latest_event),
+        "signal_index": int(signal_index),
         "signal_open_time_ms": signal_open_ms,
         "signal_close_time_ms": signal_close_ms,
         "bubble_visual_time_ms": signal_open_ms,
-        "bubble_price": float(ema1[latest_event - 1]) if latest_event >= 1 and np.isfinite(ema1[latest_event - 1]) else signal_close,
+        "bubble_price": bubble_price,
         "signal_atr": float(atr_for_record) if np.isfinite(atr_for_record) else None,
         "close_price": signal_close,
         "signal_close_price": signal_close,
@@ -1657,59 +1617,32 @@ def detect_backtest_signal(
         "take_profit": target,
         "take_profit_source": target_source,
         "take_profit_rr": target_rr,
-        "rr_min": float(rr_min),
-        "rr_max": float(rr_max),
+        "rr_min": rr_min,
+        "rr_max": rr_max,
         "liquidity_pool_price": liquidity_pool_price,
         "liquidity_pool_rr": pool_rr if target_source == "VOLUME_LIQUIDITY" else None,
         "initial_risk": risk,
-        "rr_target": float(rr_min),
+        "rr_target": base_rr,
         "supertrend_line": stop,
         "supertrend_direction": int(st_direction[-1]) if len(st_direction) else 0,
-        "supertrend_atr_length": st_length,
-        "supertrend_factor": st_factor,
-        "liquidity_config": {
-            "k": liq_k, "previous_value_bars_back": liq_back,
-            "atr_length": liq_atr_len, "atr_multiplier": liq_atr_mult,
-            "normalized_volume_cutoff": liq_vol_cutoff,
-        },
+        "supertrend_atr_length": int(supertrend_atr_length),
+        "supertrend_factor": float(supertrend_factor),
+        "ema_filter_length": selected_meta,
+        "ema_filter_mode": "DUAL" if isinstance(filter_config, tuple) else ("SINGLE" if filter_config is not None else "OFF"),
+        "ema_filter_value": fast_value,
+        "ema_filter_slow_value": slow_value,
+        "ema_reference_close": h4_reference_close,
+        "ema_filter_passed": bool(filter_passed),
+        "ema_filter_ready": bool(filter_ready),
+        "ema_h4_open_time_ms": int(ht[h4_index]),
+        "btc_ema_filter_length": list(filter_config) if isinstance(filter_config, tuple) else None,
+        "btc_ema_fast_value": btc_fast_value,
+        "btc_ema_slow_value": btc_slow_value,
+        "btc_ema_filter_passed": bool(btc_filter_passed),
+        "btc_ema_filter_ready": bool(btc_filter_ready),
+        "btc_ema_filter_reason": btc_filter_reason,
+        "btc_ema_reference_close": btc_h4_reference_close,
+        "btc_ema_h4_open_time_ms": btc_h4_open_time_ms,
         "trend_length": length,
-        "bubble_age_ms": 0,
-        "bubble_candles_old": 0,
-        "bubble_expires_at_ms": signal_close_ms + TIMEFRAME_MS["M15"],
         "repaint_risk": False,
-        # Full analysis snapshot for audit/logging and independent revalidation.
-        "h4_ema_periods": list(h4_periods),
-        "h4_ema_values": h4_snapshot["values"],
-        "h4_ema_open_time_ms": h4_snapshot["open_time_ms"],
-        "h4_ema_passed": True,
-        "h1_ema_periods": list(h1_periods),
-        "h1_ema_values": h1_snapshot["values"],
-        "h1_ema_open_time_ms": h1_snapshot.get("open_time_ms"),
-        "h1_ema_passed": bool(h1_passed),
-        "h1_filter_enabled": bool(h1_filter_enabled),
-        "btc_ema_periods": list(btc_periods),
-        "btc_ema_values": btc_snapshot["values"],
-        "btc_ema_open_time_ms": btc_snapshot["open_time_ms"],
-        "btc_ema_passed": True,
-        "m15_entry_ema_period": m15_ema_period,
-        "m15_entry_ema_value": m15_entry_ema,
-        "m15_entry_ema_passed": True,
-        # Legacy keys remain populated so existing trade displays/audit readers
-        # do not crash; the engine's new gate no longer uses this generic filter.
-        "ema_filter_length": list(h4_periods),
-        "ema_filter_mode": "H4_STACK",
-        "ema_filter_value": h4_snapshot["values"][0],
-        "ema_filter_slow_value": h4_snapshot["values"][-1],
-        "ema_filter_passed": True,
-        "ema_filter_ready": True,
-        "ema_filter_third_value": h4_snapshot["values"][1],
-        "btc_ema_filter_length": list(btc_periods),
-        "btc_ema_fast_value": btc_snapshot["values"][0],
-        "btc_ema_slow_value": btc_snapshot["values"][1],
-        "btc_ema_filter_passed": True,
-        "btc_ema_filter_ready": True,
-        "btc_ema_filter_reason": "OK",
-        "ema_reference_close": h4_snapshot["close"],
-        "ema_h4_open_time_ms": h4_snapshot["open_time_ms"],
     }
-
