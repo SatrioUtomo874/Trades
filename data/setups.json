@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T05:00:00.334034+00:00",
+  "updated_at": "2026-11-13T05:00:03.173143+00:00",
   "active_trades": [
     {
       "trade_id": "ACTUSDT-20261113-104320-D0D067",
@@ -729,9 +729,9 @@
       "ema_filter_slow_value": "0.008845069458552046",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794538800000,
-      "ema_exit_last_fast": "0.007925081884403211",
-      "ema_exit_last_slow": "0.007957248813398663",
+      "ema_exit_last_open_ms": 1794542400000,
+      "ema_exit_last_fast": "0.007898265507522569",
+      "ema_exit_last_slow": "0.007942135284907875",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
