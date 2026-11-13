@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T00:00:11.692364+00:00",
+  "updated_at": "2026-11-13T00:00:14.343159+00:00",
   "active_trades": [
     {
       "trade_id": "SUNUSDT-20261112-200405-AD109E",
@@ -832,9 +832,9 @@
       "ema_filter_slow_value": "0.00434968949206513",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794520800000,
-      "ema_exit_last_fast": "0.004335902715809332",
-      "ema_exit_last_slow": "0.004341331463690925",
+      "ema_exit_last_open_ms": 1794524400000,
+      "ema_exit_last_fast": "0.0043387221726474655",
+      "ema_exit_last_slow": "0.004342119512446296",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
