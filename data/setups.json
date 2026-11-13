@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T01:46:55.170196+00:00",
+  "updated_at": "2026-11-13T01:47:01.037419+00:00",
   "active_trades": [
     {
       "trade_id": "SOLVUSDT-20261113-083950-1699CD",
@@ -725,7 +725,7 @@
       "ema_filter_value": "0.013397843459725908",
       "ema_filter_slow_value": "0.013640935163190353",
       "ema_filter_passed": true,
-      "ema_exit_state": "UNINITIALIZED",
+      "ema_exit_state": "INITIALIZING",
       "ema_exit_last_open_ms": 0,
       "ema_exit_last_fast": null,
       "ema_exit_last_slow": null,
