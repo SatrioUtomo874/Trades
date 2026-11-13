@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T06:53:49.870756+00:00",
+  "updated_at": "2026-11-13T06:54:00.116823+00:00",
   "active_trades": [
     {
       "trade_id": "ONUSDT-20261113-135249-F8DF65",
@@ -81,7 +81,7 @@
       "target_notional": "10",
       "actual_notional": "4.21",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 1637816830,
       "entry_client_order_id": "VT9509c7d508eb476670100090656e",
