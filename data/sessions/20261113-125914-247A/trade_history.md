@@ -30,3 +30,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-13T09:21:58.539180+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## KMNOUSDT SHORT — EXPIRED
+- Trade ID: `KMNOUSDT-20261113-152347-5E11B9`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-13T09:23:48.738547+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
