@@ -11,7 +11,7 @@
   "supertrend_factor": 2.5,
   "rr_min": "3",
   "rr_max": "5",
-  "max_active_trades": 12,
+  "max_active_trades": 10,
   "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": false,
@@ -542,5 +542,5 @@
   "scan_resume_cursor": 450,
   "scan_resume_boundary_ms": 1794581100000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-13T14:50:15.150176+00:00"
+  "updated_at": "2026-11-13T14:50:24.075721+00:00"
 }
