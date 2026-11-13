@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T07:18:39.730112+00:00",
+  "updated_at": "2026-11-13T07:18:41.399898+00:00",
   "active_trades": [
     {
       "trade_id": "ONUSDT-20261113-135249-F8DF65",
@@ -54,10 +54,10 @@
       "ema_exit_trigger_close_ms": 1794554100000,
       "ema_exit_trigger_price": "0.0857",
       "ema_exit_reason": "EMA3_M15_BREAK_UP",
-      "ema_exit_client_order_id": null,
+      "ema_exit_client_order_id": "emaexit549130e27f0a56a405ae09",
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
-      "ema_exit_attempts": 0,
+      "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-13T07:52:49.042903+00:00",
       "status": "FILLED",
