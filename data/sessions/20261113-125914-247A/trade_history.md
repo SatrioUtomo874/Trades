@@ -36,3 +36,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-13T09:23:48.738547+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## SSVUSDT SHORT — EXPIRED
+- Trade ID: `SSVUSDT-20261113-153026-562B7B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-13T09:30:27.447480+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
