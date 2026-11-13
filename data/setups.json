@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T05:00:11.736807+00:00",
+  "updated_at": "2026-11-13T05:14:26.472836+00:00",
   "active_trades": [
     {
       "trade_id": "ACTUSDT-20261113-104320-D0D067",
@@ -711,9 +711,9 @@
       "tp_algo_id": 4000002116173276,
       "sl_client_algo_id": "VTSLSDT-20261113-111659-500F0D",
       "tp_client_algo_id": "VTTPSDT-20261113-111659-500F0D",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "sl_algo_status": "FINISHED",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
