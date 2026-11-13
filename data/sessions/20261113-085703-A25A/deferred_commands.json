@@ -1,14 +1,5 @@
 {
   "strategy": "VOLUMATIC_TREND",
-  "commands": [
-    {
-      "command_id": "9939eb328b8a45d7bb4ed281ce4331e8",
-      "command": "/real on",
-      "queued_at": "2026-11-13T02:50:09.334749+00:00",
-      "attempts": 2,
-      "next_retry_at": "2026-11-13T02:50:47.292403+00:00",
-      "last_error": "/fapi/v1/time: Transport error Binance: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
-    }
-  ],
-  "updated_at": "2026-11-13T02:50:42.292448+00:00"
+  "commands": [],
+  "updated_at": "2026-11-13T02:50:58.575564+00:00"
 }
