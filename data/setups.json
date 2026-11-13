@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T09:30:05.829586+00:00",
+  "updated_at": "2026-11-13T09:30:08.413640+00:00",
   "active_trades": [
     {
       "trade_id": "MASKUSDT-20261113-152506-D2E787",
@@ -452,8 +452,8 @@
       "ema_filter_slow_value": "0.011061473580587603",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794560400000,
-      "ema_exit_last_fast": "0.01054799654063788",
+      "ema_exit_last_open_ms": 1794561300000,
+      "ema_exit_last_fast": "0.01054164373512267",
       "ema_exit_last_slow": null,
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
