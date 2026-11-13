@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T08:26:08.046993+00:00",
+  "updated_at": "2026-11-13T08:26:11.486593+00:00",
   "active_trades": [
     {
       "trade_id": "PIEVERSEUSDT-20261113-145810-9FE7F2",
@@ -350,7 +350,7 @@
       "ema_filter_value": "0.34734489004895563",
       "ema_filter_slow_value": "0.35285107394313114",
       "ema_filter_passed": true,
-      "ema_exit_state": "UNINITIALIZED",
+      "ema_exit_state": "INITIALIZING",
       "ema_exit_last_open_ms": 0,
       "ema_exit_last_fast": null,
       "ema_exit_last_slow": null,
