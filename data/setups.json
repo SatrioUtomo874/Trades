@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T17:00:28.533364+00:00",
+  "updated_at": "2026-11-13T17:00:29.442153+00:00",
   "active_trades": [
     {
       "trade_id": "ARCUSDT-20261113-210215-22385D",
@@ -132,8 +132,8 @@
       "sl_client_algo_id": "VTSLSDT-20261113-214551-4E8C0F",
       "tp_client_algo_id": "VTTPSDT-20261113-214551-4E8C0F",
       "sl_algo_status": "EXPIRED",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
