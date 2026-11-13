@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-13T04:19:14.234340+00:00",
+  "updated_at": "2026-11-13T04:19:18.701346+00:00",
   "active_trades": [
     {
       "trade_id": "ACTUSDT-20261113-104320-D0D067",
@@ -807,11 +807,11 @@
       "liquidity_pool_price": null,
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002116188480,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261113-111827-E295DD",
       "tp_client_algo_id": "VTTPSDT-20261113-111827-E295DD",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
