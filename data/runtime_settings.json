@@ -316,8 +316,8 @@
     "M15:MEWUSDT": 1794615300000,
     "M15:MINAUSDT": 1794615300000,
     "M15:MIRAUSDT": 1794615300000,
-    "M15:MMTUSDT": 1794614400000,
-    "M15:MOCAUSDT": 1794614400000,
+    "M15:MMTUSDT": 1794615300000,
+    "M15:MOCAUSDT": 1794615300000,
     "M15:MONUSDT": 1794615300000,
     "M15:MOODENGUSDT": 1794615300000,
     "M15:MORPHOUSDT": 1794615300000,
@@ -621,8 +621,8 @@
       "last_error": "Ukuran order REAL ditolak: MARGIN_DEVIATION_OUT_OF_BOUND. Fixed margin harus tetap dalam rentang 95\u2013105% dari target; jika LOT_SIZE Binance tidak memungkinkan, order tidak dipaksakan lebih besar."
     }
   },
-  "scan_resume_cursor": 300,
+  "scan_resume_cursor": 350,
   "scan_resume_boundary_ms": 1794615300000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-14T00:17:48.141860+00:00"
+  "updated_at": "2026-11-14T00:17:54.962269+00:00"
 }
