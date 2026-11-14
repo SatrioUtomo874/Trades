@@ -5110,7 +5110,6 @@ class TradingEngine:
         # post-cooldown reconciliation pass. It prevents scanner REST bursts from
         # racing position/order recovery at the exact moment the ban expires.
         self._rest_recovery_active = self._was_in_binance_cooldown
-        self._scan_capacity_paused = False
         self._scan_protection_paused = False
         self._last_user_stream_start_attempt = 0.0
 
@@ -6230,7 +6229,6 @@ class TradingEngine:
         self._scan_resume_timeframe = "M15"
         self._scan_resume_trend_length = self.trend_length
         self._scan_interrupted_by_cooldown = False
-        self._scan_capacity_paused = False
         self._scan_protection_paused = False
         self._was_in_binance_cooldown = False
         # Restore a persisted Binance ban only when its saved egress identity matches
@@ -6455,9 +6453,9 @@ class TradingEngine:
         state = (
             "REST COOLDOWN / PAUSED" if interrupted or cooldown > 0 else
             "PAUSED — TP/SL NOT ACTIVE" if self._has_unprotected_real_position() else
-            "PAUSED — MAX SLOT REACHED" if capacity_full else
             "CONFIG CHANGED / RESTART" if configuration_changed else
-            "SCANNING · PENDING LIMIT RESERVED" if pending_limit_exists else
+            "SCANNING · MAX POSITIONS REACHED / ENTRY BLOCKED" if capacity_full else
+            "SCANNING · PENDING SETUPS WAITING" if pending_limit_exists else
             "BATCH COMPLETE"
         )
         analyzed = int(stats.get("analyzed", stats.get("processed", 0)))
@@ -6482,7 +6480,7 @@ class TradingEngine:
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
             f"STATE     : {state}",
-            f"SLOTS     : {used_slots}/{self.max_active_trades} · PENDING {pending_only_slots} · FILLED {filled_slots} · LIVE LIMITS {live_limits}",
+            f"POSITIONS : {used_slots}/{self.max_active_trades} active · PENDING SETUPS {pending_only_slots} · LIVE LIMITS {live_limits}",
             "──────────────────────────────",
             f"PASS      : {pass_start:04d}–{min(batch_end, pass_start + requested - 1):04d}  ({requested}/{pass_expected} requested)",
             f"ANALYZED  : {analyzed}  ·  SKIPPED {skipped}",
@@ -6515,15 +6513,14 @@ class TradingEngine:
             lines.append("ORDERS    : existing GTC tetap aktif · User Data WS tetap dipantau")
         elif self._has_unprotected_real_position():
             lines.append("PAUSE     : menunggu Binance TP dan SL terkonfirmasi aktif; scanner tidak membuat entry baru")
-        elif capacity_full:
-            lines.append("PAUSE     : kapasitas slot maksimum tercapai; scanner lanjut otomatis saat slot tersedia")
-            lines.append("NEXT      : menunggu slot tersedia; scanner akan resume otomatis")
-        elif configuration_changed:
-            lines.append("NEXT      : mengulang siklus dengan parameter terbaru dari coin #0001")
         else:
+            if capacity_full:
+                lines.append("ENTRY GUARD: MAX POSITIONS REACHED · sinyal tetap dipindai, entry baru diblokir")
             if pending_limit_exists:
-                lines.append("INFO      : pending LIMIT tetap memakan slot; scanner lanjut selama masih ada kapasitas")
-            if batch_end < universe_total:
+                lines.append("INFO      : pending setup/order tidak memakai slot; slot hanya untuk posisi aktif")
+            if configuration_changed:
+                lines.append("NEXT      : mengulang siklus dengan parameter terbaru dari coin #0001")
+            elif batch_end < universe_total:
                 next_start = batch_end + 1
                 next_end = min(universe_total, next_start + SCAN_MAX_PAIRS_PER_CYCLE - 1)
                 lines.append(f"NEXT      : BATCH {batch_number + 1:02d} · COIN #{next_start:04d}–#{next_end:04d}")
@@ -6608,14 +6605,6 @@ class TradingEngine:
                     self._scan_protection_paused = False
                     self._scan_trigger_now = True
                     log.info("[SCAN] Binance TP/SL active; scanner resumed.")
-                active_slots = len(self._active_slot_projection())
-                if active_slots >= self.max_active_trades:
-                    self._scan_capacity_paused = True
-                    await asyncio.sleep(SCAN_POLL_SECONDS)
-                    continue
-                if self._scan_capacity_paused:
-                    self._scan_capacity_paused = False
-                    self._scan_trigger_now = True
                 interval_ms = volumatic.TIMEFRAME_MS["M15"]
                 boundary = (int(time.time() * 1000) // interval_ms) * interval_ms
                 due = self._scan_trigger_now or boundary > self._last_scan_boundary_ms
@@ -6732,7 +6721,6 @@ class TradingEngine:
 
             await self._expire_due_pending()
             offset = self._scan_resume_cursor
-            capacity_reached = False
             protection_paused = False
             while offset < len(universe):
                 if not self._running or not self.scan_enabled:
@@ -6747,12 +6735,6 @@ class TradingEngine:
                     self._scan_resume_cursor = 0
                     self._scan_resume_boundary_ms = 0
                     break
-                if len(self._active_slot_projection()) >= self.max_active_trades:
-                    self._scan_capacity_paused = True
-                    self._scan_resume_cursor = offset
-                    capacity_reached = True
-                    break
-
                 logical_start = (offset // SCAN_MAX_PAIRS_PER_CYCLE) * SCAN_MAX_PAIRS_PER_CYCLE
                 logical_end = min(logical_start + SCAN_MAX_PAIRS_PER_CYCLE, len(universe))
                 batch = universe[offset:logical_end]
@@ -6797,11 +6779,6 @@ class TradingEngine:
                         self._scan_interrupted_by_cooldown = True
                         self._scan_trigger_now = True
                         self._scan_resume_cursor = absolute_index
-                        break
-                    if len(self._active_slot_projection()) >= self.max_active_trades:
-                        self._scan_capacity_paused = True
-                        self._scan_resume_cursor = absolute_index
-                        capacity_reached = True
                         break
                     stats["requested"] += 1
                     try:
@@ -6931,9 +6908,9 @@ class TradingEngine:
                         stats["processed"] += 1
                         processed_total += 1
                         self._scan_resume_cursor = absolute_index + 1
-                        # A newly-created LIMIT reserves one slot but must not
-                        # stop this scan pass. The next symbol re-checks live
-                        # slot usage before it can create another order.
+                        # Pending setups/orders do not consume position capacity.
+                        # The scanner continues through the full universe; the
+                        # max-position guard is checked again at actual entry.
                         if self._has_unprotected_real_position():
                             self._scan_protection_paused = True
                             protection_paused = True
@@ -6976,8 +6953,6 @@ class TradingEngine:
                 if protection_paused:
                     log.warning("[SCAN] paused: Binance TP/SL are not both confirmed active yet.")
                     break
-                if capacity_reached:
-                    break
                 if self._scan_resume_cursor >= logical_end:
                     offset = logical_end
                 else:
@@ -6996,9 +6971,9 @@ class TradingEngine:
             elapsed = time.monotonic() - started
             log.info(
                 "[SCAN] cycle %s | signal_tf=M15 ema_tf=H4 btc_filter=%s | processed=%s/%s | errors=%s | cursor=%s | "
-                "capacity_pause=%s pending_reserved=%s protection_pause=%s | duration=%.1fs",
+                "max_positions=%s pending_setups=%s protection_pause=%s | duration=%.1fs",
                 "complete" if completed else "paused", btc_filter_status, processed_total, len(universe), errors_total,
-                self._scan_resume_cursor, capacity_reached, self._has_pending_entry_limit(),
+                self._scan_resume_cursor, len(self._active_slot_projection()), self._has_pending_entry_limit(),
                 self._has_unprotected_real_position(), elapsed,
             )
 
@@ -7041,12 +7016,13 @@ class TradingEngine:
         return outcome
 
     def _active_slot_projection(self) -> dict[tuple[str, str], dict[str, Any]]:
-        """Union local trades, Binance open LIMIT orders, and Binance positions.
+        """Project active position capacity; pending entries/orders never reserve slots.
 
-        A pair+direction reserves one /max slot. A partially-filled LIMIT plus
-        its resulting position on the same side is still one slot; an opposite
-        side exposure/order is a separate slot. This method reads RAM caches
-        only and never calls Binance REST.
+        A slot is one non-zero position by symbol+direction. Local FILLED trades
+        cover the short interval between Binance ORDER_TRADE_UPDATE and the
+        account-position event; the exchange position cache also captures manual
+        or adopted Binance exposure. NEW/PARTIALLY_FILLED entry orders and local
+        price-waiting setups are deliberately excluded from max-position usage.
         """
         slots: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -7055,36 +7031,25 @@ class TradingEngine:
             side = str(direction or "").upper()
             if not pair or side not in {"LONG", "SHORT"}:
                 return None
-            return slots.setdefault((pair, side), {"pending": False, "filled": False, "orders": [], "trades": []})
+            return slots.setdefault((pair, side), {"filled": False, "trades": [], "positions": []})
 
+        # A FILLED local trade represents real or simulated open exposure. PENDING
+        # signal watches are not positions and are intentionally ignored here.
         for trade in self.active_trades.values():
-            if trade.status not in {"PENDING", "FILLED"}:
+            if trade.status != "FILLED":
+                continue
+            # In REAL mode, capacity reflects Binance exposure only. In PAPER
+            # mode, filled simulations remain countable as simulated positions.
+            if self.real_mode and not (trade.real_enabled or trade.exchange_adopted):
                 continue
             item = ensure(trade.pair, trade.direction)
             if item is None:
                 continue
-            item["pending"] = item["pending"] or trade.status == "PENDING" or (
-                trade.real_enabled and not trade.exchange_adopted and not trade.entry_order_terminal
-            )
-            item["filled"] = item["filled"] or trade.status == "FILLED"
+            item["filled"] = True
             item["trades"].append(trade)
 
-        for order in self.exchange_open_orders.values():
-            if not isinstance(order, dict):
-                continue
-            status = str(order.get("status") or order.get("X") or "NEW").upper()
-            if status not in {"NEW", "PARTIALLY_FILLED"}:
-                continue
-            side = str(order.get("side") or order.get("S") or "").upper()
-            direction = "LONG" if side == "BUY" else "SHORT" if side == "SELL" else None
-            if direction is None:
-                continue
-            symbol = str(order.get("symbol") or order.get("s") or "")
-            item = ensure(symbol, direction)
-            if item is not None:
-                item["pending"] = True
-                item["orders"].append(order)
-
+        # Binance account/ACCOUNT_UPDATE cache is authoritative for non-zero
+        # positions, including manually opened positions with no local Trade row.
         for (symbol, _position_side), position in self.exchange_positions.items():
             if not isinstance(position, dict):
                 continue
@@ -7093,19 +7058,28 @@ class TradingEngine:
                 amount = parse_signed_decimal(str(raw_amount or "0"))
             except Exception:
                 amount = Decimal("0")
-            if amount != 0:
-                item = ensure(symbol, "LONG" if amount > 0 else "SHORT")
-                if item is not None:
-                    item["filled"] = True
+            if amount == 0:
+                continue
+            direction = self._exchange_position_direction(position, amount)
+            item = ensure(symbol, direction or ("LONG" if amount > 0 else "SHORT"))
+            if item is not None:
+                item["filled"] = True
+                item["positions"].append(position)
 
         return slots
 
     def _has_pending_entry_limit(self) -> bool:
-        """True while any local/WS projected entry LIMIT still has open quantity."""
-        return any(bool(slot.get("pending")) for slot in self._active_slot_projection().values())
+        """True while any local pending setup or Binance entry order is waiting."""
+        if any(trade.status == "PENDING" for trade in self.active_trades.values()):
+            return True
+        return any(
+            isinstance(order, dict)
+            and str(order.get("status") or order.get("X") or "NEW").upper() in {"NEW", "PARTIALLY_FILLED"}
+            for order in self.exchange_open_orders.values()
+        )
 
     def _scanner_state_label(self) -> str:
-        """Return the effective scanner state; pending LIMITs reserve slots but never pause scanning."""
+        """Return scanner state; reaching max blocks entries, not signal analysis."""
         if self._autostop_triggered:
             return "LOCKED AUTOSTOP"
         if not self.scan_enabled:
@@ -7116,9 +7090,9 @@ class TradingEngine:
             return "PAUSED — WAITING EQUITY DATA"
         if self._has_unprotected_real_position():
             return "PAUSED — TP/SL BINANCE BELUM AKTIF"
-        used_slots = len(self._active_slot_projection())
-        if used_slots >= self.max_active_trades:
-            return "PAUSED — MAX SLOT TERCAPAI"
+        used_positions = len(self._active_slot_projection())
+        if used_positions >= self.max_active_trades:
+            return "ON — MAX POSITIONS REACHED (NEW ENTRIES BLOCKED)"
         return "ON"
 
     def _has_unprotected_real_position(self) -> bool:
@@ -7130,12 +7104,59 @@ class TradingEngine:
         )
 
     def _active_slot_counts(self) -> tuple[int, int, int, int]:
-        """Return (slots, pending-only slots, filled slots, live LIMIT orders)."""
+        """Return (active positions, pending setups, active positions, live LIMITs)."""
         slots = self._active_slot_projection()
-        pending_only = sum(1 for item in slots.values() if item["pending"] and not item["filled"])
-        filled = sum(1 for item in slots.values() if item["filled"])
-        live_limits = sum(len(item["orders"]) for item in slots.values())
-        return len(slots), pending_only, filled, live_limits
+        pending_setups = sum(1 for trade in self.active_trades.values() if trade.status == "PENDING")
+        live_limits = sum(
+            1 for order in self.exchange_open_orders.values()
+            if isinstance(order, dict)
+            and str(order.get("status") or order.get("X") or "NEW").upper() in {"NEW", "PARTIALLY_FILLED"}
+        )
+        active_positions = len(slots)
+        return active_positions, pending_setups, active_positions, live_limits
+
+    @staticmethod
+    def _exchange_position_keys(rows: Any) -> set[tuple[str, str]]:
+        """Return unique non-zero Binance USD-M position keys from an account snapshot."""
+        keys: set[tuple[str, str]] = set()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            symbol = normalize_symbol(str(row.get("symbol") or row.get("s") or ""))
+            if not symbol:
+                continue
+            raw_amount = row.get("positionAmt", row.get("pa", "0"))
+            try:
+                amount = parse_signed_decimal(str(raw_amount or "0"))
+            except Exception:
+                continue
+            if amount == 0:
+                continue
+            side = str(row.get("positionSide") or row.get("ps") or "BOTH").upper()
+            direction = side if side in {"LONG", "SHORT"} else ("LONG" if amount > 0 else "SHORT")
+            keys.add((symbol, direction))
+        return keys
+
+    @classmethod
+    def _count_exchange_positions(cls, rows: Any) -> int:
+        """Count unique non-zero Binance USD-M positions from a fresh account snapshot."""
+        return len(cls._exchange_position_keys(rows))
+
+    def _count_active_binance_positions(self, rows: Any) -> int:
+        """Combine the fresh account snapshot with fills already confirmed by Binance.
+
+        ORDER_TRADE_UPDATE can arrive just before /account reflects the fill. The
+        local FILLED REAL trade is therefore merged into the snapshot so two
+        pending setups touching together cannot overrun MAX during that brief gap.
+        """
+        keys = self._exchange_position_keys(rows)
+        for trade in self.active_trades.values():
+            if trade.status == "FILLED" and (trade.real_enabled or trade.exchange_adopted):
+                pair = normalize_symbol(trade.pair)
+                direction = str(trade.direction or "").upper()
+                if pair and direction in {"LONG", "SHORT"}:
+                    keys.add((pair, direction))
+        return len(keys)
 
     @staticmethod
     def _exchange_order_fields(order: dict[str, Any]) -> dict[str, Any] | None:
@@ -7293,15 +7314,23 @@ class TradingEngine:
                                          reason="Backtest model ignores signals until the active trade reaches SL/TP.")
                 return "DUPLICATE"
             slot_projection = self._active_slot_projection()
-            pair_slots = {k:v for k,v in slot_projection.items() if k[0] == pair}
+            pair_slots = {k: v for k, v in slot_projection.items() if k[0] == pair}
             if pair_slots:
-                await self._record_event("SIGNAL_BLOCKED_EXCHANGE_SLOT", None, pair=pair, direction=direction)
+                await self._record_event("SIGNAL_BLOCKED_EXCHANGE_POSITION", None, pair=pair, direction=direction)
                 return "EXCHANGE_SLOT_EXISTS"
-            if len(slot_projection) >= self.max_active_trades:
-                self._scan_capacity_paused = True
-                await self._record_event("SIGNAL_BLOCKED_MAX_ACTIVE", None, pair=pair, direction=direction,
-                                         active_slots=len(slot_projection), max_active_trades=self.max_active_trades)
-                return "MAX_BLOCKED"
+            pair_open_orders = any(
+                isinstance(order, dict)
+                and normalize_symbol(str(order.get("symbol") or order.get("s") or "")) == pair
+                and str(order.get("status") or order.get("X") or "NEW").upper() in {"NEW", "PARTIALLY_FILLED"}
+                for order in self.exchange_open_orders.values()
+            )
+            if pair_open_orders:
+                await self._record_event("SIGNAL_BLOCKED_EXISTING_EXCHANGE_ORDER", None, pair=pair, direction=direction)
+                return "EXCHANGE_SLOT_EXISTS"
+            # Do not reject a valid signal just because all position slots are
+            # currently occupied. Pending setups are local price watches and do
+            # not reserve capacity. The live position limit is checked again at
+            # the actual PAPER fill / immediately before the REAL MARKET entry.
 
             filter_length = volumatic.normalize_ema_filter_length(signal.get("ema_filter_length", self.ema_filter_length))
             def positive_decimal(raw: Any) -> Decimal | None:
@@ -7609,13 +7638,39 @@ class TradingEngine:
                 )
             finally:
                 trade.entry_inflight = False
+            paper_entry_blocked = False
             observed = self._current_price(pair)
             if observed is not None and (observed <= trade.entry if direction == "LONG" else observed >= trade.entry):
                 if trade.real_intent:
                     self._schedule_market_entry(trade, observed, "SIGNAL_TIME_TOUCH")
                 else:
-                    await self._mark_filled(trade, trade.entry, "PAPER_MARKETABLE_AT_SUBMIT")
+                    paper_entry_blocked = not await self._fill_paper_entry_if_capacity(
+                        trade, trade.entry, "PAPER_MARKETABLE_AT_SUBMIT"
+                    )
+            if paper_entry_blocked:
+                return "MAX_BLOCKED"
             return "ORDER_CREATED" if trade.status == "PENDING" else "ORDER_FILLED"
+
+    async def _fill_paper_entry_if_capacity(
+        self, trade: Trade, price: Decimal, source: str,
+    ) -> bool:
+        """Fill a PAPER touch only when an active-position slot is available."""
+        if trade.status != "PENDING":
+            return False
+        active_positions = len(self._active_slot_projection())
+        if active_positions >= self.max_active_trades:
+            await self._record_event(
+                "PAPER_ENTRY_BLOCKED_MAX_ACTIVE_POSITIONS", trade,
+                active_positions=active_positions,
+                max_active_positions=self.max_active_trades,
+                trigger_source=source,
+            )
+            await self._finalize_trade(
+                trade, "CANCELED", None, "MAX_ACTIVE_POSITIONS_REACHED_AT_PAPER_TOUCH"
+            )
+            return False
+        await self._mark_filled(trade, price, source)
+        return True
 
     # --------------- MARKET-on-touch entry (no exchange LIMIT orders) --------------
     @staticmethod
@@ -7775,10 +7830,67 @@ class TradingEngine:
         if stop is None:
             raise MarketEntryRejected("NO_SL_REFERENCE", "Referensi SL Supertrend tidak tersedia.")
 
-        filters = dict(await self.rest.get_symbol_filters(trade.pair))
+        # An ambiguous/non-terminal MARKET submission can already exist at Binance
+        # even before a position row appears. Hold subsequent entries until it is
+        # reconciled, without counting ordinary pending signal watches as slots.
+        uncertain_entry = next((
+            other for other in self.active_trades.values()
+            if other is not trade and other.status == "PENDING" and other.real_intent and other.real_enabled
+            and (other.real_submit_ambiguous or other.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN", "REAL_PENDING"})
+        ), None)
+        if uncertain_entry is not None:
+            raise MarketEntryRejected(
+                "WAITING_UNCERTAIN_MARKET_ENTRY",
+                f"Menunggu rekonsiliasi MARKET sebelumnya pada {uncertain_entry.pair}; entry baru ditahan demi mencegah posisi melebihi MAX.",
+                notify=False,
+            )
+
+        # Read the live Binance position snapshot before any leverage/filter setup.
+        # If MAX is already full, stop here without sending an entry or unnecessary
+        # configuration requests. Pending watches themselves are never counted.
         try:
-            leverage_max_notional = await self._ensure_leverage(trade.pair, trade.leverage)
             account = await self.real.get_account_info()
+        except BinanceRateLimitError:
+            raise
+        except BinanceAPIError as exc:
+            if exc.code == -2015:
+                await self._mark_real_ip_permission_blocked(exc, symbol=trade.pair)
+                raise MarketEntryRejected(
+                    "BINANCE_IP_PERMISSION_BLOCKED",
+                    "Binance menolak egress IP/API permission (-2015); entry tidak dikirim.",
+                    notify=False,
+                ) from exc
+            if self._definitive_reject(exc):
+                raise MarketEntryRejected("PREFLIGHT_REJECTED", str(exc)[:400]) from exc
+            raise
+
+        account_positions = account.get("positions") or []
+        for row in account_positions:
+            if not isinstance(row, dict) or normalize_symbol(str(row.get("symbol") or "")) != trade.pair:
+                continue
+            if self._safe_decimal(row.get("positionAmt")) != 0:
+                raise MarketEntryRejected(
+                    "EXCHANGE_POSITION_EXISTS",
+                    f"{trade.pair} masih punya posisi Binance; entry baru diblokir untuk mencegah order ganda.",
+                )
+
+        live_position_count = self._count_active_binance_positions(account_positions)
+        if live_position_count >= self.max_active_trades:
+            await self._record_event(
+                "ENTRY_BLOCKED_MAX_ACTIVE_POSITIONS", trade,
+                active_positions=live_position_count,
+                max_active_positions=self.max_active_trades,
+                trigger_source=source,
+            )
+            raise MarketEntryRejected(
+                "MAX_ACTIVE_POSITIONS_REACHED",
+                f"Kapasitas penuh: {live_position_count}/{self.max_active_trades} posisi aktif di Binance. Entry dibatalkan; pending setup tidak memakai slot.",
+                notify=False,
+            )
+
+        try:
+            filters = dict(await self.rest.get_symbol_filters(trade.pair))
+            leverage_max_notional = await self._ensure_leverage(trade.pair, trade.leverage)
             dual = await self.real.ensure_position_mode()
         except BinanceRateLimitError:
             raise
@@ -7793,14 +7905,6 @@ class TradingEngine:
             if self._definitive_reject(exc):
                 raise MarketEntryRejected("PREFLIGHT_REJECTED", str(exc)[:400]) from exc
             raise
-        for row in account.get("positions") or []:
-            if not isinstance(row, dict) or normalize_symbol(str(row.get("symbol") or "")) != trade.pair:
-                continue
-            if self._safe_decimal(row.get("positionAmt")) != 0:
-                raise MarketEntryRejected(
-                    "EXCHANGE_POSITION_EXISTS",
-                    f"{trade.pair} masih punya posisi Binance; entry baru diblokir untuk mencegah order ganda.",
-                )
 
         available, _wallet = self._usdt_margin_snapshot(account)
         if available is None:
@@ -8738,7 +8842,7 @@ class TradingEngine:
         self._entry_retry_after.pop(trade.trade_id, None)
         # The local/exchange ledger must converge immediately after a confirmed
         # terminal order or confirmed flat position; otherwise stale cache rows
-        # would reserve /max slots or reappear in /trade.
+        # would count toward active-position MAX or reappear in /trade.
         self._remove_exchange_order_cache(trade)
         if trade.real_enabled and result == "CLOSED":
             # Remove only the closed direction. In Hedge Mode the opposite side
@@ -8961,7 +9065,7 @@ class TradingEngine:
             or trade.real_state == "REAL_CANCEL_UNKNOWN"
         ):
             # Retry a failed manual/expiry cancellation until Binance confirms
-            # a terminal order state. An ambiguous order keeps its capacity slot.
+            # a terminal order state. An ambiguous submit blocks new entries until reconciled.
             reason = "ENTRY_LIMIT_TIMEOUT_1H" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
             await self._cancel_pending_trade(trade, reason)
         elif status in {"CANCELED", "EXPIRED", "REJECTED"}:
@@ -9385,11 +9489,6 @@ class TradingEngine:
 
                 await self._expire_due_pending()
                 transport_failure_seen = False
-                if self._scan_capacity_paused and len(self._active_slot_projection()) < self.max_active_trades:
-                    self._scan_capacity_paused = False
-                    if self.scan_enabled:
-                        self._scan_trigger_now = True
-                    log.info("[SCAN] capacity slot released; scanner resumed.")
                 for trade in list(self.active_trades.values()):
                     if self._real_route_waiting_user and trade.real_enabled:
                         continue
@@ -10330,7 +10429,9 @@ class TradingEngine:
                 if now_utc() < trade.expires_at:
                     touched = price <= trade.entry if trade.direction == "LONG" else price >= trade.entry
                     if touched:
-                        await self._mark_filled(trade, trade.entry, "PAPER_WEBSOCKET_LIMIT_TOUCH")
+                        await self._fill_paper_entry_if_capacity(
+                            trade, trade.entry, "PAPER_WEBSOCKET_LIMIT_TOUCH"
+                        )
             elif trade.status == "FILLED" and not trade.real_enabled:
                 stop = trade.stop_loss or trade.reference_sl
                 target = trade.take_profit
@@ -11622,18 +11723,16 @@ class TradingEngine:
         action = parts[1].lower() if len(parts) > 1 else "status"
 
         if action == "status":
-            slots = self._active_slot_projection()
-            pending = sum(1 for item in slots.values() if item.get("pending"))
-            filled = sum(1 for item in slots.values() if item.get("filled"))
+            positions, pending_setups, filled, live_limits = self._active_slot_counts()
             state = self._scanner_state_label()
             await self.reply(
                 "VOLUMATIC SCAN STATUS\n\n"
                 f"State: {state}\n"
                 f"Signal: M15 Volumatic + H4 EMA + M15 Supertrend\n"
-                f"Pending entry LIMIT: {pending}\nFilled positions: {filled}\n"
-                f"Slots: {len(slots)}/{self.max_active_trades}\n"
+                f"Active positions: {positions}/{self.max_active_trades}\n"
+                f"Pending setups: {pending_setups} · Live LIMIT orders: {live_limits}\n"
                 f"TP RR: base 1:{self.rr_min} · liquidity cap 1:{self.rr_max}\n"
-                "Rule: pending LIMIT memakai slot, bukan alasan pause scanner.\n"
+                "Rule: pending setup/order tidak memakai slot; scanner tetap mencari sinyal saat MAX penuh, tetapi entry baru diblokir.\n"
                 f"Schedule: {', '.join(self.scan_schedule_slots) if self.scan_schedule_slots else '-'}"
             )
             return
@@ -11755,7 +11854,7 @@ class TradingEngine:
             log.info("[SCAN] explicitly armed by Telegram /scan on | tf=%s | batch=%s", self.timeframe, SCAN_MAX_PAIRS_PER_CYCLE)
             await self.reply(
                 f"🟢 Scanner ON • M15 Volumatic / H4 EMA • batch {SCAN_MAX_PAIRS_PER_CYCLE} "
-                f"• Confirmed M15 Volumatic bubble + H4 EMA + M15 Supertrend SL / TP liquidity {self.rr_min}R-{self.rr_max}R. Scanner jeda selama entry LIMIT masih terbuka."
+                f"• Confirmed M15 Volumatic bubble + H4 EMA + M15 Supertrend SL / TP liquidity {self.rr_min}R-{self.rr_max}R. Pending setup/order tidak memakai slot; scanner tetap memindai saat MAX penuh, tetapi entry diblokir."
             )
         else:
             self._scanner_symbols.clear()
@@ -11776,9 +11875,9 @@ class TradingEngine:
         if len(parts) == 1:
             total, pending_only, filled, live_limits = self._active_slot_counts()
             await self.reply(
-                f"Max active slots: {self.max_active_trades}\n"
-                f"Occupied: {total}/{self.max_active_trades}\n"
-                f"Pending-only: {pending_only} | Filled positions: {filled} | Live LIMIT orders: {live_limits}"
+                f"Max active positions: {self.max_active_trades}\n"
+                f"Active positions: {total}/{self.max_active_trades}\n"
+                f"Pending setups (not counted): {pending_only} | Positions: {filled} | Live LIMIT orders: {live_limits}"
             )
             return
         try: value = int(parts[1])
@@ -11790,7 +11889,7 @@ class TradingEngine:
             return
         self.max_active_trades = value
         await self._save_runtime_settings()
-        await self.reply(f"✅ Max active slots menjadi {value}. Posisi yang sudah ada tidak ditutup otomatis.")
+        await self.reply(f"✅ MAX active positions menjadi {value}. Pending setup/order tidak memakai slot; posisi yang sudah ada tidak ditutup otomatis.")
 
     async def _handle_margin(self, text: str) -> None:
         parts = text.split()
@@ -12050,8 +12149,8 @@ class TradingEngine:
         slot_count, pending_slots, filled_slots, live_limits = self._active_slot_counts()
         current_ema = ema_filter_label(self.ema_filter_length)
         lines = [
-            f"ACTIVE TRADES • {slot_count}/{self.max_active_trades} slots\n"
-            f"PENDING SLOTS: {pending_slots} • FILLED SLOTS: {filled_slots} • LIVE LIMITS: {live_limits}\n"
+            f"ACTIVE POSITIONS • {slot_count}/{self.max_active_trades}\n"
+            f"PENDING SETUPS (NOT COUNTED): {pending_slots} • LIVE LIMITS (NOT COUNTED): {live_limits}\n"
             f"Scanner TF: {self.timeframe} • Length: {self.trend_length} • EMA filter: {current_ema}\n"
             f"SuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
             f"TP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\n"
@@ -12145,9 +12244,9 @@ class TradingEngine:
                     + f"\nHolding: {duration_text((now_utc() - (t.filled_at or t.created_at)).total_seconds())} | Mode: {'REAL' if t.real_enabled else 'PAPER'}"
                 )
 
-        # Crucial: open LIMIT orders in Binance's WS/snapshot cache must be
-        # visible even when no matching local Trade object exists. These rows
-        # also reserve /max capacity through _active_slot_projection().
+        # Crucial: open LIMIT orders in Binance's WS/snapshot cache remain
+        # visible even without a local Trade object. They are monitored but do
+        # not consume max-position capacity until Binance reports a non-zero position.
         for (symbol, direction), orders in sorted(orders_by_pair_direction.items()):
             if (symbol, direction) in represented_directions:
                 continue
@@ -12159,7 +12258,7 @@ class TradingEngine:
                     f"LIMIT: {fmt_price(order['price'])}\n"
                     f"Executed: {format_qty(order['executed_qty'])} / {format_qty(order['original_qty'])}"
                     f" • Remaining: {format_qty(order['remaining_qty'])}\n"
-                    "Capacity: RESERVED • Mode: REAL"
+                    "Capacity: NOT COUNTED until a non-zero position exists • Mode: REAL"
                 )
                 represented_directions.add((symbol, direction))
 
@@ -12198,7 +12297,7 @@ class TradingEngine:
                 f"Entry: {fmt_price(entry if entry > 0 else None)} | Mark: {fmt_price(mark if mark > 0 else None)}\n"
                 f"Floating: {fmt_num(pnl_pct, 2)}% | {fmt_num(upnl, 4)} USDT\n"
                 f"Qty: {format_qty(abs(amount))} | Lev: {leverage}x\n"
-                "Source: ACCOUNT_UPDATE / exchange snapshot • Capacity: RESERVED"
+                "Source: ACCOUNT_UPDATE / exchange snapshot • Capacity: COUNTED as active position"
             )
             exchange_position_rows += 1
             represented_filled_directions.add((symbol, direction))
@@ -12635,8 +12734,8 @@ class TradingEngine:
             f"AVG HOLD     {avg_holding}",
             "────────────────────────────────",
             "[ EXPOSURE ]",
-            f"ACTIVE       {slot_count:>3}/{self.max_active_trades:<3}  PENDING  {pending:<3} FILLED {filled:<3}",
-            f"LIVE LIMITS  {live_limits}",
+            f"POSITIONS    {slot_count:>3}/{self.max_active_trades:<3}  PENDING SETUPS {pending:<3}",
+            f"LIVE LIMITS  {live_limits} (not counted)",
             f"EXPIRED      {expired}",
         ]
         for tf in ("M15",):
@@ -12675,7 +12774,7 @@ class TradingEngine:
             f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nH1 logic: {'ON' if self.h1_enabled else 'OFF'} (entry filter + inverse-cross forced exit)\nSuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\nTP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
             f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
-            f"Pending slots: {pending} | Filled slots: {filled} | Live LIMITs: {live_limits} | Max: {self.max_active_trades}\n"
+            f"Pending setups (not counted): {pending} | Active positions: {filled}/{self.max_active_trades} | Live LIMITs: {live_limits}\n"
             f"Binance REST cooldown: {self._binance_cooldown_remaining():.0f}s | Deferred commands: {len(self.deferred_commands)}\n"
             f"REAL entry: {'ON' if self.real_mode else 'OFF'} | Margin mode: {'MINIMUM AUTO' if self.min_margin_enabled else 'FIXED'} | Fixed margin: {self.margin_usdt} USDT | Leverage: {self.leverage}x\n"
             f"Fixed margin guard: {'MINIMUM AUTO (not fixed)' if self.min_margin_enabled else '95%–105% of target (REAL sizing)'}\n"
