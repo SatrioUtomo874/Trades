@@ -621,8 +621,8 @@
       "last_error": "Ukuran order REAL ditolak: MARGIN_DEVIATION_OUT_OF_BOUND. Fixed margin harus tetap dalam rentang 95\u2013105% dari target; jika LOT_SIZE Binance tidak memungkinkan, order tidak dipaksakan lebih besar."
     }
   },
-  "scan_resume_cursor": 450,
+  "scan_resume_cursor": 500,
   "scan_resume_boundary_ms": 1794615300000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-14T00:18:09.443331+00:00"
+  "updated_at": "2026-11-14T00:18:16.678858+00:00"
 }
