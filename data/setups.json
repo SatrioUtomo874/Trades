@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T11:33:54.534367+00:00",
+  "updated_at": "2026-11-14T11:33:57.753258+00:00",
   "active_trades": [
     {
       "trade_id": "PARTIUSDT-20261114-161704-3FC8E7",
@@ -788,7 +788,7 @@
       "target_notional": "10",
       "actual_notional": "5.50555",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 1566891525,
       "entry_client_order_id": "VT75b0251460fd9b97f1cdc502b7e6",
