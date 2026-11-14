@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T19:02:16.664376+00:00",
+  "updated_at": "2026-11-14T19:02:26.992738+00:00",
   "active_trades": [
     {
       "trade_id": "IDOLUSDT-20261115-003301-D7CA16",
@@ -525,7 +525,7 @@
       "tp_client_algo_id": "VTTPSDT-20261115-020146-785220",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
