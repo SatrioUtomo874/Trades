@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T11:04:45.788713+00:00",
+  "updated_at": "2026-11-14T11:04:53.492528+00:00",
   "active_trades": [
     {
       "trade_id": "PARTIUSDT-20261114-161704-3FC8E7",
@@ -754,7 +754,7 @@
       "ema_filter_value": "0.05734936456180904",
       "ema_filter_slow_value": "0.058354715023577974",
       "ema_filter_passed": true,
-      "ema_exit_state": "UNINITIALIZED",
+      "ema_exit_state": "WAITING_API",
       "ema_exit_last_open_ms": 0,
       "ema_exit_last_fast": null,
       "ema_exit_last_slow": null,
@@ -765,7 +765,7 @@
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
       "ema_exit_attempts": 0,
-      "ema_exit_last_error": null,
+      "ema_exit_last_error": "H1 EMA warm-up menunggu Binance REST cooldown.",
       "expires_at": "2026-11-14T11:45:00+00:00",
       "status": "FILLED",
       "created_at": "2026-11-14T11:03:51.746453+00:00",
