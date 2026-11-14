@@ -326,8 +326,8 @@
     "M15:MTLUSDT": 1794661200000,
     "M15:MUBARAKUSDT": 1794661200000,
     "M15:MUSDT": 1794661200000,
-    "M15:MYXUSDT": 1794660300000,
-    "M15:NAORISUSDT": 1794660300000,
+    "M15:MYXUSDT": 1794661200000,
+    "M15:NAORISUSDT": 1794661200000,
     "M15:NEARUSDT": 1794660300000,
     "M15:NEIROUSDT": 1794660300000,
     "M15:NEOUSDT": 1794660300000,
@@ -539,8 +539,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 310,
+  "scan_resume_cursor": 314,
   "scan_resume_boundary_ms": 1794661200000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-14T13:06:20.248134+00:00"
+  "updated_at": "2026-11-14T13:07:21.639838+00:00"
 }
