@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T09:48:44.889850+00:00",
+  "updated_at": "2026-11-14T10:00:01.663992+00:00",
   "active_trades": [
     {
       "trade_id": "REDUSDT-20261114-144119-C9A373",
@@ -348,9 +348,9 @@
       "ema_filter_slow_value": "0.06048616564734209",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794643200000,
-      "ema_exit_last_fast": "0.05984948453347457",
-      "ema_exit_last_slow": "0.059922418377505324",
+      "ema_exit_last_open_ms": 1794646800000,
+      "ema_exit_last_fast": "0.059873587626779655",
+      "ema_exit_last_slow": "0.05992674397955029",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
