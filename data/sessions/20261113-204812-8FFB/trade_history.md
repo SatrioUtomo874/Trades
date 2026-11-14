@@ -78,3 +78,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-14T04:30:01.636863+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## FRAXUSDT SHORT — CANCELED
+- Trade ID: `FRAXUSDT-20261114-124619-C5BB64`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-14T06:00:26.154401+00:00 | Reason: SIGNAL_TRACE_OPPOSITE_BUBBLE
