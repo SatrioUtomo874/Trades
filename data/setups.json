@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T08:11:38.042284+00:00",
+  "updated_at": "2026-11-14T08:15:44.414415+00:00",
   "active_trades": [
     {
       "trade_id": "REDUSDT-20261114-144119-C9A373",
@@ -72,7 +72,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "44",
-      "margin_usdt": "0.52316",
+      "margin_usdt": "0.52536",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5264",
