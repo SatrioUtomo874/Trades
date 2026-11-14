@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T10:19:09.187002+00:00",
+  "updated_at": "2026-11-14T10:19:13.224755+00:00",
   "active_trades": [
     {
       "trade_id": "REDUSDT-20261114-144119-C9A373",
@@ -686,15 +686,15 @@
       "real_enabled": true,
       "real_state": "REAL_SUBMITTING",
       "position_side": "BOTH",
-      "entry_order_id": null,
+      "entry_order_id": 633327759438218089,
       "entry_client_order_id": "VTb2896d5bb0e7700264b0eef1663e",
       "real_error": null,
       "real_submit_ambiguous": false,
       "entry_executed_qty": null,
-      "entry_order_status": "SUBMITTING",
+      "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
-      "last_ws_event_key": null,
+      "last_ws_event_key": "633327759438218089:NEW:NEW:0:0",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
