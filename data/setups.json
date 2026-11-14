@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T10:19:22.782780+00:00",
+  "updated_at": "2026-11-14T10:19:32.020451+00:00",
   "active_trades": [
     {
       "trade_id": "REDUSDT-20261114-144119-C9A373",
@@ -694,7 +694,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "633327759438218089:NEW:NEW:0:0",
+      "last_ws_event_key": "633327759438218089:TRADE:FILLED:6964:458183148",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
