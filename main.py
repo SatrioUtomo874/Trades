@@ -5694,30 +5694,62 @@ class TradingEngine:
     async def _mark_real_ip_permission_blocked(
         self, exc: BinanceAPIError, *, symbol: str | None = None,
     ) -> None:
-        """Pause REAL REST work on this egress and notify once per route."""
+        """Pause REAL REST work and expose Binance's actual request IP for diagnosis."""
         identity, exit_ip, route = self._real_permission_route_identity()
         if identity in self._real_ip_permission_blocked_routes:
             return
         self._real_ip_permission_blocked_routes.add(identity)
         self._real_route_waiting_user = True
-        log.info(
-            "[REAL] REST permission blocked for egress=%s ip=%s endpoint=%s; repeated checks suppressed",
-            identity, exit_ip or "unknown", exc.endpoint or "REST",
+
+        # Binance often includes "request ip: x.x.x.x" in the -2015 message.
+        # This is the authoritative address Binance evaluated; /IP's ipify
+        # result is only a separate outbound-IP sample and may not match a
+        # rotating/non-sticky HTTP proxy's next connection.
+        error_message = str(exc)
+        request_ip_match = re.search(
+            r"request\s*ip\s*:\s*([0-9a-fA-F:.]+)", error_message, flags=re.IGNORECASE
+        )
+        request_ip = request_ip_match.group(1) if request_ip_match else ""
+        ip_comparison = "NOT AVAILABLE"
+        request_ip_mismatch = False
+        if request_ip and exit_ip:
+            try:
+                request_ip_mismatch = ipaddress.ip_address(request_ip) != ipaddress.ip_address(exit_ip)
+                ip_comparison = "MISMATCH · possible proxy egress rotation" if request_ip_mismatch else "MATCH"
+            except ValueError:
+                ip_comparison = "UNPARSEABLE"
+        elif request_ip:
+            ip_comparison = "NO /IP BASELINE"
+
+        log.warning(
+            "[REAL] Binance rejected private request | egress=%s /IP=%s Binance-request-ip=%s comparison=%s endpoint=%s | %s",
+            identity, exit_ip or "unknown", request_ip or "not-provided", ip_comparison,
+            exc.endpoint or "REST", error_message[:350],
         )
         await self.reply(
             "╔══ BINANCE / REAL PERMISSION ══╗\n"
-            "STATE      : PAUSED · HTTP 401 / code -2015\n"
-            f"EXIT IP    : {exit_ip or 'belum terdeteksi'}\n"
-            f"ROUTE      : {route}\n"
-            f"PAIR       : {symbol or '-'}\n"
-            f"ENDPOINT   : {exc.endpoint or 'REST'}\n"
-            "ACTION     : pengecekan REST REAL otomatis dihentikan untuk rute ini.\n"
-            "Tidak akan mengulang pengecekan untuk setiap posisi.\n"
-            "Whitelist EXIT IP di Binance API Management dan pastikan izin Futures API aktif, "
-            "lalu kirim /real on untuk satu percobaan ulang. Pergantian route berikutnya hanya menguji Binance public API; tidak ada tes private otomatis.\n"
-            "Catatan: SL/TP yang sudah terkonfirmasi di Binance tetap berada di exchange dan tidak dihapus. "
-            "Untuk posisi yang proteksinya belum terkonfirmasi, periksa dan amankan manual sampai akses pulih."
+            "STATE          : PAUSED · HTTP 401 / code -2015\n"
+            f"/IP EXIT IP    : {exit_ip or 'belum terdeteksi'}\n"
+            f"BINANCE REQ IP : {request_ip or 'tidak dicantumkan Binance'}\n"
+            f"IP COMPARISON  : {ip_comparison}\n"
+            f"ROUTE          : {route}\n"
+            f"PAIR           : {symbol or '-'}\n"
+            f"ENDPOINT       : {exc.endpoint or 'REST'}\n"
+            f"BINANCE MSG    : {error_message[:260]}\n"
+            "ACTION         : REST REAL dihentikan untuk route ini; tidak ada retry per posisi.\n"
+            "Jika BINANCE REQ IP berbeda dari /IP EXIT IP, proxy mengeluarkan IP berbeda pada request private; route tersebut perlu diganti. "
+            "Jika sama, penolakan bukan disebabkan perbedaan IP yang teramati dan perlu diperiksa dari sisi izin/key/produk Binance.\n"
+            "SL/TP yang sudah terkonfirmasi di Binance tetap berada di exchange. Posisi tanpa proteksi terkonfirmasi perlu diamankan manual."
         )
+
+        # Only quarantine AUTO proxies when Binance itself proves the private
+        # request left from a different IP than the /IP sample. Do not rotate
+        # routes for a generic -2015 that may instead be a permission/key issue.
+        if request_ip_mismatch and PROXY_MANAGER.enabled and PROXY_MANAGER.mode == PROXY_MANAGER.AUTO:
+            PROXY_MANAGER.reject_active_route(
+                f"Binance private request IP {request_ip} differs from /IP sample {exit_ip}",
+                ttl_seconds=PROXY_BLACKLIST_SECONDS,
+            )
 
     def _clear_real_ip_permission_block_for_current_route(self) -> None:
         identity, _exit_ip, _route = self._real_permission_route_identity()
@@ -12845,9 +12877,9 @@ class TradingEngine:
             return
 
         route_note = (
-            "Route stabil selama pemeriksaan."
+            "Proxy endpoint tidak berubah selama lookup. Catatan: IP ini hanya satu sampel outbound; belum membuktikan semua koneksi berikutnya keluar dari IP yang sama."
             if stable else
-            "Route berubah saat pemeriksaan; IP di bawah berasal dari snapshot rute aktif terakhir. Jalankan /IP sekali lagi untuk verifikasi."
+            "Proxy endpoint berubah saat lookup; IP di bawah berasal dari snapshot route aktif terakhir. IP request private harus dibandingkan dengan IP yang dilaporkan Binance saat autentikasi."
         )
         await self.reply(
             "╔══ BINANCE / OUTBOUND IP ══╗\n"
