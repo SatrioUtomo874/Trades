@@ -466,9 +466,9 @@
     "M15:TOWNSUSDT": 1794632400000,
     "M15:TRADOORUSDT": 1794632400000,
     "M15:TRBUSDT": 1794632400000,
-    "M15:TREEUSDT": 1794631500000,
-    "M15:TRIAUSDT": 1794631500000,
-    "M15:TRUMPUSDT": 1794631500000,
+    "M15:TREEUSDT": 1794632400000,
+    "M15:TRIAUSDT": 1794632400000,
+    "M15:TRUMPUSDT": 1794632400000,
     "M15:TRUSTUSDT": 1794631500000,
     "M15:TRUTHUSDT": 1794631500000,
     "M15:TRXUSDT": 1794631500000,
@@ -621,8 +621,8 @@
       "last_error": "Ukuran order REAL ditolak: MARGIN_DEVIATION_OUT_OF_BOUND. Fixed margin harus tetap dalam rentang 95\u2013105% dari target; jika LOT_SIZE Binance tidak memungkinkan, order tidak dipaksakan lebih besar."
     }
   },
-  "scan_resume_cursor": 450,
+  "scan_resume_cursor": 453,
   "scan_resume_boundary_ms": 1794632400000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-14T05:04:49.964151+00:00"
+  "updated_at": "2026-11-14T05:04:57.163651+00:00"
 }
