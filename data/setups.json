@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T10:49:05.862728+00:00",
+  "updated_at": "2026-11-14T10:49:11.191458+00:00",
   "active_trades": [
     {
       "trade_id": "PARTIUSDT-20261114-161704-3FC8E7",
@@ -232,9 +232,9 @@
       "tp_algo_id": 4000002128077073,
       "sl_client_algo_id": "VTSLSDT-20261114-164655-E8F5CE",
       "tp_client_algo_id": "VTTPSDT-20261114-164655-E8F5CE",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "sl_algo_status": "FINISHED",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
