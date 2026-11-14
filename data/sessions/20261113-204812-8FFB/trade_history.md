@@ -54,3 +54,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-13T23:30:01.990442+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## 1000SATSUSDT SHORT — EXPIRED
+- Trade ID: `1000SATSUSDT-20261114-073013-15F672`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-14T01:15:00.853098+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
