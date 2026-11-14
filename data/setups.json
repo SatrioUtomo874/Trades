@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T10:01:15.657699+00:00",
+  "updated_at": "2026-11-14T10:01:20.134111+00:00",
   "active_trades": [
     {
       "trade_id": "REDUSDT-20261114-144119-C9A373",
@@ -427,11 +427,11 @@
       "liquidity_pool_price": null,
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002128195905,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261114-170058-7E5A3E",
       "tp_client_algo_id": "VTTPSDT-20261114-170058-7E5A3E",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
