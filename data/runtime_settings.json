@@ -159,12 +159,18 @@
     "M15:CTRUSDT": 1794677400000,
     "M15:CTSIUSDT": 1794677400000,
     "M15:CTUSDT": 1794677400000,
-    "M15:CUSDT": 1794677400000
+    "M15:CUSDT": 1794677400000,
+    "M15:CVCUSDT": 1794677400000,
+    "M15:CVXUSDT": 1794677400000,
+    "M15:CYBERUSDT": 1794677400000,
+    "M15:CYSUSDT": 1794677400000,
+    "M15:DASHUSDT": 1794677400000,
+    "M15:DATAIPUSDT": 1794677400000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 144,
+  "scan_resume_cursor": 150,
   "scan_resume_boundary_ms": 1794677400000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-14T17:40:02.297154+00:00"
+  "updated_at": "2026-11-14T17:42:11.475049+00:00"
 }
