@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T18:38:03.842917+00:00",
+  "updated_at": "2026-11-14T18:38:11.203110+00:00",
   "active_trades": [
     {
       "trade_id": "IDOLUSDT-20261115-003301-D7CA16",
@@ -439,7 +439,7 @@
       "ema_filter_value": "1.5583288181368837",
       "ema_filter_slow_value": "1.5594915709427906",
       "ema_filter_passed": true,
-      "ema_exit_state": "UNINITIALIZED",
+      "ema_exit_state": "INITIALIZING",
       "ema_exit_last_open_ms": 0,
       "ema_exit_last_fast": null,
       "ema_exit_last_slow": null,
