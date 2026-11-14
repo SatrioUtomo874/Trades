@@ -465,12 +465,13 @@
     "M15:TOSHIUSDT": 1794679200000,
     "M15:TOWNSUSDT": 1794679200000,
     "M15:TRADOORUSDT": 1794679200000,
-    "M15:TRBUSDT": 1794679200000
+    "M15:TRBUSDT": 1794679200000,
+    "M15:TREEUSDT": 1794679200000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 450,
+  "scan_resume_cursor": 451,
   "scan_resume_boundary_ms": 1794679200000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-14T18:08:41.854195+00:00"
+  "updated_at": "2026-11-14T18:08:57.500437+00:00"
 }
