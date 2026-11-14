@@ -54,3 +54,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-14T12:00:56.303174+00:00 | Reason: PRICE_BEYOND_SL_BEFORE_ENTRY
+## NEWTUSDT SHORT — CANCELED
+- Trade ID: `NEWTUSDT-20261114-194638-99D9FB`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-14T12:48:04.252887+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
