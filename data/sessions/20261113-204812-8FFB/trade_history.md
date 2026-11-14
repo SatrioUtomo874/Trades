@@ -60,3 +60,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-14T01:15:00.853098+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## TRUMPUSDT SHORT — EXPIRED
+- Trade ID: `TRUMPUSDT-20261114-082153-91E1B4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-14T02:00:00.900759+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
