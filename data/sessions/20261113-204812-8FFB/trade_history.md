@@ -84,3 +84,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-14T06:00:26.154401+00:00 | Reason: SIGNAL_TRACE_OPPOSITE_BUBBLE
+## FARTCOINUSDT SHORT — EXPIRED
+- Trade ID: `FARTCOINUSDT-20261114-135257-536872`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-14T07:30:01.708311+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
