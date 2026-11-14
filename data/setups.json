@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T10:01:58.635587+00:00",
+  "updated_at": "2026-11-14T10:02:00.141368+00:00",
   "active_trades": [
     {
       "trade_id": "REDUSDT-20261114-144119-C9A373",
@@ -482,7 +482,7 @@
       "target_notional": "10",
       "actual_notional": "5.058404",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 303357402,
       "entry_client_order_id": "VTc22e8d4e75973d90ccabeaa76e2d",
