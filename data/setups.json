@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T12:18:01.799122+00:00",
+  "updated_at": "2026-11-14T12:18:06.455687+00:00",
   "active_trades": [
     {
       "trade_id": "PARTIUSDT-20261114-161704-3FC8E7",
@@ -935,11 +935,11 @@
       "liquidity_pool_price": null,
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002129238828,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261114-191741-91C974",
       "tp_client_algo_id": "VTTPSDT-20261114-191741-91C974",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
