@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T14:00:02.728691+00:00",
+  "updated_at": "2026-11-14T14:00:05.825134+00:00",
   "active_trades": [
     {
       "trade_id": "PARTIUSDT-20261114-161704-3FC8E7",
@@ -856,9 +856,9 @@
       "ema_filter_slow_value": "0.045337500436877586",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794657600000,
-      "ema_exit_last_fast": "0.02913831871015911",
-      "ema_exit_last_slow": "0.032450830863935874",
+      "ema_exit_last_open_ms": 1794661200000,
+      "ema_exit_last_fast": "0.02872065496812729",
+      "ema_exit_last_slow": "0.031959846239941705",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
