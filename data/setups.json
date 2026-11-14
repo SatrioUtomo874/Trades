@@ -1,11 +1,11 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T16:16:39.711416+00:00",
+  "updated_at": "2026-11-14T17:28:42.647234+00:00",
   "active_trades": [
     {
-      "trade_id": "IDOLUSDT-20261114-224203-918347",
-      "session_id": "20261114-223912-B70F",
+      "trade_id": "IDOLUSDT-20261115-002842-D0E436",
+      "session_id": "20261115-002509-DF47",
       "pair": "IDOLUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -72,7 +72,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "497",
-      "margin_usdt": "0.91745157",
+      "margin_usdt": "0.88219091",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "9.945467",
@@ -102,8 +102,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     },
     {
-      "trade_id": "BULLAUSDT-20261114-224203-59BDAB",
-      "session_id": "20261114-223912-B70F",
+      "trade_id": "BULLAUSDT-20261115-002842-40D263",
+      "session_id": "20261115-002509-DF47",
       "pair": "BULLAUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -170,7 +170,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "344",
-      "margin_usdt": "0.96136924",
+      "margin_usdt": "0.93636319",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10.00696",
@@ -200,8 +200,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     },
     {
-      "trade_id": "GRTUSDT-20261114-224203-7E9404",
-      "session_id": "20261114-223912-B70F",
+      "trade_id": "GRTUSDT-20261115-002842-B18015",
+      "session_id": "20261115-002509-DF47",
       "pair": "GRTUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -268,7 +268,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "583",
-      "margin_usdt": "0.949124",
+      "margin_usdt": "0.97407874",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10.01011",
@@ -298,8 +298,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     },
     {
-      "trade_id": "BBUSDT-20261114-224203-B58183",
-      "session_id": "20261114-223912-B70F",
+      "trade_id": "BBUSDT-20261115-002842-D75A90",
+      "session_id": "20261115-002509-DF47",
       "pair": "BBUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -366,7 +366,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "1717",
-      "margin_usdt": "0.95026507",
+      "margin_usdt": "0.95815812",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "9.999808",
