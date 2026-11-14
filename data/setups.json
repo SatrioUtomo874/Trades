@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-14T19:02:05.138932+00:00",
+  "updated_at": "2026-11-14T19:02:09.648875+00:00",
   "active_trades": [
     {
       "trade_id": "IDOLUSDT-20261115-003301-D7CA16",
@@ -519,11 +519,11 @@
       "liquidity_pool_price": null,
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002132590347,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261115-020146-785220",
       "tp_client_algo_id": "VTTPSDT-20261115-020146-785220",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
