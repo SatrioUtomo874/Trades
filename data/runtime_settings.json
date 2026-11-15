@@ -419,7 +419,7 @@
     "M15:SKYAIUSDT": 1794737700000,
     "M15:SKYUSDT": 1794737700000,
     "M15:SLPUSDT": 1794737700000,
-    "M15:SLXUSDT": 1794736800000,
+    "M15:SLXUSDT": 1794737700000,
     "M15:SNXUSDT": 1794737700000,
     "M15:SOLUSDT": 1794737700000,
     "M15:SOLVUSDT": 1794737700000,
@@ -539,8 +539,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 400,
+  "scan_resume_cursor": 450,
   "scan_resume_boundary_ms": 1794737700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-15T10:17:10.643503+00:00"
+  "updated_at": "2026-11-15T10:17:17.930548+00:00"
 }
