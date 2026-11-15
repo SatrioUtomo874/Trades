@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-15T06:19:18.040890+00:00",
+  "updated_at": "2026-11-15T06:19:22.471181+00:00",
   "active_trades": [
     {
       "trade_id": "GRIFFAINUSDT-20261115-095513-DCF854",
@@ -422,11 +422,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002137469013,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002137469655,
       "sl_client_algo_id": "VTSLSDT-20261115-131418-8C2CDB",
       "tp_client_algo_id": "VTTPSDT-20261115-131418-8C2CDB",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
