@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-15T07:18:05.873296+00:00",
+  "updated_at": "2026-11-15T07:18:07.922610+00:00",
   "active_trades": [
     {
       "trade_id": "GRIFFAINUSDT-20261115-095513-DCF854",
@@ -678,7 +678,7 @@
       "target_notional": "10",
       "actual_notional": "3.90824",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 343576566,
       "entry_client_order_id": "VTb0907ce8693bd4747be4388c69b6",
