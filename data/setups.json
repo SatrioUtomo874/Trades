@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-15T03:57:50.629196+00:00",
+  "updated_at": "2026-11-15T03:57:59.412467+00:00",
   "active_trades": [
     {
       "trade_id": "GRIFFAINUSDT-20261115-095513-DCF854",
@@ -170,7 +170,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "497",
-      "margin_usdt": "0.84822941",
+      "margin_usdt": "0.84771551",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "9.945467",
@@ -268,7 +268,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "344",
-      "margin_usdt": "0.93048113",
+      "margin_usdt": "0.93048664",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10.00696",
@@ -369,7 +369,7 @@
       "initial_risk": "0.000198",
       "realized_r": null,
       "quantity": "1160",
-      "margin_usdt": "1.00003368",
+      "margin_usdt": "0.999572",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10",
