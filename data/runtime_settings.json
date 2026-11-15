@@ -365,7 +365,7 @@
     "M15:PLAYUSDT": 1794717000000,
     "M15:PLUMEUSDT": 1794717000000,
     "M15:PNUTUSDT": 1794717000000,
-    "M15:POLUSDT": 1794713400000,
+    "M15:POLUSDT": 1794717000000,
     "M15:POLYXUSDT": 1794717000000,
     "M15:PONSUSDT": 1794717000000,
     "M15:POPCATUSDT": 1794717000000,
@@ -539,8 +539,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 350,
+  "scan_resume_cursor": 400,
   "scan_resume_boundary_ms": 1794717000000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-15T04:43:02.434058+00:00"
+  "updated_at": "2026-11-15T04:43:09.197656+00:00"
 }
