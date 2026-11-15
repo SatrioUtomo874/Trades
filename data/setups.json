@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-15T13:06:31.965980+00:00",
+  "updated_at": "2026-11-15T13:06:38.151259+00:00",
   "active_trades": [
     {
       "trade_id": "GRIFFAINUSDT-20261115-095513-DCF854",
@@ -130,7 +130,7 @@
       "tp_client_algo_id": null,
       "sl_algo_status": "NOT_PLACED",
       "tp_algo_status": "NOT_PLACED",
-      "protection_state": "NOT_REQUIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
