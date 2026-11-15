@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-15T14:01:02.118873+00:00",
+  "updated_at": "2026-11-15T14:01:16.924793+00:00",
   "active_trades": [
     {
       "trade_id": "GRIFFAINUSDT-20261115-095513-DCF854",
@@ -529,9 +529,9 @@
       "tp_algo_id": 4000002139823062,
       "sl_client_algo_id": "VTSLSDT-20261115-191117-B50734",
       "tp_client_algo_id": "VTTPSDT-20261115-191117-B50734",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "sl_algo_status": "EXPIRED",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
@@ -1101,8 +1101,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-15T14:01:08.284806+00:00",
+      "entry_trigger_price": "0.00842385",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "2.4.0",
       "entry_reason": "Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN; TP baseline 3.0R with farthest unmitigated Volume Liquidity Trend pool extension up to 5.0R",
