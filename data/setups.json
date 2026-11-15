@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-15T08:00:20.276756+00:00",
+  "updated_at": "2026-11-15T08:00:22.779207+00:00",
   "active_trades": [
     {
       "trade_id": "GRIFFAINUSDT-20261115-095513-DCF854",
@@ -746,9 +746,9 @@
       "ema_filter_slow_value": "0.02371570247029786",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794722400000,
-      "ema_exit_last_fast": "0.017706320276955304",
-      "ema_exit_last_slow": "0.01821166744691918",
+      "ema_exit_last_open_ms": 1794726000000,
+      "ema_exit_last_fast": "0.017723056221564244",
+      "ema_exit_last_slow": "0.0181733340426538",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
