@@ -546,3 +546,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T05:16:11.849413+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## IMXUSDT SHORT — CANCELED
+- Trade ID: `IMXUSDT-20261116-121756-62A9CA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T05:18:29.832617+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
