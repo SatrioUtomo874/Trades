@@ -282,3 +282,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T02:09:13.597837+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## RESOLVUSDT SHORT — CANCELED
+- Trade ID: `RESOLVUSDT-20261116-091124-0716E6`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T02:11:54.115942+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
