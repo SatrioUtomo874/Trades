@@ -540,3 +540,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T05:15:01.983496+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## ARXUSDT SHORT — CANCELED
+- Trade ID: `ARXUSDT-20261116-121533-150184`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T05:16:11.849413+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
