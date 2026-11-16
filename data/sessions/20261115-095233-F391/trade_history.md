@@ -708,3 +708,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T10:53:42.698023+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## PUMPUSDT SHORT — CANCELED
+- Trade ID: `PUMPUSDT-20261116-175454-ED68D1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T10:55:30.017596+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
