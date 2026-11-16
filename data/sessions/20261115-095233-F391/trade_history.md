@@ -624,3 +624,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T08:36:27.194768+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ATOMUSDT SHORT — CANCELED
+- Trade ID: `ATOMUSDT-20261116-153732-1F5937`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T08:38:05.505802+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
