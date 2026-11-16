@@ -330,3 +330,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T03:22:29.231529+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ARPAUSDT SHORT — CANCELED
+- Trade ID: `ARPAUSDT-20261116-101518-BC27BA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T03:23:34.186977+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
