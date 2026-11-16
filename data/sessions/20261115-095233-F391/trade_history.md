@@ -528,3 +528,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T04:52:48.882029+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ERAUSDT SHORT — EXPIRED
+- Trade ID: `ERAUSDT-20261116-113517-90A3E2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T05:15:01.792777+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
