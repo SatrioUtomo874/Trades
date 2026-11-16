@@ -618,3 +618,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T08:34:48.837174+00:00 | Reason: ENTRY_PRESEND_FAILED
+## ZECUSDT SHORT — CANCELED
+- Trade ID: `ZECUSDT-20261116-153516-6DC097`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T08:36:27.194768+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
