@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-16T00:58:59.656459+00:00",
+  "updated_at": "2026-11-16T00:59:02.071566+00:00",
   "active_trades": [
     {
       "trade_id": "BULLAUSDT-20261115-095513-3F99EF",
@@ -751,7 +751,7 @@
       "ema_filter_value": "0.00031997984639524677",
       "ema_filter_slow_value": "0.00033590807390944535",
       "ema_filter_passed": true,
-      "ema_exit_state": "UNINITIALIZED",
+      "ema_exit_state": "INITIALIZING",
       "ema_exit_last_open_ms": 0,
       "ema_exit_last_fast": null,
       "ema_exit_last_slow": null,
