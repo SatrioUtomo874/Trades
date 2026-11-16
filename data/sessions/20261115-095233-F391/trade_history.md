@@ -438,3 +438,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T04:15:00.127906+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## XMRUSDT SHORT — CANCELED
+- Trade ID: `XMRUSDT-20261116-111215-9D4720`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T04:15:01.463531+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
