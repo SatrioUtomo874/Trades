@@ -186,3 +186,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:18:50.065783+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MANTRAUSDT SHORT — CANCELED
+- Trade ID: `MANTRAUSDT-20261116-081645-71EE31`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:28:11.274853+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
