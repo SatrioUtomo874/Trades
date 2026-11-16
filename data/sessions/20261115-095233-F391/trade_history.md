@@ -384,3 +384,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T03:44:32.341611+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ZEREBROUSDT SHORT — CANCELED
+- Trade ID: `ZEREBROUSDT-20261116-103744-867EDD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T03:44:54.818125+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
