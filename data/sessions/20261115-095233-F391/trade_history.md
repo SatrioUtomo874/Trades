@@ -522,3 +522,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T04:52:16.953756+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## XPINUSDT SHORT — CANCELED
+- Trade ID: `XPINUSDT-20261116-115058-A9C32C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T04:52:48.882029+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
