@@ -246,3 +246,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:45:33.485126+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## COMPUSDT SHORT — EXPIRED
+- Trade ID: `COMPUSDT-20261116-080716-81C993`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:45:45.579224+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
