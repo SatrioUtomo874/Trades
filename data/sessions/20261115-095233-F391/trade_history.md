@@ -678,3 +678,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T10:02:53.349359+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CTKUSDT SHORT — CANCELED
+- Trade ID: `CTKUSDT-20261116-170241-BD3704`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T10:03:38.579811+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
