@@ -234,3 +234,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:45:07.610829+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## ANIMEUSDT SHORT — EXPIRED
+- Trade ID: `ANIMEUSDT-20261116-080119-7D1549`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:45:20.729165+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
