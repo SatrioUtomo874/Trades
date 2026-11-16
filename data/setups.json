@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-16T09:16:36.316406+00:00",
+  "updated_at": "2026-11-16T09:16:39.959908+00:00",
   "active_trades": [
     {
       "trade_id": "PRLUSDT-20261115-141657-C99A9E",
@@ -936,11 +936,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002147781005,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002147781370,
       "sl_client_algo_id": "VTSLSDT-20261116-161512-0652C6",
       "tp_client_algo_id": "VTTPSDT-20261116-161512-0652C6",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
