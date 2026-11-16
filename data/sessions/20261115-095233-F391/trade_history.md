@@ -240,3 +240,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:45:20.729165+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## CELOUSDT SHORT — EXPIRED
+- Trade ID: `CELOUSDT-20261116-080623-A488D1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:45:33.485126+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
