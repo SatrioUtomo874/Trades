@@ -534,3 +534,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T05:15:01.792777+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## RENDERUSDT SHORT — EXPIRED
+- Trade ID: `RENDERUSDT-20261116-113835-049A9A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T05:15:01.983496+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
