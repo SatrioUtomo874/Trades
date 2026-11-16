@@ -606,3 +606,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T08:21:25.267326+00:00 | Reason: PREFLIGHT_REJECTED
+## XANUSDT SHORT — CANCELED
+- Trade ID: `XANUSDT-20261116-153251-7B9737`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T08:33:24.865447+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
