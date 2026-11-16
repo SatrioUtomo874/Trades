@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-16T04:00:42.513202+00:00",
+  "updated_at": "2026-11-16T04:00:45.166438+00:00",
   "active_trades": [
     {
       "trade_id": "PRLUSDT-20261115-141657-C99A9E",
@@ -250,9 +250,9 @@
       "ema_filter_slow_value": "0.030116340066299832",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794794400000,
-      "ema_exit_last_fast": "0.027121650526766777",
-      "ema_exit_last_slow": "0.027262109779252305",
+      "ema_exit_last_open_ms": 1794798000000,
+      "ema_exit_last_fast": "0.02714332042141342",
+      "ema_exit_last_slow": "0.027259190708411186",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
@@ -939,7 +939,7 @@
       "tp_algo_id": 4000002145440453,
       "sl_client_algo_id": "VTSLSDT-20261116-101710-AEA0CF",
       "tp_client_algo_id": "VTTPSDT-20261116-101710-AEA0CF",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "EXPIRED",
       "tp_algo_status": "NEW",
       "protection_state": "ACTIVE",
       "protection_error": null,
