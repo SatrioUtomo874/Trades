@@ -582,3 +582,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T06:16:34.769236+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CFXUSDT SHORT — CANCELED
+- Trade ID: `CFXUSDT-20261116-131735-FEAF2E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T06:18:08.242125+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
