@@ -570,3 +570,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T06:08:20.805012+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## GUNUSDT SHORT — EXPIRED
+- Trade ID: `GUNUSDT-20261116-123239-EE4703`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T06:15:00.453757+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
