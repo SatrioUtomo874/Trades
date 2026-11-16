@@ -17,9 +17,9 @@
   "min_margin_enabled": false,
   "last_processed_candles": {
     "M15:0GUSDT": 1794799800000,
-    "M15:1000000MOGUSDT": 1794798900000,
+    "M15:1000000MOGUSDT": 1794799800000,
     "M15:1000BONKUSDT": 1794799800000,
-    "M15:1000CATUSDT": 1794798000000,
+    "M15:1000CATUSDT": 1794799800000,
     "M15:1000CHEEMSUSDT": 1794799800000,
     "M15:1000FLOKIUSDT": 1794799800000,
     "M15:1000LUNCUSDT": 1794799800000,
@@ -30,7 +30,7 @@
     "M15:1000XECUSDT": 1794799800000,
     "M15:1INCHUSDT": 1794799800000,
     "M15:1MBABYDOGEUSDT": 1794799800000,
-    "M15:2ZUSDT": 1794798900000,
+    "M15:2ZUSDT": 1794799800000,
     "M15:4USDT": 1794799800000,
     "M15:AAVEUSDT": 1794799800000,
     "M15:ACEUSDT": 1794799800000,
@@ -539,8 +539,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 0,
-  "scan_resume_boundary_ms": 0,
+  "scan_resume_cursor": 50,
+  "scan_resume_boundary_ms": 1794799800000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-16T03:38:26.042909+00:00"
+  "updated_at": "2026-11-16T03:43:08.098836+00:00"
 }
