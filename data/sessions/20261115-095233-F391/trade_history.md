@@ -264,3 +264,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:49:10.516515+00:00 | Reason: PRICE_BEYOND_SL_BEFORE_ENTRY
+## SPXUSDT SHORT — CANCELED
+- Trade ID: `SPXUSDT-20261116-085409-419C3A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:54:39.796831+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
