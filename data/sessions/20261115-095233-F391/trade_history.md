@@ -450,3 +450,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T04:15:02.429910+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## ALICEUSDT SHORT — CANCELED
+- Trade ID: `ALICEUSDT-20261116-111526-F0C1C3`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T04:16:12.977252+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
