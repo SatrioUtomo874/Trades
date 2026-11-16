@@ -318,3 +318,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T03:19:50.345084+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## RAVEUSDT SHORT — CANCELED
+- Trade ID: `RAVEUSDT-20261116-102045-8078DC`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T03:21:24.380633+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
