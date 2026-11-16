@@ -630,3 +630,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T08:38:05.505802+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AVNTUSDT SHORT — CANCELED
+- Trade ID: `AVNTUSDT-20261116-153755-94D3DD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T08:38:57.034632+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
