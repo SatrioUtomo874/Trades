@@ -564,3 +564,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T05:22:43.401364+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## PLAYUSDT SHORT — CANCELED
+- Trade ID: `PLAYUSDT-20261116-130703-AD9F98`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T06:08:20.805012+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
