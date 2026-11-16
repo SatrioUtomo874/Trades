@@ -600,3 +600,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T06:45:01.775978+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## ONDOUSDT SHORT — CANCELED
+- Trade ID: `ONDOUSDT-20261116-151817-174C34`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T08:21:25.267326+00:00 | Reason: PREFLIGHT_REJECTED
