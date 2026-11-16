@@ -684,3 +684,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T10:03:38.579811+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## XVSUSDT SHORT — CANCELED
+- Trade ID: `XVSUSDT-20261116-170554-A0D258`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T10:07:13.432586+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
