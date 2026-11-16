@@ -594,3 +594,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T06:20:25.370300+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SAHARAUSDT SHORT — EXPIRED
+- Trade ID: `SAHARAUSDT-20261116-130902-EFAF97`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T06:45:01.775978+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
