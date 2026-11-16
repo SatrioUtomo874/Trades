@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-16T04:00:19.765932+00:00",
+  "updated_at": "2026-11-16T04:00:22.187810+00:00",
   "active_trades": [
     {
       "trade_id": "PRLUSDT-20261115-141657-C99A9E",
@@ -963,10 +963,10 @@
       "ema_exit_trigger_close_ms": 1794801600000,
       "ema_exit_trigger_price": "0.02876",
       "ema_exit_reason": "EMA_H1_BULLISH_CROSS",
-      "ema_exit_client_order_id": null,
+      "ema_exit_client_order_id": "emaexit4f9ab93f2ab512e0a564ae",
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
-      "ema_exit_attempts": 0,
+      "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-16T04:00:00+00:00",
       "status": "FILLED",
