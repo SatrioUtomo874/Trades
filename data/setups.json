@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-16T03:00:06.217586+00:00",
+  "updated_at": "2026-11-16T03:00:10.594387+00:00",
   "active_trades": [
     {
       "trade_id": "PRLUSDT-20261115-141657-C99A9E",
@@ -653,10 +653,10 @@
       "ema_filter_value": "0.00031997984639524677",
       "ema_filter_slow_value": "0.00033590807390944535",
       "ema_filter_passed": true,
-      "ema_exit_state": "INITIALIZING",
-      "ema_exit_last_open_ms": 1794787200000,
-      "ema_exit_last_fast": "0.0003111973060829324",
-      "ema_exit_last_slow": "0.0003139123304274485",
+      "ema_exit_state": "ACTIVE",
+      "ema_exit_last_open_ms": 1794794400000,
+      "ema_exit_last_fast": "0.0003085982758925562",
+      "ema_exit_last_slow": "0.0003121758051028457",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
@@ -664,7 +664,7 @@
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
       "ema_exit_attempts": 0,
-      "ema_exit_last_error": "H1 event gap: last=1794787200000, current=1794794400000; reconstructing closed candles.",
+      "ema_exit_last_error": null,
       "expires_at": "2026-11-16T01:30:00+00:00",
       "status": "FILLED",
       "created_at": "2026-11-16T00:57:28.764999+00:00",
