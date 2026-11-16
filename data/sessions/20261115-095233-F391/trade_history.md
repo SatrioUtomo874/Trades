@@ -372,3 +372,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T03:41:24.574710+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## PIPPINUSDT SHORT — CANCELED
+- Trade ID: `PIPPINUSDT-20261116-103500-EF456A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T03:41:43.406823+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
