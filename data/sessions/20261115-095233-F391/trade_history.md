@@ -672,3 +672,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T10:02:05.139520+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## COMPUSDT SHORT — CANCELED
+- Trade ID: `COMPUSDT-20261116-170155-63ABA3`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T10:02:53.349359+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
