@@ -8,9 +8,8 @@ available to an external launcher. Running this file directly also starts a
 local Telegram Bot API long-polling adapter, so no separate try.py is needed.
 
 The strategy combines confirmed M15 Volumatic bubble flips, the latest
-closed H4 EMA direction filter, and M15 Supertrend SL. TP starts at the
-configurable RR_MIN, then extends to the furthest unmitigated Volume Liquidity
-Trend pool no farther than the configurable RR_MAX.
+closed H4 EMA direction filter, and M15 Supertrend SL. TP starts at the configurable RR_MIN, then extends to the furthest unmitigated
+Volume Liquidity Trend pool across M5/M15/H1/H4, capped by configurable RR_MAX.
 Entries are MARKET-on-touch: a signal stores its entry level locally, the
 market WebSocket watches it, and one MARKET order is sent when price touches
 the level; closePosition TP/SL are installed right after the fill.
@@ -674,6 +673,7 @@ class Trade:
     take_profit_source: str = "RR_MIN_BASE"
     take_profit_rr: Decimal = Decimal("3")
     liquidity_pool_price: Decimal | None = None
+    liquidity_pool_timeframe: str | None = None
     supertrend_atr_length: int = volumatic.SUPERTREND_ATR_LENGTH
     supertrend_factor: float = volumatic.SUPERTREND_FACTOR
     sl_algo_id: int | None = None
@@ -783,6 +783,7 @@ class Trade:
             "take_profit_source": self.take_profit_source,
             "take_profit_rr": decimal_to_str(self.take_profit_rr),
             "liquidity_pool_price": decimal_to_str(self.liquidity_pool_price),
+            "liquidity_pool_timeframe": self.liquidity_pool_timeframe,
             "supertrend_atr_length": self.supertrend_atr_length,
             "supertrend_factor": self.supertrend_factor,
             "sl_algo_id": self.sl_algo_id, "tp_algo_id": self.tp_algo_id,
@@ -840,7 +841,7 @@ class Trade:
             "entry_triggered_at": iso_utc(self.entry_triggered_at) if self.entry_triggered_at else None,
             "entry_trigger_price": decimal_to_str(self.entry_trigger_price),
             "strategy_name": volumatic.STRATEGY_NAME, "strategy_version": volumatic.STRATEGY_VERSION,
-            "entry_reason": f"Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN; TP baseline {self.rr_min}R with farthest unmitigated Volume Liquidity Trend pool extension up to {self.rr_max}R",
+            "entry_reason": f"Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN; TP baseline {self.rr_min}R with farthest unmitigated Volume Liquidity Trend pool across M5/M15/H1/H4 up to {self.rr_max}R",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
             ),
@@ -919,6 +920,7 @@ class Trade:
             take_profit_source=str(row.get("take_profit_source") or "RR_MIN_BASE").upper(),
             take_profit_rr=dec("take_profit_rr", dec("rr_min", Decimal("3"))) or Decimal("3"),
             liquidity_pool_price=dec("liquidity_pool_price"),
+            liquidity_pool_timeframe=(str(row.get("liquidity_pool_timeframe") or "").upper() or None),
             supertrend_atr_length=saved_supertrend_atr_length,
             supertrend_factor=saved_supertrend_factor,
             sl_algo_id=int(row["sl_algo_id"]) if row.get("sl_algo_id") not in (None, "") else None,
@@ -4477,6 +4479,21 @@ class BinanceUserDataWebSocket:
             raise RuntimeError("Respons userDataStream WS API memiliki request ID berbeda.")
         if int(response.get("status") or 0) != 200:
             error = response.get("error") or response
+            error_code = error.get("code") if isinstance(error, dict) else None
+            error_message = error.get("msg") if isinstance(error, dict) else None
+            parsed_code = (
+                int(error_code)
+                if isinstance(error_code, (int, float, str))
+                and str(error_code).lstrip("-").isdigit()
+                else None
+            )
+            if parsed_code is not None:
+                raise BinanceAPIError(
+                    str(error_message or error),
+                    status_code=int(response.get("status") or 400),
+                    code=parsed_code,
+                    endpoint=f"WS_API/{method}",
+                )
             raise RuntimeError(f"userDataStream WS API {method} ditolak: {error}")
         result = response.get("result") or {}
         key = str(result.get("listenKey") or self.listen_key or "").strip()
@@ -4484,27 +4501,56 @@ class BinanceUserDataWebSocket:
             raise RuntimeError(f"userDataStream WS API {method} tidak mengembalikan listenKey.")
         return key
 
-    async def _renew_key_if_due(self) -> None:
+    def _invalidate_listen_key(self, reason: str) -> None:
+        """Forget an exchange-rejected listenKey so the next loop creates a fresh one."""
+        old_key_present = bool(self.listen_key)
+        self.listen_key = None
+        self.last_keepalive_monotonic = 0.0
+        self._save_local_state()
+        log.warning(
+            "[USER WS] listenKey tidak valid/expired; key lokal dibuang dan akan dibuat ulang | reason=%s | had_key=%s",
+            str(reason)[:220], old_key_present,
+        )
+
+    async def _renew_key_if_due(self) -> bool:
+        """Renew the active key; False means the current socket must reconnect with a new key."""
         if not self.listen_key:
-            return
+            return False
         if time.monotonic() - self.last_keepalive_monotonic < BINANCE_USER_STREAM_KEEPALIVE_SECONDS:
-            return
+            return True
         if BINANCE_COOLDOWN.remaining() > 0:
             # Prefer WebSocket API keepalive during an HTTP REST ban. It is
             # attempted only on the 45-minute keepalive cadence, not per tick.
-            # A failure is backed off by five minutes; the current private
-            # socket remains active while Binance's listenKey is still valid.
+            # A transient failure is backed off by five minutes; an invalid key
+            # is discarded immediately so it cannot be reused on reconnect.
             try:
                 self.listen_key = await self._user_stream_ws_api("userDataStream.ping")
                 self.last_keepalive_monotonic = time.monotonic()
+                self._save_local_state()
                 log.info("[USER WS] listenKey renewed through WebSocket API during REST cooldown")
+            except BinanceAPIError as exc:
+                if exc.code == -1125:
+                    self._invalidate_listen_key(str(exc))
+                    return False
+                self.last_keepalive_monotonic = time.monotonic() - BINANCE_USER_STREAM_KEEPALIVE_SECONDS + 300.0
+                log.info("[USER WS] keepalive tertunda selama REST cooldown; retry dalam 5 menit | %s", exc)
             except Exception as exc:
                 self.last_keepalive_monotonic = time.monotonic() - BINANCE_USER_STREAM_KEEPALIVE_SECONDS + 300.0
                 log.info("[USER WS] keepalive tertunda selama REST cooldown; retry dalam 5 menit | %s", exc)
-            return
-        self.listen_key = await self.real.keepalive_user_stream(self.listen_key)
+            return True
+
+        try:
+            renewed_key = await self.real.keepalive_user_stream(self.listen_key)
+        except BinanceAPIError as exc:
+            if exc.code == -1125:
+                self._invalidate_listen_key(str(exc))
+                return False
+            raise
+        self.listen_key = renewed_key or self.listen_key
         self.last_keepalive_monotonic = time.monotonic()
+        self._save_local_state()
         log.info("[USER WS] listenKey renewed")
+        return True
 
     # The private stream carries only ORDER_TRADE_UPDATE / ACCOUNT_UPDATE /
     # ALGO_UPDATE events. Market ticks are handled exclusively by the public
@@ -4560,6 +4606,7 @@ class BinanceUserDataWebSocket:
                         try:
                             self.listen_key = await self._user_stream_ws_api("userDataStream.start")
                             self.last_keepalive_monotonic = time.monotonic()
+                            self._save_local_state()
                         except Exception as exc:
                             log.info("[USER WS] userDataStream.start belum tersedia saat REST cooldown; retry terjadwal | %s", exc)
                             await asyncio.sleep(max(300.0, min(900.0, BINANCE_COOLDOWN.remaining() or 300.0)))
@@ -4591,7 +4638,11 @@ class BinanceUserDataWebSocket:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=20.0)
                         except asyncio.TimeoutError:
-                            await self._renew_key_if_due()
+                            if not await self._renew_key_if_due():
+                                # Binance rejected/expired this key. Exit the
+                                # current socket; the outer loop will POST a
+                                # fresh listenKey before reconnecting.
+                                break
                             continue
                         if raw is None:
                             raise ConnectionError("Private user stream closed by Binance")
@@ -4615,7 +4666,10 @@ class BinanceUserDataWebSocket:
                                 await self.on_event(payload)
                             except Exception:
                                 log.exception("[USER WS] order/account event handler failed")
-                        await self._renew_key_if_due()
+                        if not await self._renew_key_if_due():
+                            # Do not reconnect with a listenKey already rejected
+                            # by the keepalive endpoint.
+                            break
 
             except asyncio.CancelledError:
                 break
@@ -5038,6 +5092,7 @@ class TradingEngine:
         # persisted: every fresh /try starts with scanner OFF and no schedule.
         self.scan_schedule_slots: tuple[str, ...] = ()
         self.scan_schedule_waiting = False
+        self.scan_schedule_armed_at: datetime | None = None
         self.scan_schedule_activated_at: str | None = None
         self._scan_schedule_last_fired_minute: str | None = None
 
@@ -5607,6 +5662,7 @@ class TradingEngine:
                 self._scanner_symbols.clear()
                 self.scan_schedule_waiting = False
                 self.scan_schedule_slots = ()
+                self.scan_schedule_armed_at = None
                 self.scan_schedule_activated_at = None
                 self._scan_schedule_last_fired_minute = None
                 log.info(
@@ -6224,6 +6280,7 @@ class TradingEngine:
         self._scan_trigger_now = False
         self.scan_schedule_slots = ()
         self.scan_schedule_waiting = False
+        self.scan_schedule_armed_at = None
         self.scan_schedule_activated_at = None
         self._scan_schedule_last_fired_minute = None
         self.timeframe = "M15"
@@ -6354,6 +6411,7 @@ class TradingEngine:
         self._scan_trigger_now = False
         self.scan_schedule_slots = ()
         self.scan_schedule_waiting = False
+        self.scan_schedule_armed_at = None
         self.scan_schedule_activated_at = None
         self._scan_schedule_last_fired_minute = None
         self.real_mode = False
@@ -6561,20 +6619,34 @@ class TradingEngine:
         await self.reply("\n".join(lines))
 
     async def _check_scan_schedule_activation(self) -> bool:
-        """Activate scanner once when a selected WIB slot is reached.
+        """Execute the /scan on path once a selected WIB slot is reached.
 
-        After activation, scanning remains ON continuously until /scan off.
-        A selected schedule is only a delayed-start gate, not a daily on/off
-        window. Schedule state is intentionally in-memory for this fresh
-        engine session only.
+        Schedules coexist with manual scanning: arming one never turns an
+        already-running scanner OFF. After the trigger, scanning remains ON
+        continuously until /scan off. Schedule state is session-only.
         """
         if not self.scan_schedule_waiting or not self.scan_schedule_slots:
             return False
         now = datetime.now(TZ)
-        hhmm = now.strftime("%H:%M")
-        if hhmm not in self.scan_schedule_slots:
+        armed_at = self.scan_schedule_armed_at or now
+
+        # Resolve the first selected slot after the schedule was armed. Comparing
+        # full datetimes (rather than only the current HH:MM) prevents a slot
+        # from being missed when a long scan cycle keeps this loop busy for over
+        # one minute.
+        next_slot: datetime | None = None
+        for selected_hhmm in self.scan_schedule_slots:
+            selected_time = datetime.strptime(selected_hhmm, "%H:%M").time()
+            candidate = datetime.combine(armed_at.date(), selected_time, tzinfo=TZ)
+            if candidate <= armed_at:
+                candidate += timedelta(days=1)
+            if next_slot is None or candidate < next_slot:
+                next_slot = candidate
+        if next_slot is None or now < next_slot:
             return False
-        minute_key = now.strftime("%Y-%m-%d %H:%M")
+
+        hhmm = next_slot.strftime("%H:%M")
+        minute_key = next_slot.strftime("%Y-%m-%d %H:%M")
         if minute_key == self._scan_schedule_last_fired_minute:
             return False
         if self._autostop_triggered:
@@ -6585,29 +6657,49 @@ class TradingEngine:
         self._scan_schedule_last_fired_minute = minute_key
         self.scan_schedule_waiting = False
         self.scan_schedule_activated_at = now.strftime("%d-%m-%Y %H:%M WIB")
-        self.scan_enabled = True
-        self._scan_trigger_now = True
-        self._last_scan_boundary_ms = 0
-        await self.ws.start()
-        await self._sync_ws_symbols()
         selected = ", ".join(self.scan_schedule_slots)
-        message = (
+
+        # Execute the exact same command path as a Telegram `/scan on`.
+        # This intentionally also works when the scanner is already ON: the
+        # command re-arms an immediate scan without cancelling this schedule.
+        log.info(
+            "[SCAN SCHEDULE] slot reached; executing /scan on | slot=%s | selected=%s",
+            hhmm, selected,
+        )
+        try:
+            await self._handle_scan("/scan on")
+        except Exception:
+            # Keep the schedule recoverable if websocket synchronization or
+            # another part of the normal /scan on path raises unexpectedly.
+            self.scan_schedule_waiting = True
+            self.scan_schedule_armed_at = next_slot
+            raise
+        if not self.scan_enabled:
+            # Safety guards may reject /scan on (for example AUTOSTOP without
+            # a fresh baseline). Keep the schedule for its next selected slot,
+            # not in a tight retry against the slot that was just attempted.
+            self.scan_schedule_waiting = True
+            self.scan_schedule_armed_at = next_slot
+            return False
+        self.scan_schedule_armed_at = None
+
+        await self.reply(
             "🟢 VOLUMATIC / SCHEDULE TRIGGERED\n\n"
             f"SLOT      : {hhmm} WIB\n"
             f"SELECTED  : {selected} WIB\n"
-            f"SIGNAL TF : M15 • EMA TF: H4\n"
-            f"BATCH     : {SCAN_MAX_PAIRS_PER_CYCLE} symbols\n"
+            "ACTION    : perintah /scan on dijalankan\n"
             "SCANNER   : ON — continuous\n"
             "CONTROL   : gunakan /scan off untuk menghentikan."
         )
-        await self.reply(message)
         log.info("[SCAN SCHEDULE] activated | slot=%s | selected=%s | tf=%s", hhmm, selected, self.timeframe)
         return True
 
     async def _scan_loop(self) -> None:
         while self._running:
             try:
-                if not self.scan_enabled and self.scan_schedule_waiting:
+                # Schedules are independent of the current scanner state.
+                # A pending slot must still fire while scans are already ON.
+                if self.scan_schedule_waiting:
                     await self._check_scan_schedule_activation()
                 if not self.scan_enabled:
                     await asyncio.sleep(SCAN_POLL_SECONDS)
@@ -6881,23 +6973,76 @@ class TradingEngine:
                             self.last_processed_candles[key] = entry_open_ms
                             self._scan_resume_cursor = absolute_index + 1
                             continue
-                        # H1 EMA entry gate: fetched only for a real signal that already
-                        # passed the H4 gate, to avoid extra REST weight on every coin.
+                        # Liquidity TP uses only M5 + M15 + H1 + H4. Fetch the
+                        # extra M5/H1 histories only after a genuine M15/H4/BTC
+                        # signal exists, so the added REST weight is not paid by
+                        # every symbol in the universe. H1 is reused for its EMA gate.
+                        m5_liquidity = None
+                        h1 = None
+                        try:
+                            m5_liquidity = await self.rest.get_klines(
+                                symbol, "5m", max(KLINE_HISTORY, 220), 300_000, force_refresh=False,
+                            )
+                        except BinanceRateLimitError:
+                            raise
+                        except Exception as m5_exc:
+                            log.warning("[LIQUIDITY] %s M5 data unavailable; TP will use available M15/H1/H4 pools: %s", symbol, str(m5_exc)[:180])
+                        try:
+                            h1_liquidity_count = max(KLINE_HISTORY, self._h4_ema_history_limit(ema_filter_length))
+                            h1 = await self.rest.get_klines(
+                                symbol, "1h", h1_liquidity_count, H1_MS, force_refresh=False,
+                            )
+                        except BinanceRateLimitError:
+                            raise
+                        except Exception as h1_exc:
+                            h1 = None
+                            log.warning("[LIQUIDITY] %s H1 data unavailable; TP will use available M5/M15/H4 pools: %s", symbol, str(h1_exc)[:180])
+
+                        # Re-evaluate the same confirmed M15 setup with all four
+                        # liquidity sources. Entry, EMA gates, Supertrend SL and RR
+                        # rules remain identical; only the TP pool search expands.
+                        liquidity_diagnostics: dict[str, Any] = {}
+                        multi_tf_signal = volumatic.detect_backtest_signal(
+                            m15, h4, symbol=symbol, trend_length=trend_length,
+                            ema_filter_length=ema_filter_length,
+                            btc_h4_closed=btc_h4_closed,
+                            liquidity_m5_closed=m5_liquidity,
+                            liquidity_h1_closed=h1,
+                            supertrend_atr_length=supertrend_atr_length,
+                            supertrend_factor=supertrend_factor,
+                            rr_min=float(rr_min),
+                            rr_max=float(rr_max),
+                            diagnostics=liquidity_diagnostics,
+                        )
+                        if multi_tf_signal is None:
+                            rejection_reason = str(liquidity_diagnostics.get("reason") or "LIQUIDITY_RECHECK_FAILED")
+                            if rejection_reason == "M15_ENTRY_WINDOW_EXPIRED":
+                                stats["stale"] += 1
+                            else:
+                                stats["rejected"] += 1
+                                reasons = stats["rejection_reasons"]
+                                reasons[rejection_reason] = int(reasons.get(rejection_reason, 0)) + 1
+                            self.last_processed_candles[key] = entry_open_ms
+                            self._scan_resume_cursor = absolute_index + 1
+                            continue
+                        signal = multi_tf_signal
+                        signal["h1_enabled_at_scan"] = h1_enabled
+
+                        # H1 EMA entry gate: the H1 history fetched for liquidity
+                        # above is reused, including its existing fail-closed rule.
                         if h1_enabled and ema_filter_length is not None and (
                             signal.get("ema_filter_passed") is True
                         ):
-                            try:
-                                h1 = await self.rest.get_klines(
-                                    symbol, "1h", self._h4_ema_history_limit(ema_filter_length),
-                                    H1_MS, force_refresh=False,
-                                )
-                            except BinanceRateLimitError:
-                                raise
-                            except Exception as h1_exc:
-                                h1 = None
-                                log.warning("[H1 EMA] %s data H1 gagal; entry diblokir fail-closed: %s", symbol, h1_exc)
+                            # Keep the original H1 EMA warm-up window exactly
+                            # as before; the longer H1 history is only for pools.
+                            h1_ema_history_count = self._h4_ema_history_limit(ema_filter_length)
+                            h1_ema_history = (
+                                h1[-h1_ema_history_count:]
+                                if h1 is not None and len(h1) >= h1_ema_history_count
+                                else h1
+                            )
                             signal.update(volumatic.h1_ema_filter_state(
-                                h1, ema_filter_length, str(signal.get("direction") or ""),
+                                h1_ema_history, ema_filter_length, str(signal.get("direction") or ""),
                                 int(signal.get("signal_close_time_ms") or 0),
                             ))
                         bubble = str(signal.get("signal") or "?").upper()
@@ -6932,7 +7077,7 @@ class TradingEngine:
                             f"BTC={signal.get('btc_ema_filter_reason', 'UNKNOWN')} "
                             f"ENTRY={signal.get('entry_price')} SL={signal.get('stop_loss')} "
                             f"TP={signal.get('take_profit')} RR={signal.get('take_profit_rr')} "
-                            f"SRC={signal.get('take_profit_source')} {outcome}"[:230]
+                            f"SRC={signal.get('take_profit_source')}@{signal.get('liquidity_pool_timeframe') or '-'} {outcome}"[:230]
                         )
                         self.last_processed_candles[key] = entry_open_ms
                         if outcome != "ERROR_RETRY":
@@ -7555,6 +7700,7 @@ class TradingEngine:
                 rr_min=signal_rr_min, rr_max=signal_rr_max,
                 take_profit_source=target_source, take_profit_rr=target_rr,
                 liquidity_pool_price=liquidity_pool_price,
+                liquidity_pool_timeframe=(str(signal.get("liquidity_pool_timeframe") or "").upper() or None),
                 supertrend_atr_length=volumatic.normalize_supertrend_atr_length(
                     signal.get("supertrend_atr_length", self.supertrend_atr_length)
                 ),
@@ -7639,6 +7785,7 @@ class TradingEngine:
                     rr_min=decimal_to_str(trade.rr_min), rr_max=decimal_to_str(trade.rr_max),
                     take_profit_source=trade.take_profit_source,
                     liquidity_pool_price=decimal_to_str(trade.liquidity_pool_price),
+                    liquidity_pool_timeframe=trade.liquidity_pool_timeframe,
                     signal_close_time_ms=signal_close_ms, entry_candle_open_time_ms=entry_open_ms,
                     expires_at=iso_utc(trade.expires_at), expiry_seconds=ENTRY_ORDER_TTL_SECONDS,
                     real=trade.real_intent, quantity=decimal_to_str(trade.quantity),
@@ -7657,7 +7804,7 @@ class TradingEngine:
                     f"Eksekusi: {'MARKET saat harga menyentuh level (dipantau WebSocket)' if trade.real_intent else 'PAPER saat harga menyentuh level'}\n"
                     f"Supertrend M15 SL: {fmt_price(trade.stop_loss)} • ATR {trade.supertrend_atr_length} / Factor {trade.supertrend_factor:g}\n"
                     f"TP: {fmt_price(trade.take_profit)} • RR 1:{fmt_num(trade.take_profit_rr, 2)} "
-                    f"({'Volume Liquidity Trend' if trade.take_profit_source == 'VOLUME_LIQUIDITY' else f'baseline {trade.rr_min}R'})\n"
+                    f"({'Volume Liquidity Trend' + (' · ' + trade.liquidity_pool_timeframe if trade.liquidity_pool_timeframe else '') if trade.take_profit_source == 'VOLUME_LIQUIDITY' else f'baseline {trade.rr_min}R'})\n"
                     f"Auto-expire: 1 jam sejak bubble M15 terbentuk ({format_wib(trade.expires_at)})\n"
                     f"Margin target: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
                     + (
@@ -8256,6 +8403,7 @@ class TradingEngine:
             rr_min=decimal_to_str(trade.rr_min), rr_max=decimal_to_str(trade.rr_max),
             take_profit_source=trade.take_profit_source,
             liquidity_pool_price=decimal_to_str(trade.liquidity_pool_price),
+            liquidity_pool_timeframe=trade.liquidity_pool_timeframe,
             protection_locked=protection_locked,
         )
         if defer_persist:
@@ -8547,6 +8695,7 @@ class TradingEngine:
                                  rr_target=f"1:{decimal_to_str(trade.take_profit_rr)}",
                                  take_profit_source=trade.take_profit_source,
                                  liquidity_pool_price=decimal_to_str(trade.liquidity_pool_price),
+                                 liquidity_pool_timeframe=trade.liquidity_pool_timeframe,
                                  sl_algo_id=trade.sl_algo_id, tp_algo_id=trade.tp_algo_id,
                                  sl_working_type="CONTRACT_PRICE",
                                  tp_working_type="MARK_PRICE", close_position=True)
@@ -11757,6 +11906,11 @@ class TradingEngine:
         if action == "status":
             positions, pending_setups, filled, live_limits = self._active_slot_counts()
             state = self._scanner_state_label()
+            schedule_status = (
+                f"WAITING ({', '.join(self.scan_schedule_slots)} WIB)"
+                if self.scan_schedule_waiting else
+                (f"ACTIVATED {self.scan_schedule_activated_at}" if self.scan_schedule_activated_at else "OFF")
+            )
             await self.reply(
                 "VOLUMATIC SCAN STATUS\n\n"
                 f"State: {state}\n"
@@ -11765,7 +11919,7 @@ class TradingEngine:
                 f"Pending setups: {pending_setups} · Live LIMIT orders: {live_limits}\n"
                 f"TP RR: base 1:{self.rr_min} · liquidity cap 1:{self.rr_max}\n"
                 "Rule: pending setup/order tidak memakai slot; scanner tetap mencari sinyal saat MAX penuh, tetapi entry baru diblokir.\n"
-                f"Schedule: {', '.join(self.scan_schedule_slots) if self.scan_schedule_slots else '-'}"
+                f"Schedule: {schedule_status}"
             )
             return
 
@@ -11774,7 +11928,7 @@ class TradingEngine:
                 lines = [
                     "╔════ VOLUMATIC / SCAN SCHEDULE ════╗",
                     "TIMEZONE : ASIA/JAKARTA (WIB)",
-                    "MODE     : delayed activation → continuous ON",
+                    "MODE     : scheduled /scan on → continuous ON",
                     "──────────────────────────────────",
                 ]
                 for number, hhmm in SCAN_SCHEDULE_SLOTS:
@@ -11786,7 +11940,8 @@ class TradingEngine:
                     f"SELECTED : {', '.join(self.scan_schedule_slots) if self.scan_schedule_slots else '-'}",
                     "PILIH    : /scan schedule 1,3,6",
                     "CANCEL   : /scan schedule off",
-                    "INFO     : setelah salah satu slot terpilih tercapai, scanner ON terus sampai /scan off.",
+                    "INFO     : jadwal tetap aktif meski scanner sedang ON; saat slot tercapai bot menjalankan /scan on.",
+                    "INFO     : scanner yang sudah ON tidak dihentikan saat jadwal dipasang.",
                     "INFO     : slot 12:00 adalah slot tambahan; enam slot lainnya mengikuti close H4 WIB.",
                 ]
                 await self.reply("\n".join(lines))
@@ -11796,6 +11951,8 @@ class TradingEngine:
             if selection in {"off", "clear", "none"}:
                 self.scan_schedule_slots = ()
                 self.scan_schedule_waiting = False
+                self.scan_schedule_armed_at = None
+                self.scan_schedule_activated_at = None
                 self._scan_schedule_last_fired_minute = None
                 await self.reply(
                     "🟡 SCAN SCHEDULE CLEARED\n"
@@ -11822,24 +11979,23 @@ class TradingEngine:
                 await self.reply("⛔ AUTOSTOP sedang TRIGGERED. Reset pengaman sebelum memasang jadwal scanner.")
                 return
 
-            # Selecting a schedule explicitly arms a delayed start and forces
-            # scanner OFF now. Once the first selected slot is reached, it
-            # remains ON continuously until a manual /scan off.
-            self.scan_enabled = False
-            self._scan_trigger_now = False
-            self._scanner_symbols.clear()
+            # Schedule is a separate trigger, not an alternative scanner mode.
+            # Keep an already-running scanner untouched; if OFF, it will turn ON
+            # when the first selected WIB slot is reached.
             self.scan_schedule_slots = selected_slots
             self.scan_schedule_waiting = True
+            self.scan_schedule_armed_at = datetime.now(TZ)
             self.scan_schedule_activated_at = None
             self._scan_schedule_last_fired_minute = None
+            scanner_state = "ON — tetap berjalan" if self.scan_enabled else "OFF — menunggu slot terpilih"
             await self.reply(
                 "⏳ VOLUMATIC / SCAN SCHEDULE ARMED\n\n"
                 f"SELECTED  : {', '.join(selected_slots)} WIB\n"
                 f"SIGNAL TF : M15 • EMA TF: H4\n"
-                "SCANNER   : OFF — menunggu slot terpilih\n"
-                "TRIGGER   : slot terpilih pertama yang tercapai\n"
+                f"SCANNER   : {scanner_state}\n"
+                "TRIGGER   : pada slot terpilih bot menjalankan /scan on\n"
                 "AFTER     : scanner ON terus menerus\n"
-                "STOP      : /scan off"
+                "STOP      : /scan off (menghentikan scanner + menghapus jadwal)"
             )
             log.info("[SCAN SCHEDULE] armed | selected=%s | tf=%s", selected_slots, self.timeframe)
             return
@@ -11877,13 +12033,15 @@ class TradingEngine:
 
         self.scan_enabled = enable
         if enable:
-            # Manual ON overrides and clears any pending schedule activation.
-            self.scan_schedule_waiting = False
-            self.scan_schedule_slots = ()
-            self.scan_schedule_activated_at = None
+            # Manual /scan on and a pending schedule can coexist. The schedule
+            # remains armed and will execute /scan on again at its selected slot.
             await self.ws.start()
             self._scan_trigger_now = True
-            log.info("[SCAN] explicitly armed by Telegram /scan on | tf=%s | batch=%s", self.timeframe, SCAN_MAX_PAIRS_PER_CYCLE)
+            log.info(
+                "[SCAN] explicitly armed by Telegram /scan on | tf=%s | batch=%s | pending_schedule=%s",
+                self.timeframe, SCAN_MAX_PAIRS_PER_CYCLE,
+                ",".join(self.scan_schedule_slots) if self.scan_schedule_waiting else "none",
+            )
             await self.reply(
                 f"🟢 Scanner ON • M15 Volumatic / H4 EMA • batch {SCAN_MAX_PAIRS_PER_CYCLE} "
                 f"• Confirmed M15 Volumatic bubble + H4 EMA + M15 Supertrend SL / TP liquidity {self.rr_min}R-{self.rr_max}R. Pending setup/order tidak memakai slot; scanner tetap memindai saat MAX penuh, tetapi entry diblokir."
@@ -11893,6 +12051,7 @@ class TradingEngine:
             self._scan_trigger_now = False
             self.scan_schedule_waiting = False
             self.scan_schedule_slots = ()
+            self.scan_schedule_armed_at = None
             self.scan_schedule_activated_at = None
             self._scan_schedule_last_fired_minute = None
             await self.reply(

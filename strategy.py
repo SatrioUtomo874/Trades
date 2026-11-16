@@ -5,7 +5,7 @@ The original ChartPrime-derived EMA-SWMA bubble logic is retained. This module
 adds the closed-candle execution model used by backtest.py: a confirmed M15
 bubble is filtered by the latest fully closed H4 EMA state, enters at the next
 M15 candle open, takes the M15 Supertrend line as SL, and starts TP at 3R before extending it
-to the farthest unmitigated Volume Liquidity Trend pool inside the 3R-4R cap.
+to the farthest unmitigated Volume Liquidity Trend pool across M5/M15/H1/H4 inside the 3R-4R cap.
 No intrabar/visual-offset Mode-B signal is used by the live engine.
 
 Original indicator attribution/license notice: © ChartPrime, MPL-2.0.
@@ -50,6 +50,8 @@ LIQ_LENGTH = 1
 LIQ_ATR_LEN = 200
 LIQ_ATR_MULT = 2.0
 LIQ_VOL_CUTOFF = 0.1
+LIQUIDITY_TIMEFRAME_MS = {"M5": 300_000, "M15": 900_000, "H1": 3_600_000, "H4": 14_400_000}
+LIQUIDITY_TIMEFRAMES = ("M5", "M15", "H1", "H4")
 
 
 def normalize_rr_value(value: Any, field_name: str = "RR") -> float:
@@ -919,7 +921,7 @@ def trade_result_r(direction: str, entry_price: float, exit_price: float, initia
 __all__ = [
     "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "DEFAULT_TREND_LENGTH",
     "EMA_TIMEFRAME", "SIGNAL_TIMEFRAME", "SUPERTREND_ATR_LENGTH", "SUPERTREND_FACTOR", "RR_TARGET", "RR_MIN", "RR_MAX",
-    "MAX_RR_VALUE", "h1_ema_filter_state", "H1_MS", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal",
+    "MAX_RR_VALUE", "h1_ema_filter_state", "H1_MS", "LIQUIDITY_TIMEFRAME_MS", "LIQUIDITY_TIMEFRAMES", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal",
     "MIN_TREND_LENGTH", "MAX_TREND_LENGTH", "normalize_trend_length", "ATR_LENGTH",
     "MIN_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_FACTOR",
     "normalize_supertrend_atr_length", "normalize_supertrend_factor",
@@ -1257,6 +1259,67 @@ def _volume_liquidity_target(
     return None, None
 
 
+def _volume_liquidity_target_multi(
+    timeframe_candles: Mapping[str, Any],
+    signal_close_time_ms: int,
+    side: int,
+    entry: float,
+    risk: float,
+    rr_min: float = RR_MIN,
+    rr_max: float = RR_MAX,
+) -> tuple[float | None, float | None, str | None]:
+    """Choose the furthest eligible unmitigated pool across M5/M15/H1/H4.
+
+    Every timeframe is cut at the M15 signal close before its liquidity state is
+    calculated. This prevents a later candle from leaking into the TP decision.
+    Each timeframe keeps its own active Volume Liquidity Trend segment and
+    mitigation history; only the final eligible pool candidates are combined.
+    """
+    best_price: float | None = None
+    best_rr: float | None = None
+    best_timeframe: str | None = None
+    cutoff = int(signal_close_time_ms)
+
+    for timeframe in LIQUIDITY_TIMEFRAMES:
+        candles = timeframe_candles.get(timeframe)
+        if candles is None:
+            continue
+        interval_ms = int(LIQUIDITY_TIMEFRAME_MS[timeframe])
+        try:
+            timestamps, opens, highs, lows, closes, volumes = _extract_columns(candles)
+        except (TypeError, ValueError, KeyError):
+            continue
+
+        # Include only bars whose close timestamp is at or before signal close.
+        last_allowed_open = cutoff - interval_ms
+        closed_count = int(np.searchsorted(timestamps, last_allowed_open, side="right"))
+        if closed_count < 3:
+            continue
+        opens = opens[:closed_count]
+        highs = highs[:closed_count]
+        lows = lows[:closed_count]
+        closes = closes[:closed_count]
+        volumes = volumes[:closed_count]
+
+        liquidity = _volume_liquidity_state(opens, highs, lows, closes, volumes)
+        pool_price, pool_rr = _volume_liquidity_target(
+            liquidity, closed_count - 1, side, entry, risk, rr_min, rr_max
+        )
+        if pool_price is None or pool_rr is None:
+            continue
+        if not (np.isfinite(pool_price) and np.isfinite(pool_rr)):
+            continue
+        if not (float(rr_min) <= float(pool_rr) <= float(rr_max)):
+            continue
+        # Strict greater-than keeps ties deterministic in M5, M15, H1, H4 order.
+        if best_rr is None or float(pool_rr) > best_rr:
+            best_price = float(pool_price)
+            best_rr = float(pool_rr)
+            best_timeframe = timeframe
+
+    return best_price, best_rr, best_timeframe
+
+
 def _backtest_supertrend(
     high: np.ndarray, low: np.ndarray, close: np.ndarray,
     length: int = SUPERTREND_ATR_LENGTH,
@@ -1462,6 +1525,8 @@ def detect_backtest_signal(
     rr_min: float = RR_MIN,
     rr_max: float = RR_MAX,
     btc_h4_closed: Any | None = None,
+    liquidity_m5_closed: Any | None = None,
+    liquidity_h1_closed: Any | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Detect a confirmed M15 flip and prepare its next-open entry.
@@ -1564,15 +1629,21 @@ def detect_backtest_signal(
     target_rr = base_rr
     liquidity_pool_price = None
 
-    # Use the M15 signal candle only (the final, fully closed row). The
-    # currently-forming entry candle is excluded from trend/liquidity state.
-    closed_open = mo[:-1]
-    closed_volume = _mv[:-1]
-    liquidity = _volume_liquidity_state(
-        closed_open, closed_high, closed_low, closed_close, closed_volume
-    )
-    pool_price, pool_rr = _volume_liquidity_target(
-        liquidity, len(closed_close) - 1, side, entry, risk, rr_min, rr_max
+    # Build liquidity candidates independently on M5, M15, H1 and H4.
+    # The current/forming M15 entry candle is excluded, and every other
+    # timeframe is cut at this M15 signal close to prevent look-ahead.
+    liquidity_m15_closed = {
+        "t": mt[:-1], "o": mo[:-1], "h": mh[:-1], "l": ml[:-1],
+        "c": mc[:-1], "v": _mv[:-1],
+    }
+    pool_price, pool_rr, pool_timeframe = _volume_liquidity_target_multi(
+        {
+            "M5": liquidity_m5_closed,
+            "M15": liquidity_m15_closed,
+            "H1": liquidity_h1_closed,
+            "H4": h4_closed,
+        },
+        signal_close_ms, side, entry, risk, rr_min, rr_max,
     )
     if pool_price is not None and pool_rr is not None and rr_min <= pool_rr <= rr_max:
         target = float(pool_price)
@@ -1621,6 +1692,8 @@ def detect_backtest_signal(
         "rr_max": rr_max,
         "liquidity_pool_price": liquidity_pool_price,
         "liquidity_pool_rr": pool_rr if target_source == "VOLUME_LIQUIDITY" else None,
+        "liquidity_pool_timeframe": pool_timeframe if target_source == "VOLUME_LIQUIDITY" else None,
+        "liquidity_timeframes": list(LIQUIDITY_TIMEFRAMES),
         "initial_risk": risk,
         "rr_target": base_rr,
         "supertrend_line": stop,
