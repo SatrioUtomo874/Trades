@@ -198,3 +198,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:30:15.161600+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## DATAIPUSDT SHORT — CANCELED
+- Trade ID: `DATAIPUSDT-20261116-083115-6EBEF0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:31:46.286764+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
