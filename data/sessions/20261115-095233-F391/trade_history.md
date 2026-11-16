@@ -474,3 +474,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T04:21:22.168126+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SONICUSDT SHORT — CANCELED
+- Trade ID: `SONICUSDT-20261116-112137-9AFD95`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T04:22:20.115526+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
