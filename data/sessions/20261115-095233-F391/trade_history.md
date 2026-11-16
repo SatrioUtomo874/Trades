@@ -714,3 +714,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T10:55:30.017596+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ARKMUSDT SHORT — CANCELED
+- Trade ID: `ARKMUSDT-20261116-181651-3651CF`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T11:18:35.742780+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
