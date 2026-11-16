@@ -192,3 +192,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:28:11.274853+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CRVUSDT SHORT — CANCELED
+- Trade ID: `CRVUSDT-20261116-080748-7696CB`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:30:15.161600+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
