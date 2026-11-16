@@ -696,3 +696,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T10:17:44.322383+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MAGMAUSDT SHORT — EXPIRED
+- Trade ID: `MAGMAUSDT-20261116-164740-200191`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T10:30:00.237011+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
