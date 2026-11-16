@@ -636,3 +636,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T08:38:57.034632+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## C98USDT SHORT — CANCELED
+- Trade ID: `C98USDT-20261116-153852-843AE2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T08:39:53.941506+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
