@@ -312,3 +312,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T03:19:25.430295+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MELANIAUSDT SHORT — CANCELED
+- Trade ID: `MELANIAUSDT-20261116-101833-01255C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T03:19:50.345084+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
