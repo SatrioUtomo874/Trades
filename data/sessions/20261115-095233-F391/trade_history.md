@@ -414,3 +414,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T03:55:01.061752+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SKLUSDT SHORT — CANCELED
+- Trade ID: `SKLUSDT-20261116-105328-7F81E5`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T03:55:32.925448+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
