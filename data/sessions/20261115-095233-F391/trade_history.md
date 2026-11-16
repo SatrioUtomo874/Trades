@@ -252,3 +252,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:45:45.579224+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## EGLDUSDT SHORT — EXPIRED
+- Trade ID: `EGLDUSDT-20261116-080931-73119B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:45:57.176499+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
