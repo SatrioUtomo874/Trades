@@ -648,3 +648,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T08:40:38.746743+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## KAITOUSDT SHORT — CANCELED
+- Trade ID: `KAITOUSDT-20261116-154208-44E589`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T08:42:42.210810+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
