@@ -216,3 +216,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:40:01.207141+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## XVGUSDT SHORT — CANCELED
+- Trade ID: `XVGUSDT-20261116-083751-E605AE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:40:22.764575+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
