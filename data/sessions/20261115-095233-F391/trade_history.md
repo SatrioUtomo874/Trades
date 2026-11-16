@@ -396,3 +396,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T03:46:02.852070+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## DOTUSDT SHORT — CANCELED
+- Trade ID: `DOTUSDT-20261116-104852-60D3E8`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T03:51:37.493390+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
