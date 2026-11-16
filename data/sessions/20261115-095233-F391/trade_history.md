@@ -456,3 +456,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T04:16:12.977252+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CLOUSDT SHORT — CANCELED
+- Trade ID: `CLOUSDT-20261116-111643-BA8D21`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T04:17:18.014843+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
