@@ -210,3 +210,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T01:38:27.603584+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## IOTAUSDT SHORT — CANCELED
+- Trade ID: `IOTAUSDT-20261116-083323-BE5C55`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T01:40:01.207141+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
