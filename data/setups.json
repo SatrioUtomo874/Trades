@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-16T05:48:26.143800+00:00",
+  "updated_at": "2026-11-16T06:00:00.084030+00:00",
   "active_trades": [
     {
       "trade_id": "PRLUSDT-20261115-141657-C99A9E",
@@ -48,9 +48,9 @@
       "ema_filter_slow_value": "0.07227671000505462",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794801600000,
-      "ema_exit_last_fast": "0.06859805693866196",
-      "ema_exit_last_slow": "0.06921606341063612",
+      "ema_exit_last_open_ms": 1794805200000,
+      "ema_exit_last_fast": "0.06831844555092957",
+      "ema_exit_last_slow": "0.06903278491876011",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
