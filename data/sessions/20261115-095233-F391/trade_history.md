@@ -588,3 +588,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-16T06:18:08.242125+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## GWEIUSDT SHORT — CANCELED
+- Trade ID: `GWEIUSDT-20261116-131951-EDE43A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-16T06:20:25.370300+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
