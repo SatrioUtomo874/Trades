@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-17T23:00:09.523313+00:00",
+  "updated_at": "2026-11-17T23:00:12.793373+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261117-225409-A6617C",
@@ -252,7 +252,7 @@
       "ema_filter_value": "0.05846829412019285",
       "ema_filter_slow_value": "0.059386414769736565",
       "ema_filter_passed": true,
-      "ema_exit_state": "CLOSE_SUBMITTING",
+      "ema_exit_state": "CLOSE_VERIFY",
       "ema_exit_last_open_ms": 1794952800000,
       "ema_exit_last_fast": "0.05847551337150559",
       "ema_exit_last_slow": "0.05846660440997549",
@@ -260,8 +260,8 @@
       "ema_exit_trigger_price": "0.05926",
       "ema_exit_reason": "EMA_H1_BULLISH_CROSS",
       "ema_exit_client_order_id": "emaexitc6a1b13ef32d0674570e13",
-      "ema_exit_order_id": null,
-      "ema_exit_order_status": "NOT_SUBMITTED",
+      "ema_exit_order_id": 550722456,
+      "ema_exit_order_status": "FILLED",
       "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-17T21:00:00+00:00",
