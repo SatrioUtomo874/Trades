@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-17T22:16:24.314392+00:00",
+  "updated_at": "2026-11-17T22:16:27.058843+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261117-225409-A6617C",
@@ -789,12 +789,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.00221",
       "realized_r": null,
-      "quantity": "70",
-      "margin_usdt": "0.99925",
+      "quantity": "37",
+      "margin_usdt": "0.528175",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10",
-      "actual_notional": "9.9925",
+      "actual_notional": "5.28175",
       "real_enabled": true,
       "real_state": "REAL_FILLED",
       "position_side": "BOTH",
@@ -802,7 +802,7 @@
       "entry_client_order_id": "VTdaab4b112d0a0e961381136c4c3d",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "70",
+      "entry_executed_qty": "37",
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
