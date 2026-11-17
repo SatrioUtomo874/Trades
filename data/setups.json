@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-17T19:46:49.005634+00:00",
+  "updated_at": "2026-11-17T19:46:54.420565+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261117-225409-A6617C",
@@ -436,11 +436,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002163904131,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002163904981,
       "sl_client_algo_id": "VTSLSDT-20261118-024628-A2F8CD",
       "tp_client_algo_id": "VTTPSDT-20261118-024628-A2F8CD",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
@@ -500,7 +500,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "11689913436:NEW:NEW:0:0",
+      "last_ws_event_key": "11689913436:TRADE:FILLED:11010:415431719",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
