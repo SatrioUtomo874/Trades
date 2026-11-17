@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-17T20:16:38.654423+00:00",
+  "updated_at": "2026-11-17T20:16:42.571525+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261117-225409-A6617C",
@@ -592,7 +592,7 @@
       "target_notional": "10",
       "actual_notional": "5.5168",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 1931020472,
       "entry_client_order_id": "VT385a7e28f41c93db6915160efa59",
