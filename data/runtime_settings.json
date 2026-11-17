@@ -23,12 +23,13 @@
     "M15:1000PEPEUSDT": 1794927600000,
     "M15:1000RATSUSDT": 1794927600000,
     "M15:1000SATSUSDT": 1794927600000,
-    "M15:1000SHIBUSDT": 1794927600000
+    "M15:1000SHIBUSDT": 1794927600000,
+    "M15:1000XECUSDT": 1794927600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 11,
+  "scan_resume_cursor": 12,
   "scan_resume_boundary_ms": 1794927600000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-17T15:14:08.115112+00:00"
+  "updated_at": "2026-11-17T15:14:09.921048+00:00"
 }
