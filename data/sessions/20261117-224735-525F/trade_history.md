@@ -222,3 +222,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T07:47:19.321970+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
+## PLUMEUSDT SHORT — CANCELED
+- Trade ID: `PLUMEUSDT-20261118-144717-29465B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T07:47:46.153942+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
