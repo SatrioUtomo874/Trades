@@ -1,11 +1,11 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-18T11:19:52.414819+00:00",
+  "updated_at": "2026-11-18T11:47:05.122339+00:00",
   "active_trades": [
     {
-      "trade_id": "AVAUSDT-20261118-162356-DE4507",
-      "session_id": "20261118-162129-178A",
+      "trade_id": "AVAUSDT-20261118-184705-2E4948",
+      "session_id": "20261118-184625-F7F2",
       "pair": "AVAUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -73,7 +73,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "46.9",
-      "margin_usdt": "0.96709114",
+      "margin_usdt": "0.97753192",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "9.99908",
@@ -103,8 +103,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     },
     {
-      "trade_id": "MOVRUSDT-20261118-162356-927F3D",
-      "session_id": "20261118-162129-178A",
+      "trade_id": "MOVRUSDT-20261118-184705-1A7B07",
+      "session_id": "20261118-184625-F7F2",
       "pair": "MOVRUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -172,7 +172,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "11.54",
-      "margin_usdt": "0.99821001",
+      "margin_usdt": "0.9979792",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "9.997102",
@@ -202,8 +202,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     },
     {
-      "trade_id": "SOLVUSDT-20261118-162356-7FC632",
-      "session_id": "20261118-162129-178A",
+      "trade_id": "SOLVUSDT-20261118-184705-1ED0C0",
+      "session_id": "20261118-184625-F7F2",
       "pair": "SOLVUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -271,7 +271,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "2282",
-      "margin_usdt": "0.99953426",
+      "margin_usdt": "0.98030841",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "9.99516",
@@ -301,8 +301,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     },
     {
-      "trade_id": "AIOTUSDT-20261118-162356-47B4F5",
-      "session_id": "20261118-162129-178A",
+      "trade_id": "AIOTUSDT-20261118-184705-789EA1",
+      "session_id": "20261118-184625-F7F2",
       "pair": "AIOTUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -370,7 +370,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "116",
-      "margin_usdt": "0.97799856",
+      "margin_usdt": "0.98351122",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "9.9992",
@@ -400,8 +400,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     },
     {
-      "trade_id": "TRBUSDT-20261118-162356-A4BCDE",
-      "session_id": "20261118-162129-178A",
+      "trade_id": "TRBUSDT-20261118-184705-1FFF0A",
+      "session_id": "20261118-184625-F7F2",
       "pair": "TRBUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -469,7 +469,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "0.8",
-      "margin_usdt": "1.0383282",
+      "margin_usdt": "1.03333377",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10.4184",
@@ -499,8 +499,8 @@
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     },
     {
-      "trade_id": "BARDUSDT-20261118-162356-484A22",
-      "session_id": "20261118-162129-178A",
+      "trade_id": "BARDUSDT-20261118-184705-5478A6",
+      "session_id": "20261118-184625-F7F2",
       "pair": "BARDUSDT",
       "direction": "SHORT",
       "timeframe": "EXCHANGE",
@@ -568,7 +568,7 @@
       "initial_risk": null,
       "realized_r": null,
       "quantity": "109",
-      "margin_usdt": "0.990265",
+      "margin_usdt": "0.97418075",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10.0062",
