@@ -921,7 +921,7 @@ def trade_result_r(direction: str, entry_price: float, exit_price: float, initia
 __all__ = [
     "STRATEGY_NAME", "STRATEGY_VERSION", "TREND_LENGTH", "DEFAULT_TREND_LENGTH",
     "EMA_TIMEFRAME", "SIGNAL_TIMEFRAME", "SUPERTREND_ATR_LENGTH", "SUPERTREND_FACTOR", "RR_TARGET", "RR_MIN", "RR_MAX",
-    "MAX_RR_VALUE", "h1_ema_filter_state", "H1_MS", "LIQUIDITY_TIMEFRAME_MS", "LIQUIDITY_TIMEFRAMES", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal",
+    "MAX_RR_VALUE", "h1_ema_filter_state", "H1_MS", "LIQUIDITY_TIMEFRAME_MS", "LIQUIDITY_TIMEFRAMES", "normalize_rr_value", "normalize_rr_range", "detect_backtest_signal", "ema_series",
     "MIN_TREND_LENGTH", "MAX_TREND_LENGTH", "normalize_trend_length", "ATR_LENGTH",
     "MIN_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_ATR_LENGTH", "MAX_SUPERTREND_FACTOR",
     "normalize_supertrend_atr_length", "normalize_supertrend_factor",
@@ -939,34 +939,51 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 def _backtest_smooth(values: np.ndarray, length: int, alpha: float) -> np.ndarray:
-    """Backtest.py EMA/RMA seed: SMA of first `length` valid values."""
-    x = np.asarray(values, dtype=np.float64)
-    out = np.full(len(x), np.nan, dtype=np.float64)
+    """SMA-seeded recursive smoother used by the original backtest indicators."""
+    x = np.asarray(values, dtype=np.float64).reshape(-1)
+    out = np.full(x.shape, np.nan, dtype=np.float64)
+    n = int(length)
+    if n < 1 or not np.isfinite(float(alpha)) or not 0.0 < float(alpha) <= 1.0:
+        raise ValueError("Smoothing length/alpha tidak valid.")
     valid = np.flatnonzero(np.isfinite(x))
-    if valid.size == 0 or len(x) - int(valid[0]) < int(length):
+    if valid.size == 0:
         return out
     start = int(valid[0])
-    first = start + int(length) - 1
-    seed = x[start:start + int(length)]
-    if len(seed) != int(length) or not np.all(np.isfinite(seed)):
+    first = start + n - 1
+    if first >= x.size:
+        return out
+    seed = x[start:first + 1]
+    if seed.size != n or not np.all(np.isfinite(seed)):
         return out
     previous = float(np.mean(seed))
     out[first] = previous
-    for i in range(first + 1, len(x)):
+    for i in range(first + 1, x.size):
         value = float(x[i])
         if not np.isfinite(value):
             previous = np.nan
             continue
         if not np.isfinite(previous):
-            # This branch is only relevant for non-contiguous external inputs.
-            window = x[max(start, i - int(length) + 1):i + 1]
-            if len(window) == int(length) and np.all(np.isfinite(window)):
+            window = x[max(start, i - n + 1):i + 1]
+            if window.size == n and np.all(np.isfinite(window)):
                 previous = float(np.mean(window))
                 out[i] = previous
             continue
         previous += float(alpha) * (value - previous)
         out[i] = previous
     return out
+
+
+def ema_series(values: Any, length: int) -> np.ndarray:
+    """Canonical chart-style EMA: SMA seed, then alpha=2/(length+1).
+
+    Callers must supply chronologically ordered CLOSED-candle closes. The
+    returned array retains NaN warm-up values so H1/H4/BTC and H1-exit paths
+    use exactly the same initialization and recurrence.
+    """
+    n = int(length)
+    if n < 1:
+        raise ValueError("EMA length harus >= 1.")
+    return _backtest_smooth(np.asarray(values, dtype=np.float64), n, 2.0 / (n + 1.0))
 
 
 def _backtest_volumatic_events(close: np.ndarray, length: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1372,12 +1389,12 @@ def _ema_pair_from_config(
     if selected is None:
         return None, None, True, True
     if isinstance(selected, tuple):
-        fast = _backtest_smooth(h4_close, selected[0], 2.0 / (selected[0] + 1.0))
-        slow = _backtest_smooth(h4_close, selected[1], 2.0 / (selected[1] + 1.0))
+        fast = ema_series(h4_close, selected[0])
+        slow = ema_series(h4_close, selected[1])
         if not len(h4_close) or not (np.isfinite(fast[-1]) and np.isfinite(slow[-1])):
             return None, None, False, False
         return float(fast[-1]), float(slow[-1]), True, True
-    ema = _backtest_smooth(h4_close, selected, 2.0 / (selected + 1.0))
+    ema = ema_series(h4_close, selected)
     if not len(h4_close) or not np.isfinite(ema[-1]):
         return None, None, False, True
     return float(ema[-1]), None, True, True
@@ -1470,6 +1487,7 @@ def h1_ema_filter_state(
         "h1_ema_filter_value": None, "h1_ema_filter_slow_value": None,
         "h1_ema_filter_ready": False, "h1_ema_filter_passed": False,
         "h1_ema_open_time_ms": None, "h1_ema_reference_close": None,
+        "h1_ema_history_bars": 0,
         "h1_ema_filter_reason": "H1_DATA_UNAVAILABLE",
     }
     if selected is None:
@@ -1489,6 +1507,7 @@ def h1_ema_filter_state(
     expected_open = (int(signal_close_time_ms) // H1_MS) * H1_MS - H1_MS
     out["h1_ema_open_time_ms"] = int(ts[idx])
     out["h1_ema_reference_close"] = float(close[idx])
+    out["h1_ema_history_bars"] = int(idx + 1)
     if int(ts[idx]) != expected_open:
         out["h1_ema_filter_reason"] = "H1_CANDLE_STALE"
         return out
@@ -1705,6 +1724,8 @@ def detect_backtest_signal(
         "ema_filter_value": fast_value,
         "ema_filter_slow_value": slow_value,
         "ema_reference_close": h4_reference_close,
+        "ema_open_time_ms": int(ht[h4_index]),
+        "ema_history_bars": int(len(h4_closes)),
         "ema_filter_passed": bool(filter_passed),
         "ema_filter_ready": bool(filter_ready),
         "ema_h4_open_time_ms": int(ht[h4_index]),
