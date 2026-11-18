@@ -99,8 +99,7 @@ if (
 BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
-load_dotenv(BASE_DIR / "trades.env")
-load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env", override=True)
 
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0") or "0")
 GITHUB_TOKEN = (os.getenv("GITHUB_TOKEN") or "").strip()
@@ -141,10 +140,8 @@ if not BINANCE_EGRESS_ID:
         BINANCE_EGRESS_ID = f"proxy:{_binance_proxy_parts.hostname}:{_binance_proxy_parts.port or 0}"
     else:
         BINANCE_EGRESS_ID = "direct"
-BINANCE_TRADING_MODE = "live"
-REAL_EXECUTION_ENABLED = (os.getenv("REAL_EXECUTION_ENABLED", "1") or "1").strip().lower() not in {
-    "0", "false", "off", "no", "disabled"
-}
+BINANCE_TRADING_MODE = "paper"
+REAL_EXECUTION_ENABLED = True  # PAPER-only deployment: signed Futures execution disabled.
 GITHUB_API = "https://api.github.com"
 # IP cooldown markers are machine/egress-IP specific. Keep them local by default;
 # enable GitHub sharing only when the process restarts behind the same public IP.
@@ -2376,9 +2373,16 @@ class BinanceREST:
 
     def _kline_disk_path(self, key: tuple[str, str, int]) -> Path:
         symbol, interval, count = key
-        safe_symbol = re.sub(r"[^A-Z0-9]", "", str(symbol).upper())
+        raw_symbol = str(symbol).upper()
+        safe_symbol = re.sub(r"[^A-Z0-9]", "", raw_symbol) or "SYMBOL"
+        # Keep a stable digest of the original UTF-8 symbol. Sanitizing Unicode
+        # names alone can collapse distinct pairs (e.g. two non-ASCII tickers
+        # ending in USDT) into the same `USDT_1h_499.npy` disk-cache filename.
+        symbol_digest = hashlib.sha256(raw_symbol.encode("utf-8")).hexdigest()[:12]
         safe_interval = re.sub(r"[^a-z0-9]", "", str(interval).lower())
-        return self._kline_disk_cache_dir / f"{safe_symbol}_{safe_interval}_{int(count)}.npy"
+        return self._kline_disk_cache_dir / (
+            f"{safe_symbol}_{symbol_digest}_{safe_interval}_{int(count)}.npy"
+        )
 
     def _load_kline_disk_cache(
         self, key: tuple[str, str, int], count: int
@@ -3092,6 +3096,9 @@ class BinanceRealClient:
         # dan /trade) membaca cache ini agar tidak melakukan request berulang.
         self.last_balance: dict[str, Any] | None = None
         self.last_balance_at: float | None = None
+        self.last_account_equity: Decimal | None = None
+        self.last_account_equity_at: float | None = None
+        self.last_account_equity_source: str | None = None
         # Position snapshot per symbol; dipakai sebagai filter awal sebelum final
         # safety-check fresh pada saat real entry.
         self.last_positions: dict[str, list[dict[str, Any]]] = {}
@@ -3559,6 +3566,33 @@ class BinanceRealClient:
             raise BinanceAPIError(
                 "Respons /fapi/v2/account tidak berbentuk object.",
                 endpoint="/fapi/v2/account",
+            )
+        # totalMarginBalance is Binance USD-M Futures account equity (wallet
+        # balance + unrealized PnL). It is more authoritative than a baseline
+        # restored from a prior process or a locally accumulated PnL ledger.
+        raw_equity = payload.get("totalMarginBalance")
+        equity_source = "totalMarginBalance"
+        if raw_equity in (None, ""):
+            wallet_raw = payload.get("totalWalletBalance")
+            unrealized_raw = payload.get("totalUnrealizedProfit")
+            if wallet_raw not in (None, "") and unrealized_raw not in (None, ""):
+                try:
+                    raw_equity = str(Decimal(str(wallet_raw)) + Decimal(str(unrealized_raw)))
+                    equity_source = "totalWalletBalance+totalUnrealizedProfit"
+                except (InvalidOperation, TypeError, ValueError):
+                    raw_equity = None
+        try:
+            equity_value = Decimal(str(raw_equity)) if raw_equity not in (None, "") else None
+        except (InvalidOperation, TypeError, ValueError):
+            equity_value = None
+        if equity_value is not None and equity_value.is_finite() and equity_value > 0:
+            self.last_account_equity = equity_value
+            self.last_account_equity_at = time.monotonic()
+            self.last_account_equity_source = equity_source
+            log.info(
+                "[AUTOSTOP] fresh Binance account equity | source=%s | totalWalletBalance=%s | totalUnrealizedProfit=%s | totalMarginBalance=%s",
+                equity_source, payload.get("totalWalletBalance"),
+                payload.get("totalUnrealizedProfit"), decimal_to_str(equity_value),
             )
         positions = payload.get("positions") or []
         cached_by_symbol: dict[str, list[dict[str, Any]]] = {}
@@ -5059,6 +5093,12 @@ class TradingEngine:
         self.chat_id = int(context.get("chat_id") or ALLOWED_USER_ID)
         self.user_id = int(context.get("user_id") or ALLOWED_USER_ID)
         self.send_message = context["send_message"]
+        # Optional secondary Telegram bot token. This secret is deliberately
+        # stored only in a local private file, never in .env or GitHub runtime settings.
+        self._emc_tg_config_path = self._local_data_dir / "emc_tg_config.json"
+        self.emc_tg_token = ""
+        self.emc_tg_username = ""
+        self._load_emc_tg_config()
         self.session_id = generate_session_id()
         self.session_data_dir = f"data/sessions/{self.session_id}"
         self.session_history_trades_path = f"{self.session_data_dir}/trades.json"
@@ -5112,6 +5152,7 @@ class TradingEngine:
         self._equity_last: Decimal | None = None
         self._autostop_triggered = False
         self._autostop_last_check = 0.0
+        self._autostop_last_account_refresh = 0.0
         self._autostop_last_persist = 0.0
         self._autostop_dirty = False
         self._autostop_missing_price_notice_at = 0.0
@@ -5220,6 +5261,159 @@ class TradingEngine:
             await asyncio.to_thread(self.send_message, self.chat_id, str(message))
         except Exception:
             log.warning("Gagal mengirim Telegram.", exc_info=True)
+
+    def _load_emc_tg_config(self) -> None:
+        """Load the optional secondary bot credential from local disk only."""
+        try:
+            payload = json.loads(self._emc_tg_config_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return
+            token = str(payload.get("token") or "").strip()
+            username = str(payload.get("username") or "").strip().lstrip("@")
+            if token:
+                self.emc_tg_token = token
+                self.emc_tg_username = username
+        except FileNotFoundError:
+            return
+        except Exception:
+            log.warning("[EMC_TG] konfigurasi lokal tidak dapat dibaca; fitur salinan dinonaktifkan.")
+
+    def _save_emc_tg_config(self) -> None:
+        """Persist EMC_TG without syncing the secret to GitHub/runtime_settings."""
+        self._emc_tg_config_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._emc_tg_config_path.with_suffix(".tmp")
+        payload = {
+            "token": self.emc_tg_token,
+            "username": self.emc_tg_username,
+            "updated_at": iso_utc(),
+        }
+        fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        os.replace(temporary, self._emc_tg_config_path)
+        try:
+            os.chmod(self._emc_tg_config_path, 0o600)
+        except OSError:
+            pass
+
+    def _clear_emc_tg_config(self) -> None:
+        self.emc_tg_token = ""
+        self.emc_tg_username = ""
+        try:
+            self._emc_tg_config_path.unlink(missing_ok=True)
+        except OSError:
+            log.warning("[EMC_TG] file konfigurasi lokal gagal dihapus.")
+
+    @staticmethod
+    def _probe_emc_tg_token(token: str) -> tuple[bool, str]:
+        """Validate a manually supplied bot token without exposing it in errors."""
+        try:
+            response = requests.get(
+                f"https://api.telegram.org/bot{token}/getMe",
+                timeout=(10, 15),
+            )
+            try:
+                body = response.json()
+            except ValueError:
+                return False, "RESPON_INVALID"
+            if response.status_code >= 400 or not isinstance(body, dict) or not body.get("ok"):
+                return False, "TOKEN_REJECTED"
+            result = body.get("result") or {}
+            username = str(result.get("username") or "").strip().lstrip("@")
+            if not username:
+                return False, "BOT_IDENTITY_MISSING"
+            return True, username
+        except requests.RequestException:
+            return False, "NETWORK_ERROR"
+
+    async def _copy_ip_notice_to_emc_tg(self, message: str) -> None:
+        """Copy an IP-switch notice to the same private chat through the EMC bot."""
+        token = self.emc_tg_token
+        if not token:
+            return
+
+        def send_copy() -> None:
+            # Reuse the same destination chat ID as the primary bot. The user
+            # must have opened the EMC bot and sent /start at least once.
+            for chunk in LocalTelegramBot._split_message(str(message)):
+                try:
+                    response = requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": int(self.chat_id), "text": chunk},
+                        timeout=(10, 30),
+                    )
+                    body = response.json()
+                except (requests.RequestException, ValueError):
+                    raise RuntimeError("telegram_transport_or_response_error") from None
+                if response.status_code >= 400 or not isinstance(body, dict) or not body.get("ok"):
+                    raise RuntimeError(f"telegram_send_rejected_http_{response.status_code}")
+
+        try:
+            await asyncio.to_thread(send_copy)
+            log.info("[EMC_TG] salinan notifikasi pergantian IP terkirim | bot=@%s", self.emc_tg_username or "configured")
+        except Exception as exc:
+            # Never log request URLs or exception text: they can contain the bot token.
+            log.warning("[EMC_TG] salinan notifikasi pergantian IP gagal (%s). Bot utama tetap menerima notifikasi.", type(exc).__name__)
+
+    async def _handle_emc_tg(self, text: str) -> None:
+        """Set, inspect, or disable the optional secondary Telegram bot."""
+        parts = str(text or "").split(maxsplit=1)
+        argument = parts[1].strip() if len(parts) > 1 else ""
+        if not argument:
+            if self.emc_tg_token:
+                await self.reply(
+                    "EMC_TG STATUS: ON\n"
+                    f"BOT: @{self.emc_tg_username or 'configured'}\n"
+                    "FUNGSI: menyalin notifikasi pergantian IP ke chat yang sama.\n"
+                    "Matikan dengan /EMC_TG off. Token tersimpan lokal dan tidak disinkronkan ke GitHub/.env."
+                )
+            else:
+                await self.reply(
+                    "EMC_TG STATUS: OFF\n\n"
+                    "Isi token bot Telegram kedua dengan:\n/EMC_TG <BOT_TOKEN>\n\n"
+                    "Bot utama tetap menerima notifikasi. Jika diaktifkan, notifikasi pergantian IP juga disalin ke bot kedua.\n"
+                    "Sebelum digunakan, buka chat bot kedua lalu kirim /start.\n"
+                    "Matikan dengan /EMC_TG off. Token tidak disimpan di .env atau GitHub."
+                )
+            return
+
+        if argument.lower() in {"off", "disable", "clear", "none"}:
+            self._clear_emc_tg_config()
+            await self.reply("🟡 EMC_TG OFF. Salinan notifikasi pergantian IP dinonaktifkan; bot utama tetap aktif.")
+            return
+
+        token = argument.strip()
+        if any(char.isspace() for char in token):
+            await self.reply("❌ Format token tidak valid. Gunakan /EMC_TG <BOT_TOKEN> tanpa spasi di dalam token.")
+            return
+
+        valid, detail = await asyncio.to_thread(self._probe_emc_tg_token, token)
+        if not valid:
+            reason = {
+                "TOKEN_REJECTED": "Telegram menolak token. Periksa token dari BotFather.",
+                "NETWORK_ERROR": "Telegram tidak dapat dijangkau untuk validasi token. Coba lagi.",
+                "RESPON_INVALID": "Respons Telegram tidak valid. Coba lagi.",
+                "BOT_IDENTITY_MISSING": "Token tidak mengembalikan identitas bot yang valid.",
+            }.get(detail, "Token tidak dapat diverifikasi.")
+            await self.reply(f"❌ EMC_TG tidak diaktifkan. {reason}")
+            return
+
+        self.emc_tg_token = token
+        self.emc_tg_username = detail
+        try:
+            await asyncio.to_thread(self._save_emc_tg_config)
+        except OSError:
+            self.emc_tg_token = ""
+            self.emc_tg_username = ""
+            await self.reply("❌ Token valid, tetapi gagal disimpan pada penyimpanan lokal. EMC_TG belum diaktifkan.")
+            return
+        await self.reply(
+            "✅ EMC_TG AKTIF\n"
+            f"BOT: @{self.emc_tg_username}\n"
+            "Notifikasi pergantian IP selanjutnya akan dikirim ke bot utama dan disalin ke bot ini.\n"
+            "Pastikan chat bot kedua sudah dibuka dan /start sudah dikirim agar Telegram mengizinkan bot mengirim pesan.\n"
+            "Token disimpan hanya pada file lokal, bukan .env atau GitHub."
+        )
 
     async def _send_log_error_to_telegram(self, record: logging.LogRecord) -> None:
         if not self._running:
@@ -5702,7 +5896,7 @@ class TradingEngine:
                     f"PUBLIC TEST: OK · {PROXY_HEALTH_SAMPLES} tes Binance /fapi/v1/time · {latency:.0f} ms"
                     if current_ip else "PUBLIC TEST: route lolos, tetapi IP keluar belum berhasil dideteksi"
                 )
-                await self.reply(
+                ip_notice = (
                     "╔══ BINANCE / IP BERGANTI ══╗\n"
                     f"IP BARU    : {current_ip or info.get('exit_ip') or 'tidak terdeteksi'}\n"
                     f"ROUTE      : {info.get('new')}\n"
@@ -5714,6 +5908,10 @@ class TradingEngine:
                     f"SCANNER    : OFF — kirim /scan on setelah whitelist/route siap"
                     f"{risk}"
                 )
+                # Preserve the main-bot notification, then duplicate the exact
+                # same message to the optional EMC_TG bot when configured.
+                await self.reply(ip_notice)
+                await self._copy_ip_notice_to_emc_tg(ip_notice)
             elif info.get("kind") == "exhausted":
                 await self.reply(
                     "╔══ BINANCE / EGRESS FAILOVER GAGAL ══╗\n"
@@ -7035,14 +7233,11 @@ class TradingEngine:
                         ):
                             # Keep the original H1 EMA warm-up window exactly
                             # as before; the longer H1 history is only for pools.
-                            h1_ema_history_count = self._h4_ema_history_limit(ema_filter_length)
-                            h1_ema_history = (
-                                h1[-h1_ema_history_count:]
-                                if h1 is not None and len(h1) >= h1_ema_history_count
-                                else h1
-                            )
+                            # Use the entire H1 history fetched for this symbol (up to
+                            # KLINE_HISTORY=499 closed bars). Do not truncate it to the
+                            # former ~100-bar H4 warm-up window.
                             signal.update(volumatic.h1_ema_filter_state(
-                                h1_ema_history, ema_filter_length, str(signal.get("direction") or ""),
+                                h1, ema_filter_length, str(signal.get("direction") or ""),
                                 int(signal.get("signal_close_time_ms") or 0),
                             ))
                         bubble = str(signal.get("signal") or "?").upper()
@@ -7472,6 +7667,14 @@ class TradingEngine:
         if str(signal.get("signal_mode") or "").upper() != "CONFIRMED_M15_NEXT_OPEN":
             raise ValueError("Signal ditolak: hanya sinyal confirmed M15 next-open yang diterima.")
         async with self._trade_lock:
+            if not self.scan_enabled:
+                await self._record_event(
+                    "SIGNAL_BLOCKED_SCANNER_OFF", None,
+                    pair=pair, direction=direction,
+                    source=str(signal.get("source") or "unknown"),
+                    reason="Scanner OFF; existing FILLED positions remain monitored, but no new setup/position is accepted.",
+                )
+                return "SCANNER_OFF"
             signal_close_ms = int(signal.get("signal_close_time_ms") or 0)
             entry_open_ms = int(signal.get("entry_candle_open_time_ms") or 0)
             entry_close_ms = int(signal.get("entry_candle_close_time_ms") or 0)
@@ -7800,6 +8003,9 @@ class TradingEngine:
                     f"Signal: {trade.signal} confirmed M15 bubble\n"
                     f"H4 EMA: {ema_filter_values_label(trade.ema_filter_length, trade.ema_filter_value, trade.ema_filter_slow_value)}\n"
                     f"H1 EMA: {ema_filter_values_label(trade.ema_filter_length, h1_fast_value, h1_slow_value)}\n"
+                    f"EMA source candles: H4 open_ms={signal.get('ema_open_time_ms')} close={signal.get('ema_reference_close')} | "
+                    f"H1 open_ms={signal.get('h1_ema_open_time_ms')} close={signal.get('h1_ema_reference_close')} | "
+                    f"history H4={signal.get('ema_history_bars', 0)} H1={signal.get('h1_ema_history_bars', 0)}\n"
                     f"Entry level (next M15 OPEN): {fmt_price(trade.entry)}\n"
                     f"Eksekusi: {'MARKET saat harga menyentuh level (dipantau WebSocket)' if trade.real_intent else 'PAPER saat harga menyentuh level'}\n"
                     f"Supertrend M15 SL: {fmt_price(trade.stop_loss)} • ATR {trade.supertrend_atr_length} / Factor {trade.supertrend_factor:g}\n"
@@ -7835,6 +8041,14 @@ class TradingEngine:
     ) -> bool:
         """Fill a PAPER touch only when an active-position slot is available."""
         if trade.status != "PENDING":
+            return False
+        if not self.scan_enabled:
+            await self._record_event(
+                "PAPER_ENTRY_BLOCKED_SCANNER_OFF", trade,
+                trigger_source=source,
+                reason="Scanner OFF; pending PAPER setup cannot become a new position.",
+            )
+            await self._finalize_trade(trade, "CANCELED", None, "SCANNER_OFF_BEFORE_PAPER_FILL")
             return False
         active_positions = len(self._active_slot_projection())
         if active_positions >= self.max_active_trades:
@@ -9765,11 +9979,17 @@ class TradingEngine:
         return min(1500, int(needed))
 
     def _h4_ema_history_limit(self, ema_config: Any = None) -> int:
+        """Use the same full closed-candle history window for ALT and BTC H4 EMA.
+
+        The previous implementation fetched only about 100 bars for common EMA
+        periods. Chart indicators commonly have a much longer warm-up history;
+        KLINE_HISTORY (499) is already retained and costs one kline request.
+        """
         selected = volumatic.normalize_ema_filter_length(
             self.ema_filter_length if ema_config is None else ema_config
         )
         periods = max(selected) if isinstance(selected, tuple) else (selected or 1)
-        return min(1500, max(100, int(periods) * 4 + 12))
+        return min(1500, max(KLINE_HISTORY, int(periods) * 4 + 12))
 
     def _log_real_sync_failure(self, phase: str, symbol: str, exc: Exception) -> None:
         """Rate-limit repeated reconciliation warnings forwarded to Telegram."""
@@ -9958,6 +10178,9 @@ class TradingEngine:
         return
 
     async def _retry_signals(self) -> None:
+        if not self.scan_enabled:
+            self._signal_retries.clear()
+            return
         if (
             not self._signal_retries
             or self._real_route_waiting_user
@@ -10024,12 +10247,13 @@ class TradingEngine:
         return snapshot.price if snapshot and snapshot.live else None
 
     async def _evaluate_live_visual_bubble(self, symbol: str, price: Decimal, event_time_ms: int) -> None:
-        """Evaluate mode-B bubbles on WS ticks for scanned symbols and positions.
+        """Evaluate new bubbles only while the scanner is explicitly ON.
 
-        The scanner subscribes the selected USDT perpetual universe in one
-        batched WS request. Contexts are precomputed once per pair/candle, so
-        each tick only performs scalar EMA2 + trend-flip math.
+        Filled positions continue through _on_price and _process_ema_exit_candle;
+        this method is solely a new-signal/setup producer.
         """
+        if not self.scan_enabled:
+            return
         active = [
             t for t in self.active_trades.values()
             if t.pair == symbol and t.status in {"PENDING", "FILLED"}
@@ -10094,19 +10318,8 @@ class TradingEngine:
 
     @staticmethod
     def _ema_sma_seeded(values: np.ndarray, period: int) -> np.ndarray:
-        """EMA identical to backtest(10).py smooth(): SMA seed, then recursive EMA."""
-        x = np.asarray(values, dtype=np.float64).reshape(-1)
-        out = np.full(x.shape, np.nan, dtype=np.float64)
-        n = int(period)
-        if n < 1 or x.size < n or not np.all(np.isfinite(x)):
-            return out
-        alpha = 2.0 / (float(n) + 1.0)
-        previous = float(np.mean(x[:n]))
-        out[n - 1] = previous
-        for i in range(n, x.size):
-            previous += alpha * (float(x[i]) - previous)
-            out[i] = previous
-        return out
+        """Compatibility wrapper; H1 exit uses the same canonical EMA as H1/H4 filters."""
+        return volumatic.ema_series(values, period)
 
     @staticmethod
     def _ema_exit_periods(trade: Trade) -> tuple[int, int] | None:
@@ -10601,12 +10814,18 @@ class TradingEngine:
             if trade.pair != symbol:
                 continue
             if trade.status == "PENDING" and trade.real_intent and not trade.real_enabled:
+                if not self.scan_enabled:
+                    await self._cancel_pending_trade(trade, "SCANNER_OFF_BEFORE_REAL_INTENT_TOUCH")
+                    continue
                 if not trade.entry_inflight and now_utc() < trade.expires_at:
                     touched = price <= trade.entry if trade.direction == "LONG" else price >= trade.entry
                     if touched:
                         self._schedule_market_entry(trade, price, "WEBSOCKET_TOUCH")
                 continue
             if trade.status == "PENDING" and not trade.real_enabled:
+                if not self.scan_enabled:
+                    await self._cancel_pending_trade(trade, "SCANNER_OFF_BEFORE_PAPER_TOUCH")
+                    continue
                 if now_utc() < trade.expires_at:
                     touched = price <= trade.entry if trade.direction == "LONG" else price >= trade.entry
                     if touched:
@@ -12054,9 +12273,19 @@ class TradingEngine:
             self.scan_schedule_armed_at = None
             self.scan_schedule_activated_at = None
             self._scan_schedule_last_fired_minute = None
+            self._signal_retries.clear()
+            self._live_signal_candles.clear()
+            self._live_signal_last_eval.clear()
+            self._live_signal_seen.clear()
+            canceled = 0
+            for trade in list(self.active_trades.values()):
+                if trade.status == "PENDING" and not trade.real_enabled:
+                    await self._cancel_pending_trade(trade, "SCANNER_SWITCHED_OFF")
+                    canceled += 1
             await self.reply(
-                "🟡 Scanner OFF. Bubble baru tidak dipindai; posisi dan pending order "
-                "tetap dimonitor via WebSocket/maintenance. Jadwal tertunda dibersihkan."
+                "🟡 Scanner OFF. Setup PAPER yang belum terisi dibatalkan; tidak ada setup/posisi baru yang diterima. "
+                f"Posisi FILLED yang sudah ada tetap dimonitor, termasuk H1 inverse-EMA forced close. Pending dibatalkan: {canceled}. "
+                "Jadwal tertunda dibersihkan."
             )
         await self._sync_ws_symbols()
         await self._save_runtime_settings()
@@ -12529,97 +12758,50 @@ class TradingEngine:
         return "PAPER"
 
     def _autostop_equity(self) -> Decimal | None:
-        """Return current account equity from cached data only; never calls REST.
+        """Return the best current equity snapshot without issuing network I/O.
 
-        REAL equity = cached USDT wallet balance + unrealized PnL recomputed
-        from fresh WebSocket prices for every known exchange position. If an
-        exposed position cannot be priced, return None so the scanner remains
-        held instead of evaluating an incomplete equity snapshot.
-
-        PAPER equity = configured starting balance + closed PAPER PnL + live
-        floating PnL for filled PAPER trades.
+        REAL (when explicitly enabled in a different deployment): use the most
+        recent Binance /fapi/v2/account totalMarginBalance snapshot. The old
+        real_equity_baseline + realized_since_baseline model went stale after
+        deposits/withdrawals, funding, manual activity, or process restarts.
+        PAPER equity remains based on the configured simulation balance and
+        PAPER trade PnL only.
         """
         source = self._autostop_source_name()
-        equity: Decimal
         if source == "REAL":
-            if self._real_equity_baseline is None or not self._real_equity_baseline.is_finite() or self._real_equity_baseline <= 0:
+            value = self.real.last_account_equity
+            updated_at = self.real.last_account_equity_at
+            if value is None or updated_at is None:
                 return None
-            if not self._realized_since_baseline.is_finite():
+            if time.monotonic() - updated_at > (AUTOSTOP_BALANCE_REFRESH_SECONDS * 2.5):
                 return None
-            # Deliberately do not re-read walletBalance: Binance wallet balance
-            # already moves with realized PnL and would double count locally-added PnL.
-            equity = self._real_equity_baseline + self._realized_since_baseline
-            represented: set[tuple[str, str]] = set()
+            return value if value.is_finite() and value > 0 else None
 
-            for position in self.exchange_positions.values():
-                if not isinstance(position, dict):
-                    continue
-                symbol = normalize_symbol(str(position.get("symbol") or ""))
-                raw_amount = position.get("_position_amount_decimal", position.get("positionAmt", "0"))
-                try:
-                    amount = raw_amount if isinstance(raw_amount, Decimal) else parse_signed_decimal(str(raw_amount or "0"))
-                except (InvalidOperation, TypeError, ValueError):
-                    return None
-                if amount == 0:
-                    continue
-                try:
-                    entry = Decimal(str(position.get("entryPrice") or position.get("ep") or "0"))
-                except (InvalidOperation, TypeError, ValueError):
-                    return None
-                if not symbol or not entry.is_finite() or entry <= 0:
-                    return None
-                mark = self._current_price(symbol)
-                if mark is None or not mark.is_finite() or mark <= 0:
-                    return None
-                direction = self._exchange_position_direction(position, amount)
-                if direction not in {"LONG", "SHORT"}:
-                    return None
-                signed_amount = abs(amount) if direction == "LONG" else -abs(amount)
-                equity += (mark - entry) * signed_amount
-                represented.add((symbol, direction))
-
-            # Bridge the short WS ordering window: a fill can enter the trade
-            # ledger before ACCOUNT_UPDATE has populated exchange_positions.
-            for trade in self.active_trades.values():
-                if not trade.real_enabled or trade.status not in {"PENDING", "FILLED"}:
-                    continue
-                qty = trade.entry_executed_qty or (trade.quantity if trade.status == "FILLED" else None)
-                if qty is None or qty <= 0 or (trade.pair, trade.direction) in represented:
-                    continue
-                entry = trade.fill_price or trade.entry
-                mark = self._current_price(trade.pair)
-                if entry is None or entry <= 0 or mark is None or mark <= 0:
-                    return None
-                signed_qty = qty if trade.direction == "LONG" else -qty
-                equity += (mark - entry) * signed_qty
-
-        else:
-            realized = Decimal("0")
-            for row in self.history_records:
-                if not isinstance(row, dict):
-                    continue
-                if row.get("strategy_name") != volumatic.STRATEGY_NAME or bool(row.get("real_enabled")):
-                    continue
-                try:
-                    pnl = Decimal(str(row.get("pnl_usdt") or "0"))
-                except (InvalidOperation, TypeError, ValueError):
-                    continue
-                if pnl.is_finite():
-                    realized += pnl
-            equity = SIM_START_BALANCE + realized
-            for trade in self.active_trades.values():
-                if trade.real_enabled or trade.status not in {"PENDING", "FILLED"}:
-                    continue
-                qty = trade.entry_executed_qty or (trade.quantity if trade.status == "FILLED" else None)
-                if qty is None or qty <= 0:
-                    continue
-                entry = trade.fill_price or trade.entry
-                mark = self._current_price(trade.pair)
-                if entry is None or entry <= 0 or mark is None or mark <= 0:
-                    return None
-                signed_qty = qty if trade.direction == "LONG" else -qty
-                equity += (mark - entry) * signed_qty
-
+        realized = Decimal("0")
+        for row in self.history_records:
+            if not isinstance(row, dict):
+                continue
+            if row.get("strategy_name") != volumatic.STRATEGY_NAME or bool(row.get("real_enabled")):
+                continue
+            try:
+                pnl = Decimal(str(row.get("pnl_usdt") or "0"))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if pnl.is_finite():
+                realized += pnl
+        equity = SIM_START_BALANCE + realized
+        for trade in self.active_trades.values():
+            if trade.real_enabled or trade.status != "FILLED":
+                continue
+            qty = trade.entry_executed_qty or trade.quantity
+            if qty is None or qty <= 0:
+                continue
+            entry = trade.fill_price or trade.entry
+            mark = self._current_price(trade.pair)
+            if entry is None or entry <= 0 or mark is None or mark <= 0:
+                return None
+            signed_qty = qty if trade.direction == "LONG" else -qty
+            equity += (mark - entry) * signed_qty
         return equity if equity.is_finite() and equity > 0 else None
 
     def _autostop_floor(self) -> Decimal | None:
@@ -12671,6 +12853,21 @@ class TradingEngine:
         if not force and now_mono - self._autostop_last_check < AUTOSTOP_CHECK_SECONDS:
             return
         self._autostop_last_check = now_mono
+        if self._autostop_source_name() == "REAL":
+            cached_at = self.real.last_account_equity_at
+            refresh_due = (
+                cached_at is None
+                or now_mono - self._autostop_last_account_refresh >= AUTOSTOP_BALANCE_REFRESH_SECONDS
+                or now_mono - cached_at > AUTOSTOP_BALANCE_REFRESH_SECONDS * 2.5
+            )
+            if refresh_due:
+                try:
+                    await self.real.get_account_info()
+                    self._autostop_last_account_refresh = time.monotonic()
+                except BinanceRateLimitError as exc:
+                    log.warning("[AUTOSTOP] account equity refresh ditahan cooldown: %s", exc)
+                except Exception as exc:
+                    log.warning("[AUTOSTOP] account equity refresh gagal; guard masuk WAITING DATA: %s", exc)
         equity = self._autostop_equity()
         if equity is None or not equity.is_finite() or equity <= 0:
             self._autostop_data_hold = True
@@ -12738,6 +12935,13 @@ class TradingEngine:
             self._autostop_triggered = True
             self.scan_enabled = False
             self._scan_trigger_now = False
+            self._signal_retries.clear()
+            self._live_signal_candles.clear()
+            self._live_signal_last_eval.clear()
+            self._live_signal_seen.clear()
+            for trade in list(self.active_trades.values()):
+                if trade.status == "PENDING" and not trade.real_enabled:
+                    await self._cancel_pending_trade(trade, "AUTOSTOP_SCANNER_OFF")
             drawdown = (
                 (self._equity_peak - equity) / self._equity_peak * Decimal("100")
                 if self._equity_peak and self._equity_peak > 0 else Decimal("0")
@@ -13085,6 +13289,7 @@ class TradingEngine:
             "/balance - saldo Futures atau estimasi PAPER\n"
             "/api - statistik bobot/request Binance\n"
             "/IP - refresh dan lihat IP keluar aktif untuk whitelist Binance\n"
+            "/EMC_TG <BOT_TOKEN>|off - bot opsional untuk salinan notifikasi pergantian IP\n"
             "/catatan [teks] - tambah atau lihat catatan\n"
             "/resetstats - arsipkan lalu reset statistik trade\n"
             "/reset CONFIRM - reset history/event/catatan (tanpa mengubah posisi)\n"
@@ -13133,6 +13338,7 @@ class TradingEngine:
         elif command == "/balance": await self._show_balance()
         elif command == "/api": await self.reply(await self._api_report())
         elif command == "/ip": await self._handle_ip()
+        elif command == "/emc_tg": await self._handle_emc_tg(text)
         elif command == "/catatan":
             arg = text[len(text.split(maxsplit=1)[0]):].strip() if len(text.split(maxsplit=1)) > 1 else ""
             if arg: await self.add_note(arg)
