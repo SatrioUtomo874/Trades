@@ -210,3 +210,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T07:10:21.136445+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
+## LINEAUSDT SHORT — CANCELED
+- Trade ID: `LINEAUSDT-20261118-144647-685DA5`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T07:46:59.755359+00:00 | Reason: SIZE_REJECTED
