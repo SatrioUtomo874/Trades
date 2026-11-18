@@ -234,3 +234,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T07:48:50.699020+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
+## 我踏马来了USDT SHORT — CANCELED
+- Trade ID: `我踏马来了USDT-20261118-144920-4E8EB5`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T07:49:31.922685+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
