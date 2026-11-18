@@ -132,3 +132,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T05:32:03.816932+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
+## JCTUSDT SHORT — CANCELED
+- Trade ID: `JCTUSDT-20261118-123412-007978`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T05:34:24.803953+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
