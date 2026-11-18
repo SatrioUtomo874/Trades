@@ -24,3 +24,9 @@
 - Entry: 0.01505 | Exit: 0.01505
 - PnL: 0 USDT (0%) | R: None
 - Closed: 2026-11-18T13:34:07.526917+00:00 | Reason: EXTERNAL_CLOSE_RECONCILED
+## RSRUSDT SHORT — CANCELED
+- Trade ID: `RSRUSDT-20261118-210731-761DF0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T14:08:16.371110+00:00 | Reason: SIZE_REJECTED
