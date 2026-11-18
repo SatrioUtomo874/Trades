@@ -120,3 +120,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T05:17:50.013986+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
+## CUSDT SHORT — CANCELED
+- Trade ID: `CUSDT-20261118-121756-B18976`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T05:20:37.450059+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
