@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-18T13:33:00.999949+00:00",
+  "updated_at": "2026-11-18T13:33:17.658758+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261118-184705-2E4948",
@@ -626,9 +626,9 @@
       "sl_client_algo_id": "VTSLSDT-20261118-193149-E91151",
       "tp_client_algo_id": "VTTPSDT-20261118-193149-E91151",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
-      "protection_error": null,
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCEL_WAIT_API",
+      "protection_error": "SL: status tetap NEW",
       "protection_warning_sent": false,
       "protection_exit_reason": null,
       "sl_submit_ambiguous": false,
