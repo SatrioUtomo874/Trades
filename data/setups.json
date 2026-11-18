@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-18T08:00:13.773875+00:00",
+  "updated_at": "2026-11-18T08:00:15.671795+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261117-225409-A6617C",
@@ -763,9 +763,9 @@
       "ema_filter_slow_value": "0.030943899661860345",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1794981600000,
-      "ema_exit_last_fast": "0.02940967386277405",
-      "ema_exit_last_slow": "0.02961711235409813",
+      "ema_exit_last_open_ms": 1794985200000,
+      "ema_exit_last_fast": "0.02935973909021924",
+      "ema_exit_last_slow": "0.029575556685543753",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
