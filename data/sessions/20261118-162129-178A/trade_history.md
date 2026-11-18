@@ -1,0 +1,8 @@
+# Trading Journal
+
+## BNTUSDT SHORT — CANCELED
+- Trade ID: `BNTUSDT-20261118-170041-1431FD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T10:00:50.645888+00:00 | Reason: SIZE_REJECTED
