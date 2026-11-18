@@ -30,3 +30,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T14:08:16.371110+00:00 | Reason: SIZE_REJECTED
+## WLDUSDT SHORT — CANCELED
+- Trade ID: `WLDUSDT-20261118-210927-047241`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T14:29:02.395059+00:00 | Reason: SIZE_REJECTED
