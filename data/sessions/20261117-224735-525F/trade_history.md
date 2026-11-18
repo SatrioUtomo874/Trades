@@ -204,3 +204,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T07:09:46.925573+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
+## STRKUSDT SHORT — CANCELED
+- Trade ID: `STRKUSDT-20261118-141005-6D1FC4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T07:10:21.136445+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
