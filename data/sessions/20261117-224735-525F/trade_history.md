@@ -114,3 +114,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T05:15:12.532083+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## CLOUSDT SHORT — CANCELED
+- Trade ID: `CLOUSDT-20261118-121737-DFADD4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T05:17:50.013986+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
