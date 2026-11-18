@@ -18,3 +18,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T19:17:52.316262+00:00 | Reason: SIZE_REJECTED
+## ATOMUSDT SHORT — CANCELED
+- Trade ID: `ATOMUSDT-20261119-050032-3E9A37`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T22:00:43.394599+00:00 | Reason: SIZE_REJECTED
