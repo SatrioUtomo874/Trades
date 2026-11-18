@@ -216,3 +216,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T07:46:59.755359+00:00 | Reason: SIZE_REJECTED
+## TIAUSDT SHORT — CANCELED
+- Trade ID: `TIAUSDT-20261118-143245-8F448B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T07:47:19.321970+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
