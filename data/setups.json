@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-18T06:07:55.710845+00:00",
+  "updated_at": "2026-11-18T06:07:56.145947+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261117-225409-A6617C",
@@ -342,7 +342,7 @@
       "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
-      "protection_exit_reason": null,
+      "protection_exit_reason": "EXCHANGE_POSITION_FLAT_WS",
       "sl_submit_ambiguous": false,
       "tp_submit_ambiguous": false,
       "entry": "0.01983",
