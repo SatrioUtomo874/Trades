@@ -126,3 +126,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T05:20:37.450059+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
+## CAPUSDT SHORT — CANCELED
+- Trade ID: `CAPUSDT-20261118-123151-73DB8C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T05:32:03.816932+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
