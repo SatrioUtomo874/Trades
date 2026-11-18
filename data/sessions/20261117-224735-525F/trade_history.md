@@ -252,3 +252,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-18T08:31:31.738797+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
+## FILUSDT SHORT — CANCELED
+- Trade ID: `FILUSDT-20261118-154604-38BC25`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-18T08:46:18.230403+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
