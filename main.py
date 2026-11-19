@@ -158,6 +158,7 @@ HISTORY_MARKDOWN_PATH = "data/trade_history.md"
 NOTES_PATH = "data/notes.json"
 SETUPS_PATH = "data/setups.json"
 RUNTIME_SETTINGS_PATH = "data/runtime_settings.json"
+BANNED_SYMBOLS_PATH = "data/banned_symbols.json"
 REAL_GUARD_PATH = "data/real_equity_guard.json"
 DEFERRED_COMMANDS_PATH = "data/deferred_commands.json"
 BINANCE_COOLDOWN_PATH = "data/binance_cooldown_state.json"
@@ -693,12 +694,22 @@ class Trade:
     ema_filter_value: Decimal | None = None
     ema_filter_slow_value: Decimal | None = None
     ema_filter_passed: bool | None = None
+    # H1 exit uses its own immutable EMA-pair snapshot. This is separate from
+    # the H4-at-entry display so adopted exchange positions can use the current
+    # dual-EMA config without falsely claiming that H4 was enabled at entry.
+    ema_exit_fast_length: int | None = None
+    ema_exit_slow_length: int | None = None
+    ema_exit_config_source: str = "NOT_SET"
     # H1 inverse-EMA exit state. EMA levels are seeded from closed H1 candles
     # using the same SMA-seeded recurrence as backtest(10).py.
     ema_exit_state: str = "UNINITIALIZED"
     ema_exit_last_open_ms: int = 0
     ema_exit_last_fast: Decimal | None = None
     ema_exit_last_slow: Decimal | None = None
+    ema_exit_last_close: Decimal | None = None
+    # On an OFF->ON transition, closed candles at/before this boundary are
+    # baseline only; they must not cause a delayed forced close.
+    ema_exit_ignore_cross_until_ms: int = 0
     ema_exit_trigger_close_ms: int | None = None
     ema_exit_trigger_price: Decimal | None = None
     ema_exit_reason: str | None = None
@@ -798,10 +809,15 @@ class Trade:
             "ema_filter_value": decimal_to_str(self.ema_filter_value),
             "ema_filter_slow_value": decimal_to_str(self.ema_filter_slow_value),
             "ema_filter_passed": self.ema_filter_passed,
+            "ema_exit_fast_length": self.ema_exit_fast_length,
+            "ema_exit_slow_length": self.ema_exit_slow_length,
+            "ema_exit_config_source": self.ema_exit_config_source,
             "ema_exit_state": self.ema_exit_state,
             "ema_exit_last_open_ms": int(self.ema_exit_last_open_ms or 0),
             "ema_exit_last_fast": decimal_to_str(self.ema_exit_last_fast),
             "ema_exit_last_slow": decimal_to_str(self.ema_exit_last_slow),
+            "ema_exit_last_close": decimal_to_str(self.ema_exit_last_close),
+            "ema_exit_ignore_cross_until_ms": int(self.ema_exit_ignore_cross_until_ms or 0),
             "ema_exit_trigger_close_ms": self.ema_exit_trigger_close_ms,
             "ema_exit_trigger_price": decimal_to_str(self.ema_exit_trigger_price),
             "ema_exit_reason": self.ema_exit_reason,
@@ -886,6 +902,29 @@ class Trade:
             saved_entry_window_closes_at = signal_time + timedelta(milliseconds=volumatic.TIMEFRAME_MS["M15"])
         saved_real_enabled = bool(row.get("real_enabled"))
         saved_real_state = str(row.get("real_state") or ("REAL_PENDING" if saved_real_enabled else "SIMULATION")).upper()
+        try:
+            saved_ema_filter_length = volumatic.normalize_ema_filter_length(row.get("ema_filter_length"))
+        except (TypeError, ValueError):
+            saved_ema_filter_length = None
+
+        def saved_positive_period(key: str) -> int | None:
+            raw = row.get(key)
+            if raw in (None, ""):
+                return None
+            try:
+                value = int(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return value if value > 0 and str(raw).strip() in {str(value), f"+{value}"} else None
+
+        saved_h1_fast = saved_positive_period("ema_exit_fast_length")
+        saved_h1_slow = saved_positive_period("ema_exit_slow_length")
+        if saved_h1_fast is None or saved_h1_slow is None:
+            if isinstance(saved_ema_filter_length, tuple):
+                saved_h1_fast, saved_h1_slow = saved_ema_filter_length
+        saved_h1_source = str(row.get("ema_exit_config_source") or "").strip()
+        if not saved_h1_source:
+            saved_h1_source = "LEGACY_TRADE_EMA_PAIR" if saved_h1_fast and saved_h1_slow else "NO_DUAL_EMA_SNAPSHOT"
         saved_entry_order_created_at = parse_iso(row.get("entry_order_created_at"))
         # Backward compatibility for records written before entry_order_created_at existed.
         # Local M15 traces use bubble_time as their expiry anchor; exchange-side
@@ -956,14 +995,19 @@ class Trade:
             entry_client_order_id=row.get("entry_client_order_id"), real_error=row.get("real_error"),
             real_submit_ambiguous=bool(row.get("real_submit_ambiguous", False)),
             signal_close_price=dec("signal_close_price", dec("entry", Decimal("0"))),
-            ema_filter_length=volumatic.normalize_ema_filter_length(row.get("ema_filter_length")),
+            ema_filter_length=saved_ema_filter_length,
             ema_filter_value=dec("ema_filter_value"),
             ema_filter_slow_value=dec("ema_filter_slow_value"),
             ema_filter_passed=(bool(row.get("ema_filter_passed")) if row.get("ema_filter_passed") is not None else None),
+            ema_exit_fast_length=saved_h1_fast,
+            ema_exit_slow_length=saved_h1_slow,
+            ema_exit_config_source=saved_h1_source,
             ema_exit_state=str(row.get("ema_exit_state") or "UNINITIALIZED").upper(),
             ema_exit_last_open_ms=max(0, int(row.get("ema_exit_last_open_ms") or 0)),
             ema_exit_last_fast=dec("ema_exit_last_fast"),
             ema_exit_last_slow=dec("ema_exit_last_slow"),
+            ema_exit_last_close=dec("ema_exit_last_close"),
+            ema_exit_ignore_cross_until_ms=max(0, int(row.get("ema_exit_ignore_cross_until_ms") or 0)),
             ema_exit_trigger_close_ms=(int(row["ema_exit_trigger_close_ms"]) if row.get("ema_exit_trigger_close_ms") not in (None, "") else None),
             ema_exit_trigger_price=dec("ema_exit_trigger_price"),
             ema_exit_reason=row.get("ema_exit_reason"),
@@ -2375,10 +2419,22 @@ class BinanceREST:
             self._kline_cache_candles = max(0, self._kline_cache_candles - int(old_rows.shape[0]))
 
     def _kline_disk_path(self, key: tuple[str, str, int]) -> Path:
+        """Return a collision-resistant cache path for the exact normalized pair.
+
+        Do not derive identity from an ASCII-only sanitized symbol: non-ASCII
+        Binance symbols would all collapse to the same filename and could load
+        another contract's H1/M15 history. The digest includes symbol, interval,
+        and requested count while the readable prefix remains filesystem-safe.
+        """
         symbol, interval, count = key
-        safe_symbol = re.sub(r"[^A-Z0-9]", "", str(symbol).upper())
-        safe_interval = re.sub(r"[^a-z0-9]", "", str(interval).lower())
-        return self._kline_disk_cache_dir / f"{safe_symbol}_{safe_interval}_{int(count)}.npy"
+        symbol = normalize_symbol(str(symbol))
+        interval = self._binance_interval(str(interval))
+        count = int(count)
+        identity = f"{symbol}\0{interval}\0{count}".encode("utf-8")
+        digest = hashlib.sha256(identity).hexdigest()[:24]
+        safe_symbol = re.sub(r"[^A-Z0-9]", "", symbol.upper())[-20:] or "SYMBOL"
+        safe_interval = re.sub(r"[^a-z0-9]", "", interval.lower()) or "interval"
+        return self._kline_disk_cache_dir / f"{safe_symbol}_{safe_interval}_{count}_{digest}.npy"
 
     def _load_kline_disk_cache(
         self, key: tuple[str, str, int], count: int
@@ -5123,6 +5179,7 @@ class TradingEngine:
         self._autostop_source: str | None = None
 
         self.symbols: dict[str, SymbolMeta] = {}
+        self.banned_symbols: set[str] = set()
         self._scanner_symbols: set[str] = set()
         self.prices: dict[str, PriceSnapshot] = {}
         self.active_trades: dict[str, Trade] = {}
@@ -5253,7 +5310,7 @@ class TradingEngine:
         # Critical JSON snapshots are written locally before GitHub. If a GitHub
         # PUT failed, blindly preferring a still-readable older remote version
         # would resurrect stale active trades/settings/commands on restart.
-        if local_data and remote_data and remote_path in {SETUPS_PATH, RUNTIME_SETTINGS_PATH, REAL_GUARD_PATH, DEFERRED_COMMANDS_PATH, BINANCE_COOLDOWN_PATH}:
+        if local_data and remote_data and remote_path in {SETUPS_PATH, RUNTIME_SETTINGS_PATH, REAL_GUARD_PATH, DEFERRED_COMMANDS_PATH, BINANCE_COOLDOWN_PATH, BANNED_SYMBOLS_PATH}:
             def updated_at(blob: bytes) -> float:
                 try:
                     obj = json.loads(blob.decode("utf-8"))
@@ -5283,6 +5340,37 @@ class TradingEngine:
         except Exception as exc:
             self._history_dirty = True
             log.error("GitHub persistence gagal untuk %s; local fallback tersimpan: %s", remote_path, exc)
+
+    async def _load_banned_symbols(self) -> None:
+        """Load permanent symbol bans independently from fresh-session settings."""
+        self.banned_symbols.clear()
+        raw = await self._remote_or_local(BANNED_SYMBOLS_PATH)
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+            rows = payload.get("symbols", []) if isinstance(payload, dict) else []
+            if isinstance(rows, list):
+                self.banned_symbols = {
+                    normalize_symbol(str(item)) for item in rows
+                    if normalize_symbol(str(item))
+                }
+            log.info("[BAN] permanent symbol list loaded | count=%s", len(self.banned_symbols))
+        except Exception as exc:
+            log.warning("[BAN] permanent symbol list invalid; empty list used: %s", exc)
+            self.banned_symbols.clear()
+
+    async def _save_banned_symbols(self) -> None:
+        """Persist the permanent blocklist locally and to the configured GitHub repo."""
+        payload = {
+            "symbols": sorted(self.banned_symbols),
+            "updated_at": iso_utc(),
+        }
+        await self._persist_bytes(
+            BANNED_SYMBOLS_PATH,
+            json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+            "volumatic: permanent banned symbols",
+        )
 
     async def _load_runtime_settings(self) -> None:
         raw = await self._remote_or_local(RUNTIME_SETTINGS_PATH)
@@ -6335,6 +6423,11 @@ class TradingEngine:
         self.symbols.clear()
         self._scanner_symbols.clear()
         self.prices.clear()
+        self.banned_symbols.clear()
+        try:
+            await self._load_banned_symbols()
+        except Exception as exc:
+            log.warning("[BAN] permanent symbol list could not be loaded; local fallback/empty list used: %s", exc)
 
         if not self._telegram_error_handler_added:
             for handler in list(log.handlers):
@@ -6368,13 +6461,14 @@ class TradingEngine:
         self._scan_task = asyncio.create_task(self._scan_loop(), name="volumatic-scanner")
         log.info(
             "[START] FRESH Volumatic session | scanner=OFF | timeframe=M15 | length=%s | "
-            "EMA=%s | no persisted engine state imported",
+            "EMA=%s | permanent bans loaded=%s; no prior trade/session state imported",
             self.trend_length,
-            ema_filter_label(self.ema_filter_length),
+            ema_filter_label(self.ema_filter_length), len(self.banned_symbols),
         )
         await self.reply(
             "🟢 VOLUMATIC TREND / FRESH SESSION\n\n"
-            "Runtime state : CLEAN (tidak memuat data sesi sebelumnya)\n"
+            "Runtime state : CLEAN (trade/sesi lama tidak dimuat)\n"
+            f"Permanent bans: {len(self.banned_symbols)} simbol dimuat\n"
             "Signal TF     : M15\nEMA Trend TF  : H4\n"
             f"Trend length  : {self.trend_length} (default {volumatic.DEFAULT_TREND_LENGTH})\n"
             f"EMA filter    : {ema_filter_label(self.ema_filter_length)}\n"
@@ -6523,6 +6617,7 @@ class TradingEngine:
             symbol for symbol, meta in self.symbols.items()
             if meta.status == "TRADING" and meta.contract_type == "PERPETUAL"
             and meta.quote_asset == "USDT" and symbol not in EXCLUDED_SYMBOLS
+            and symbol not in self.banned_symbols
         ]
         return sorted(result)
 
@@ -7466,12 +7561,18 @@ class TradingEngine:
 
     async def _handle_signal(self, signal: dict[str, Any], expiry_ms: int) -> str:
         pair = normalize_symbol(signal["symbol"])
+        if pair in self.banned_symbols:
+            log.info("[BAN] scanner signal rejected for permanently banned symbol %s", pair)
+            return "BANNED_SYMBOL"
         direction = str(signal["direction"]).upper()
         if direction not in {"LONG", "SHORT"}:
             raise ValueError(f"Arah sinyal tidak valid: {direction}")
         if str(signal.get("signal_mode") or "").upper() != "CONFIRMED_M15_NEXT_OPEN":
             raise ValueError("Signal ditolak: hanya sinyal confirmed M15 next-open yang diterima.")
         async with self._trade_lock:
+            if pair in self.banned_symbols:
+                log.info("[BAN] signal rejected after trade-lock recheck | %s", pair)
+                return "BANNED_SYMBOL"
             signal_close_ms = int(signal.get("signal_close_time_ms") or 0)
             entry_open_ms = int(signal.get("entry_candle_open_time_ms") or 0)
             entry_close_ms = int(signal.get("entry_candle_close_time_ms") or 0)
@@ -7713,6 +7814,9 @@ class TradingEngine:
                 ema_filter_length=filter_length, ema_filter_value=filter_value,
                 ema_filter_slow_value=filter_slow_value,
                 ema_filter_passed=(filter_passed if filter_length is not None else None),
+                ema_exit_fast_length=(filter_length[0] if isinstance(filter_length, tuple) else None),
+                ema_exit_slow_length=(filter_length[1] if isinstance(filter_length, tuple) else None),
+                ema_exit_config_source=("SIGNAL_EMA_SNAPSHOT" if isinstance(filter_length, tuple) else "NO_DUAL_EMA_AT_SIGNAL"),
                 margin_usdt=self.margin_usdt, leverage=self.leverage,
                 min_margin_mode=self.min_margin_enabled,
                 target_notional=self.margin_usdt * Decimal(self.leverage),
@@ -7800,7 +7904,13 @@ class TradingEngine:
                     f"Signal: {trade.signal} confirmed M15 bubble\n"
                     f"H4 EMA: {ema_filter_values_label(trade.ema_filter_length, trade.ema_filter_value, trade.ema_filter_slow_value)}\n"
                     f"H1 EMA: {ema_filter_values_label(trade.ema_filter_length, h1_fast_value, h1_slow_value)}\n"
-                    f"Entry level (next M15 OPEN): {fmt_price(trade.entry)}\n"
+                    + (
+                        f"H1 reference close: {fmt_price(positive_decimal(signal.get('h1_ema_reference_close')))}"
+                        f" • candle closed: {format_wib(datetime.fromtimestamp((int(signal.get('h1_ema_open_time_ms')) + H1_MS) / 1000.0, tz=timezone.utc))}\n"
+                        if signal.get("h1_ema_open_time_ms") not in (None, "") and positive_decimal(signal.get("h1_ema_reference_close")) is not None
+                        else "H1 reference close: UNAVAILABLE\n"
+                    )
+                    + f"Entry level (next M15 OPEN): {fmt_price(trade.entry)}\n"
                     f"Eksekusi: {'MARKET saat harga menyentuh level (dipantau WebSocket)' if trade.real_intent else 'PAPER saat harga menyentuh level'}\n"
                     f"Supertrend M15 SL: {fmt_price(trade.stop_loss)} • ATR {trade.supertrend_atr_length} / Factor {trade.supertrend_factor:g}\n"
                     f"TP: {fmt_price(trade.take_profit)} • RR 1:{fmt_num(trade.take_profit_rr, 2)} "
@@ -7976,6 +8086,12 @@ class TradingEngine:
     async def _run_market_entry(self, trade: Trade, trigger_price: Decimal, source: str) -> None:
         if trade.status != "PENDING" or trade.real_enabled:
             return
+        if trade.pair in self.banned_symbols:
+            raise MarketEntryRejected(
+                "PERMANENT_SYMBOL_BAN",
+                f"{trade.pair} masuk daftar banned permanen; MARKET entry tidak dikirim.",
+                result="CANCELED", notify=False,
+            )
         direction = trade.direction
         if not self.real_mode:
             raise MarketEntryRejected("REAL_OFF_BEFORE_ENTRY", "REAL sedang OFF; entry baru tidak dikirim ke Binance.")
@@ -8121,6 +8237,15 @@ class TradingEngine:
         if market_cap > 0 and quantity > market_cap:
             raise MarketEntryRejected("QTY_ABOVE_MARKET_MAX", f"Qty {format_qty(quantity)} melebihi batas MARKET {format_qty(market_cap)}.")
 
+        # Last synchronous safety gate immediately before committing the
+        # MARKET submission. /banned updates the set before waiting for this
+        # execution lock, so a preflight already in progress is stopped here.
+        if trade.pair in self.banned_symbols:
+            raise MarketEntryRejected(
+                "PERMANENT_SYMBOL_BAN",
+                f"{trade.pair} dibanned saat preflight; MARKET entry tidak dikirim.",
+                result="CANCELED", notify=False,
+            )
         trade.position_side = ("LONG" if direction == "LONG" else "SHORT") if dual else "BOTH"
         identity = f"{trade.pair}|{direction}|M15|{int(trade.signal_time.timestamp() * 1000)}|MARKET"
         trade.entry_client_order_id = "VT" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:28]
@@ -8416,11 +8541,11 @@ class TradingEngine:
         log.info("[TRADE] FILLED %s %s @ %s (%s) | SL=%s TP=%s protection=%s locked=%s",
                  trade.pair, trade.direction, trade.fill_price, source,
                  trade.stop_loss, trade.take_profit, trade.protection_state, protection_locked)
-        if trade.status == "FILLED" and not trade.exchange_adopted:
-            # PAPER can warm up immediately. REAL first gets its exchange-side
-            # SL/TP attempt from maintenance; H1 history must not compete with
-            # the initial protection requests for the shared Binance REST lock.
-            if not trade.real_enabled:
+        if trade.status == "FILLED":
+            # PAPER can warm up immediately. Locally-created REAL entries still
+            # give protection setup priority; exchange-adopted positions have no
+            # local protection setup and can initialize H1 directly.
+            if not trade.real_enabled or trade.exchange_adopted:
                 self._schedule_ema_exit_initialization(trade)
             await self._sync_ws_symbols()
         return None
@@ -9455,7 +9580,7 @@ class TradingEngine:
                     await self._sync_ws_symbols()
 
         if (
-            trade.status == "FILLED" and not trade.exchange_adopted
+            trade.status == "FILLED"
             and trade.protection_state in {"ACTIVE", "PARTIAL", "INVALID_RISK", "ERROR_REJECTED"}
             and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}
         ):
@@ -9675,7 +9800,7 @@ class TradingEngine:
                         continue
                     if self._binance_cooldown_remaining() > 0:
                         break
-                    if trade.status == "FILLED" and not trade.real_enabled and not trade.exchange_adopted and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}:
+                    if trade.status == "FILLED" and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}:
                         self._schedule_ema_exit_initialization(trade)
                     if trade.real_enabled and trade.status == "PENDING":
                         try:
@@ -9873,6 +9998,9 @@ class TradingEngine:
         if kline.get("x") is not True:
             return
         pair = normalize_symbol(symbol)
+        if pair in self.banned_symbols:
+            self._bubble_trace_states.pop(pair, None)
+            return
         state = self._bubble_trace_states.get(pair)
         if state is None:
             has_pending_trace = any(
@@ -10094,42 +10222,65 @@ class TradingEngine:
 
     @staticmethod
     def _ema_sma_seeded(values: np.ndarray, period: int) -> np.ndarray:
-        """EMA identical to backtest(10).py smooth(): SMA seed, then recursive EMA."""
-        x = np.asarray(values, dtype=np.float64).reshape(-1)
-        out = np.full(x.shape, np.nan, dtype=np.float64)
-        n = int(period)
-        if n < 1 or x.size < n or not np.all(np.isfinite(x)):
-            return out
-        alpha = 2.0 / (float(n) + 1.0)
-        previous = float(np.mean(x[:n]))
-        out[n - 1] = previous
-        for i in range(n, x.size):
-            previous += alpha * (float(x[i]) - previous)
-            out[i] = previous
-        return out
+        """Use strategy.py's shared SMA-seeded EMA implementation."""
+        return volumatic.ema_sma_seeded(values, period)
 
     @staticmethod
     def _ema_exit_periods(trade: Trade) -> tuple[int, int] | None:
+        fast = trade.ema_exit_fast_length
+        slow = trade.ema_exit_slow_length
+        if fast is not None and slow is not None:
+            try:
+                fast_i, slow_i = int(fast), int(slow)
+                if fast_i > 0 and slow_i > 0 and fast_i != slow_i:
+                    return tuple(sorted((fast_i, slow_i)))
+            except (TypeError, ValueError, OverflowError):
+                pass
         try:
             selected = volumatic.normalize_ema_filter_length(trade.ema_filter_length)
         except (TypeError, ValueError):
             return None
         return selected if isinstance(selected, tuple) else None
 
+    def _bind_trade_h1_ema_config(self, trade: Trade) -> tuple[int, int] | None:
+        """Backfill a missing H1 pair from a legacy trade or current dual /EMA config."""
+        periods = self._ema_exit_periods(trade)
+        if periods is not None:
+            if trade.ema_exit_fast_length is None or trade.ema_exit_slow_length is None:
+                trade.ema_exit_fast_length, trade.ema_exit_slow_length = periods
+                trade.ema_exit_config_source = "LEGACY_TRADE_EMA_PAIR"
+            return periods
+        try:
+            current = volumatic.normalize_ema_filter_length(self.ema_filter_length)
+        except (TypeError, ValueError):
+            current = None
+        if not isinstance(current, tuple):
+            return None
+        trade.ema_exit_fast_length, trade.ema_exit_slow_length = current
+        trade.ema_exit_config_source = "CURRENT_CONFIG_FALLBACK"
+        if trade.ema_exit_state in {"DISABLED", "UNAVAILABLE", "UNINITIALIZED"}:
+            trade.ema_exit_state = "UNINITIALIZED"
+        trade.ema_exit_last_error = None
+        log.info(
+            "[EMA EXIT] H1 EMA pair bound from current config | %s %s EMA%s/%s source=%s",
+            trade.pair, trade.direction, current[0], current[1], trade.ema_exit_config_source,
+        )
+        return current
+
     def _schedule_ema_exit_initialization(self, trade: Trade) -> None:
-        """Start at most one low-priority H1 history warm-up per trade."""
-        if trade.status != "FILLED" or trade.exchange_adopted:
+        """Start at most one low-priority H1 history warm-up per filled trade."""
+        if trade.status != "FILLED":
             return
+        periods = self._bind_trade_h1_ema_config(trade)
         if trade.ema_exit_state in {
             "ACTIVE", "ACTIVE_WITH_GAP", "EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY",
             "CLOSE_UNKNOWN", "CLEANUP_WAIT_API", "SUPERSEDED_BY_PROTECTION",
             "DISABLED", "UNAVAILABLE",
         }:
             return
-        periods = self._ema_exit_periods(trade)
         if periods is None:
             trade.ema_exit_state = "DISABLED"
-            trade.ema_exit_last_error = "Trade tidak memiliki konfigurasi dual EMA yang tersimpan."
+            trade.ema_exit_last_error = "Forced close H1 memerlukan pasangan /EMA FAST SLOW; konfigurasi trade dan current config bukan dual EMA."
             return
         if self._binance_cooldown_remaining() > 0:
             trade.ema_exit_state = "WAITING_API"
@@ -10151,12 +10302,10 @@ class TradingEngine:
 
     async def _initialize_ema_exit_trade(self, trade_id: str) -> None:
         """Seed/repair the H1 EMA exit state and replay any missed closed candles."""
-        exit_enabled_at_start = self.h1_enabled
-        h1_generation_at_start = self._h1_toggle_generation
         try:
             async with self._ema_exit_init_semaphore:
                 trade = self.active_trades.get(trade_id)
-                if trade is None or trade.status != "FILLED" or trade.exchange_adopted:
+                if trade is None or trade.status != "FILLED":
                     return
                 periods = self._ema_exit_periods(trade)
                 if periods is None:
@@ -10235,25 +10384,28 @@ class TradingEngine:
                             and np.isfinite(fast_values[i]) and np.isfinite(slow_values[i])):
                         continue
                     candle_close_ms = int(opens[i]) + H1_MS
-                    if candle_close_ms <= filled_ms:
+                    if candle_close_ms <= max(
+                        filled_ms, int(trade.ema_exit_ignore_cross_until_ms or 0)
+                    ):
                         continue
                     previous_fast = float(fast_values[i - 1])
                     previous_slow = float(slow_values[i - 1])
                     current_fast = float(fast_values[i])
                     current_slow = float(slow_values[i])
-                    bearish_cross = current_fast < current_slow and previous_fast >= previous_slow
-                    bullish_cross = current_fast > current_slow and previous_fast <= previous_slow
+                    cross_direction = volumatic.ema_cross_direction(
+                        previous_fast, previous_slow, current_fast, current_slow
+                    )
+                    bearish_cross = cross_direction == "BEARISH"
+                    bullish_cross = cross_direction == "BULLISH"
                     trade.ema_exit_last_open_ms = int(opens[i])
                     trade.ema_exit_last_fast = Decimal(str(current_fast))
                     trade.ema_exit_last_slow = Decimal(str(current_slow))
+                    trade.ema_exit_last_close = Decimal(str(float(closes[i])))
                     should_exit = (
                         (trade.direction == "LONG" and bearish_cross)
                         or (trade.direction == "SHORT" and bullish_cross)
                     )
-                    if (
-                        should_exit and exit_enabled_at_start and self.h1_enabled
-                        and self._h1_toggle_generation == h1_generation_at_start
-                    ):
+                    if should_exit and self.h1_enabled:
                         reason = "EMA_H1_BEARISH_CROSS" if trade.direction == "LONG" else "EMA_H1_BULLISH_CROSS"
                         trade.ema_exit_state = "EXIT_PENDING"
                         trade.ema_exit_trigger_close_ms = candle_close_ms
@@ -10273,6 +10425,7 @@ class TradingEngine:
                     trade.ema_exit_last_open_ms = int(opens[last_index])
                     trade.ema_exit_last_fast = Decimal(str(float(fast_values[last_index])))
                     trade.ema_exit_last_slow = Decimal(str(float(slow_values[last_index])))
+                    trade.ema_exit_last_close = Decimal(str(float(closes[last_index])))
                     trade.ema_exit_state = "ACTIVE_WITH_GAP" if uncovered_gap else "ACTIVE"
                     trade.ema_exit_last_error = (
                         "Sebagian riwayat H1 sebelum warm-up tidak tersedia; exit dilanjutkan dari candle terbaru. "
@@ -10288,11 +10441,7 @@ class TradingEngine:
                         "Histori candle sebelum warm-up tidak cukup untuk merekonstruksi semua cross saat bot tidak aktif.\n"
                         "Exit EMA tetap aktif untuk cross baru; SL/TP tetap dipertahankan. Periksa posisi ini."
                     )
-                if (
-                    triggered and trade.ema_exit_state == "EXIT_PENDING"
-                    and self.h1_enabled
-                    and self._h1_toggle_generation == h1_generation_at_start
-                ):
+                if triggered and trade.ema_exit_state == "EXIT_PENDING" and self.h1_enabled:
                     if not trade.real_enabled:
                         await self._finalize_trade(
                             trade, "CLOSED", trade.ema_exit_trigger_price,
@@ -10501,7 +10650,7 @@ class TradingEngine:
         changed = False
         for trade in list(self.active_trades.values()):
             if (
-                trade.pair != symbol or trade.status != "FILLED" or trade.exchange_adopted
+                trade.pair != symbol or trade.status != "FILLED"
                 or self._ema_exit_periods(trade) is None
             ):
                 continue
@@ -10537,11 +10686,15 @@ class TradingEngine:
             previous_slow = float(trade.ema_exit_last_slow)
             current_fast = previous_fast + alpha_fast * (float(close_price) - previous_fast)
             current_slow = previous_slow + alpha_slow * (float(close_price) - previous_slow)
-            bearish_cross = current_fast < current_slow and previous_fast >= previous_slow
-            bullish_cross = current_fast > current_slow and previous_fast <= previous_slow
+            cross_direction = volumatic.ema_cross_direction(
+                previous_fast, previous_slow, current_fast, current_slow
+            )
+            bearish_cross = cross_direction == "BEARISH"
+            bullish_cross = cross_direction == "BULLISH"
             trade.ema_exit_last_open_ms = open_ms
             trade.ema_exit_last_fast = Decimal(str(current_fast))
             trade.ema_exit_last_slow = Decimal(str(current_slow))
+            trade.ema_exit_last_close = close_price
             changed = True
             should_exit = (
                 (trade.direction == "LONG" and bearish_cross)
@@ -10549,7 +10702,10 @@ class TradingEngine:
             )
             if not self.h1_enabled:
                 continue  # update EMA baseline only; ignore H1 crosses while the master switch is OFF
-            if not should_exit or close_ms <= int((trade.filled_at or trade.created_at).timestamp() * 1000):
+            if not should_exit or close_ms <= max(
+                int((trade.filled_at or trade.created_at).timestamp() * 1000),
+                int(trade.ema_exit_ignore_cross_until_ms or 0),
+            ):
                 continue
             reason = "EMA_H1_BEARISH_CROSS" if trade.direction == "LONG" else "EMA_H1_BULLISH_CROSS"
             trade.ema_exit_state = "EXIT_PENDING"
@@ -10599,6 +10755,10 @@ class TradingEngine:
         self.prices[symbol] = PriceSnapshot(symbol, price, int(event_time_ms), now_utc())
         for trade in list(self.active_trades.values()):
             if trade.pair != symbol:
+                continue
+            if trade.status == "PENDING" and trade.pair in self.banned_symbols:
+                # /banned attempts exchange cancellation; never let a local
+                # touch-watch submit a fresh MARKET entry after the ban.
                 continue
             if trade.status == "PENDING" and trade.real_intent and not trade.real_enabled:
                 if not trade.entry_inflight and now_utc() < trade.expires_at:
@@ -10713,6 +10873,11 @@ class TradingEngine:
         order_is_still_open = status == "PENDING" or order_status in {"NEW", "PARTIALLY_FILLED"}
         order_created_at = stamp if order_is_still_open else None
         expiry_anchor = order_created_at or stamp
+        try:
+            current_ema_config = volumatic.normalize_ema_filter_length(self.ema_filter_length)
+        except (TypeError, ValueError):
+            current_ema_config = None
+        adopted_h1_pair = current_ema_config if isinstance(current_ema_config, tuple) else None
         return Trade(
             trade_id=generate_trade_id(symbol),
             session_id=self.session_id,
@@ -10732,6 +10897,9 @@ class TradingEngine:
             ema_filter_length=None,
             ema_filter_value=None,
             ema_filter_passed=None,
+            ema_exit_fast_length=(adopted_h1_pair[0] if adopted_h1_pair else None),
+            ema_exit_slow_length=(adopted_h1_pair[1] if adopted_h1_pair else None),
+            ema_exit_config_source=("CURRENT_EMA_CONFIG_AT_ADOPTION" if adopted_h1_pair else "NO_DUAL_EMA_AT_ADOPTION"),
             status=status,
             created_at=stamp,
             filled_at=(stamp if status == "FILLED" else None),
@@ -10743,7 +10911,8 @@ class TradingEngine:
             actual_notional=notional if notional > 0 else None,
             real_enabled=True,
             real_state=("REAL_EXCHANGE_ADOPTED" if status == "FILLED" else "REAL_EXCHANGE_ADOPTED_PENDING"),
-            ema_exit_state="DISABLED",
+            ema_exit_state=("UNINITIALIZED" if adopted_h1_pair else "DISABLED"),
+            ema_exit_last_error=(None if adopted_h1_pair else "Forced close H1 membutuhkan pasangan /EMA FAST SLOW; konfigurasi saat adopsi bukan dual EMA."),
             position_side=position_side or "BOTH",
             entry_order_id=order_id,
             entry_client_order_id=client_order_id,
@@ -10919,6 +11088,9 @@ class TradingEngine:
             elif trade.exchange_adopted:
                 trade.real_state = "REAL_EXCHANGE_ADOPTED"
         await self.ws.add_symbol(symbol)
+        if trade.status == "FILLED":
+            self._schedule_ema_exit_initialization(trade)
+            await self._sync_ws_symbols()
         return trade
 
     async def _upsert_exchange_order_snapshot(self, row: dict[str, Any], *, source: str) -> Trade | None:
@@ -11385,12 +11557,13 @@ class TradingEngine:
         )
         exit_symbols = {
             t.pair for t in self.active_trades.values()
-            if t.status == "FILLED" and not t.exchange_adopted
+            if t.status == "FILLED"
             and self._ema_exit_periods(t) is not None
             and (
                 not t.real_enabled
+                or t.exchange_adopted
                 or t.protection_state in {"ACTIVE", "PARTIAL", "INVALID_RISK", "ERROR_REJECTED"}
-                or t.ema_exit_state in {"INITIALIZING", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING", "ACTIVE", "ACTIVE_WITH_GAP"}
+                or t.ema_exit_state in {"UNINITIALIZED", "INITIALIZING", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING", "ACTIVE", "ACTIVE_WITH_GAP"}
             )
             and t.ema_exit_state not in {
                 "DISABLED", "UNAVAILABLE", "EXIT_PENDING", "CLOSE_SUBMITTING",
@@ -11572,7 +11745,8 @@ class TradingEngine:
                 f"H1 LOGIC: {state}\n\n"
                 f"ENTRY FILTER : {state} — sinyal baru wajib lolos directional EMA H1 saat ON.\n"
                 f"FORCED CLOSE: {state} — posisi LONG ditutup pada bearish EMA cross H1; "
-                "posisi SHORT ditutup pada bullish EMA cross H1 saat ON.\n\n"
+                "posisi SHORT ditutup pada bullish EMA cross H1 saat ON.\n"
+                "Gunakan /EMA FAST SLOW (contoh /EMA 9 21); pair H1 tiap posisi terlihat di /trade.\n\n"
                 "Gunakan /H1 on atau /H1 off. Saklar ini mengatur kedua logika sekaligus.\n"
                 "Saat OFF, EMA H1 tetap diperbarui sebagai baseline agar cross yang terjadi selama OFF "
                 "tidak memicu forced close setelah H1 dinyalakan kembali. SL/TP exchange tidak diubah."
@@ -11583,9 +11757,41 @@ class TradingEngine:
             return
 
         enabled = parts[1].lower() == "on"
+        if enabled:
+            try:
+                active_ema_config = volumatic.normalize_ema_filter_length(self.ema_filter_length)
+            except (TypeError, ValueError):
+                active_ema_config = None
+            if not isinstance(active_ema_config, tuple):
+                await self.reply(
+                    "❌ H1 LOGIC tidak bisa ON tanpa pasangan EMA ganda. "
+                    "Atur /EMA FAST SLOW terlebih dahulu, contoh /EMA 9 21. "
+                    "Forced close membutuhkan cross EMA fast/slow yang terkonfirmasi pada candle H1 tertutup."
+                )
+                return
         previous = self.h1_enabled
         if enabled == previous:
-            await self.reply(f"H1 LOGIC sudah {'ON' if enabled else 'OFF'}. Kedua logika tidak berubah.")
+            repaired = 0
+            if enabled:
+                for trade in list(self.active_trades.values()):
+                    if trade.status == "FILLED":
+                        before = trade.ema_exit_state
+                        self._bind_trade_h1_ema_config(trade)
+                        if trade.ema_exit_state in {"DISABLED", "UNAVAILABLE"} and self._ema_exit_periods(trade) is not None:
+                            trade.ema_exit_state = "UNINITIALIZED"
+                            trade.ema_exit_last_error = None
+                            self._ema_exit_last_retry.pop(trade.trade_id, None)
+                        self._schedule_ema_exit_initialization(trade)
+                        if before != trade.ema_exit_state or trade.trade_id in self._ema_exit_init_tasks:
+                            repaired += 1
+                await self._save_active_state()
+                await self._sync_ws_symbols()
+                await self.reply(
+                    f"H1 LOGIC tetap ON. Pemeriksaan ulang posisi FILLED selesai; warm-up/repair dipicu: {repaired}.\n"
+                    "Gunakan /trade untuk melihat nilai EMA H1 candle terakhir dan status exit tiap posisi."
+                )
+            else:
+                await self.reply("H1 LOGIC sudah OFF. Kedua logika tidak berubah.")
             return
 
         self.h1_enabled = enabled
@@ -11605,8 +11811,20 @@ class TradingEngine:
 
         state = "ON" if enabled else "OFF"
         if enabled:
+            # The last fully closed H1 candle at activation becomes the new
+            # baseline boundary. Any recovered candle at/before it is not an
+            # actionable cross because forced close was OFF during that period.
+            activation_boundary_ms = (int(time.time() * 1000) // H1_MS) * H1_MS
             for trade in list(self.active_trades.values()):
-                if trade.status == "FILLED" and not trade.exchange_adopted:
+                if trade.status == "FILLED":
+                    trade.ema_exit_ignore_cross_until_ms = max(
+                        int(trade.ema_exit_ignore_cross_until_ms or 0), activation_boundary_ms
+                    )
+                    self._bind_trade_h1_ema_config(trade)
+                    if trade.ema_exit_state in {"DISABLED", "UNAVAILABLE"} and self._ema_exit_periods(trade) is not None:
+                        trade.ema_exit_state = "UNINITIALIZED"
+                        trade.ema_exit_last_error = None
+                        self._ema_exit_last_retry.pop(trade.trade_id, None)
                     self._schedule_ema_exit_initialization(trade)
             detail = (
                 "Filter entry H1 kembali wajib lolos. Forced close mengikuti cross H1 yang "
@@ -11646,6 +11864,113 @@ class TradingEngine:
         )
         log.info("[CONFIG] H1 master switch: %s -> %s", "ON" if previous else "OFF", state)
 
+    @staticmethod
+    def _symbols_from_command(text: str) -> list[str]:
+        parts = str(text or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            return []
+        raw = parts[1].strip()
+        # Accept space-, comma-, semicolon-, or newline-separated names.
+        # normalize_symbol deliberately preserves non-ASCII letters (e.g. Chinese).
+        return sorted({
+            normalize_symbol(token)
+            for token in re.split(r"[,;\s]+", raw)
+            if normalize_symbol(token)
+        })
+
+    async def _handle_banned(self, text: str) -> None:
+        symbols = self._symbols_from_command(text)
+        if not symbols:
+            if self.banned_symbols:
+                await self.reply(
+                    f"PERMANENT BANNED SYMBOLS • {len(self.banned_symbols)}\n"
+                    + "\n".join(sorted(self.banned_symbols))
+                    + "\n\nTambah: /banned BTCUSDT ETHUSDT 我踏马来了USDT"
+                )
+            else:
+                await self.reply(
+                    "Belum ada koin yang dibanned.\n"
+                    "Gunakan: /banned BTCUSDT ETHUSDT 我踏马来了USDT\n"
+                    "Pisahkan beberapa koin dengan spasi, koma, atau titik koma."
+                )
+            return
+
+        before = set(self.banned_symbols)
+        # Set the in-memory ban before the first await so queued entry tasks
+        # cannot pass their final pre-submit check while this command waits.
+        self.banned_symbols.update(symbols)
+        added = sorted(self.banned_symbols - before)
+        async with self._entry_exec_lock:
+            await self._save_banned_symbols()
+
+        # Invalidate any not-yet-submitted signal work for these symbols.
+        self._signal_retries = {
+            key: item for key, item in self._signal_retries.items()
+            if normalize_symbol(str((item.get("signal") or {}).get("symbol") or "")) not in self.banned_symbols
+        }
+        for symbol in symbols:
+            self._bubble_trace_states.pop(symbol, None)
+            self._live_signal_candles.pop(f"M15:{symbol}", None)
+            self._live_signal_last_eval.pop(f"M15:{symbol}", None)
+            self._live_signal_seen.pop(f"M15:{symbol}", None)
+            self.last_processed_candles.pop(symbol, None)
+            self._scanner_symbols.discard(symbol)
+
+        cancelled = 0
+        cancellation_pending: list[str] = []
+        for trade in list(self.active_trades.values()):
+            if trade.pair not in self.banned_symbols or trade.status != "PENDING":
+                continue
+            try:
+                await self._cancel_pending_trade(trade, "PERMANENT_SYMBOL_BAN")
+                if trade.status != "PENDING":
+                    cancelled += 1
+                else:
+                    cancellation_pending.append(trade.pair)
+            except BinanceRateLimitError:
+                cancellation_pending.append(trade.pair)
+            except Exception as exc:
+                cancellation_pending.append(trade.pair)
+                log.warning("[BAN] pending order cancellation failed | %s | %s", trade.pair, exc)
+
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+        if cancelled:
+            await self._save_active_state()
+        await self._sync_ws_symbols()
+        added_text = ", ".join(added) if added else "(semua simbol sudah dibanned sebelumnya)"
+        extra = (
+            f"\nPending cancellation masih perlu rekonsiliasi: {', '.join(sorted(set(cancellation_pending)))}"
+            if cancellation_pending else ""
+        )
+        await self.reply(
+            f"✅ PERMANENT BAN SAVED\nAdded: {added_text}\nTotal banned: {len(self.banned_symbols)}"
+            f"\nPending entries cancelled: {cancelled}{extra}\n"
+            "Posisi yang sudah FILLED tidak ditutup oleh perintah ban; posisi tetap dikelola oleh SL/TP dan H1."
+        )
+        log.info("[BAN] permanent symbols updated | added=%s | total=%s", added, len(self.banned_symbols))
+
+    async def _handle_unbanned(self, text: str) -> None:
+        symbols = self._symbols_from_command(text)
+        if not symbols:
+            await self.reply("Gunakan: /unbanned BTCUSDT ETHUSDT 我踏马来了USDT")
+            return
+        removed = sorted(symbol for symbol in symbols if symbol in self.banned_symbols)
+        self.banned_symbols.difference_update(symbols)
+        if removed:
+            await self._save_banned_symbols()
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+        await self._sync_ws_symbols()
+        await self.reply(
+            f"✅ UNBANNED\nRemoved: {', '.join(removed) if removed else '(tidak ada yang cocok)'}"
+            f"\nRemaining banned: {len(self.banned_symbols)}\n"
+            "Simbol yang dilepas kembali eligible pada siklus scanner berikutnya."
+        )
+        log.info("[BAN] symbols unbanned | removed=%s | total=%s", removed, len(self.banned_symbols))
+
     async def _handle_ema(self, text: str) -> None:
         parts = str(text or "").split()
         if len(parts) == 1:
@@ -11681,8 +12006,22 @@ class TradingEngine:
         except ValueError as exc:
             await self.reply(f"❌ {exc}\nContoh: /EMA 89, /EMA 89 95, atau /EMA off.")
             return
+        if self.h1_enabled and not isinstance(selected, tuple):
+            await self.reply(
+                "❌ H1 LOGIC sedang ON dan memerlukan dual EMA untuk forced close. "
+                "Gunakan dua periode seperti /EMA 9 21, atau matikan /H1 off sebelum memakai single/OFF."
+            )
+            return
         old = self.ema_filter_length
         self.ema_filter_length = selected
+        # Existing positions keep their own H1 snapshot. Only trades with no
+        # usable pair are backfilled from this newly selected dual configuration.
+        if isinstance(selected, tuple):
+            for active_trade in list(self.active_trades.values()):
+                if active_trade.status == "FILLED" and self._ema_exit_periods(active_trade) is None:
+                    self._bind_trade_h1_ema_config(active_trade)
+                    self._schedule_ema_exit_initialization(active_trade)
+            await self._sync_ws_symbols()
         # Queued signals carry their old EMA snapshot; discard them when periods change.
         self._signal_retries.clear()
         # A new EMA configuration invalidates cached signal and scan cursors.
@@ -12306,6 +12645,41 @@ class TradingEngine:
         )
         return f"Binance snapshot: {len(live_rows)} open order aktif berhasil disinkronkan."
 
+    def _trade_h1_ema_status_line(self, trade: Trade) -> str:
+        """Explain exactly which closed-H1 EMA values currently drive forced close."""
+        periods = self._ema_exit_periods(trade)
+        logic = "ON" if self.h1_enabled else "OFF"
+        if periods is None:
+            detail = trade.ema_exit_last_error or "belum ada konfigurasi dual EMA"
+            return f"EMA H1 EXIT: DISABLED • H1 {logic} • {detail}"
+        fast_len, slow_len = periods
+        fast = fmt_price(trade.ema_exit_last_fast)
+        slow = fmt_price(trade.ema_exit_last_slow)
+        if trade.ema_exit_last_fast is None or trade.ema_exit_last_slow is None:
+            values = f"EMA{fast_len}=WARMING UP · EMA{slow_len}=WARMING UP"
+            bias = "BIAS: UNKNOWN"
+        else:
+            values = f"EMA{fast_len}={fast} · EMA{slow_len}={slow}"
+            fast_value = trade.ema_exit_last_fast
+            slow_value = trade.ema_exit_last_slow
+            bias = "BIAS: BULLISH" if fast_value > slow_value else "BIAS: BEARISH" if fast_value < slow_value else "BIAS: FLAT"
+        closed_at = "-"
+        if int(trade.ema_exit_last_open_ms or 0) > 0:
+            close_ms = int(trade.ema_exit_last_open_ms) + H1_MS
+            closed_at = format_wib(datetime.fromtimestamp(close_ms / 1000.0, tz=timezone.utc))
+        source = trade.ema_exit_config_source or "UNKNOWN_SOURCE"
+        state = str(trade.ema_exit_state or "UNINITIALIZED").upper()
+        trigger = ""
+        if state == "EXIT_PENDING" and trade.ema_exit_trigger_close_ms:
+            trigger = f" • TRIGGER {trade.ema_exit_reason or 'H1_CROSS'} @ {format_wib(datetime.fromtimestamp(int(trade.ema_exit_trigger_close_ms) / 1000.0, tz=timezone.utc))}"
+        error = f" • ERROR: {trade.ema_exit_last_error[:160]}" if trade.ema_exit_last_error and state not in {"ACTIVE", "ACTIVE_WITH_GAP"} else ""
+        reference_close = fmt_price(trade.ema_exit_last_close)
+        return (
+            f"EMA H1 EXIT: {values} • {bias} • H1 close: {reference_close}"
+            f" • last closed: {closed_at} • state: {state} • H1 {logic}"
+            f" • source: {source}{trigger}{error}"
+        )
+
     async def show_trades(self) -> None:
         snapshot_note = await self._refresh_exchange_open_orders_for_trade_view()
         raw_active = [t for t in self.active_trades.values() if t.status in {"PENDING", "FILLED"}]
@@ -12345,6 +12719,8 @@ class TradingEngine:
             f"Scanner TF: {self.timeframe} • Length: {self.trend_length} • EMA filter: {current_ema}\n"
             f"SuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
             f"TP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\n"
+            f"H1 forced close: {'ON' if self.h1_enabled else 'OFF'} • current EMA: {ema_filter_label(self.ema_filter_length)}\n"
+            f"Permanent bans: {len(self.banned_symbols)}\n"
             + (f"{snapshot_note}\n" if snapshot_note else "")
         ]
 
@@ -12382,6 +12758,7 @@ class TradingEngine:
                     f"(RR 1:{fmt_num(t.take_profit_rr, 2)}; {t.take_profit_source}; band {t.rr_min}-{t.rr_max}R; installed after fill)\n"
                     f"SuperTrend source: ATR {t.supertrend_atr_length} • Factor {t.supertrend_factor:g}\n"
                     f"EMA H4 at signal: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
+                    f"H1 exit EMA config: {('EMA' + str(t.ema_exit_fast_length) + '/EMA' + str(t.ema_exit_slow_length)) if t.ema_exit_fast_length and t.ema_exit_slow_length else 'NO DUAL EMA'}\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
                     + (
@@ -12428,6 +12805,7 @@ class TradingEngine:
                     f"Protection: {t.protection_state} (SL {t.sl_algo_status} / TP {t.tp_algo_status})\n"
                     f"Algo IDs: SL {t.sl_algo_id or '-'} / TP {t.tp_algo_id or '-'}\n"
                     f"EMA H4 at signal: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
+                    f"{self._trade_h1_ema_status_line(t)}\n"
                     f"Floating: {fmt_num(pnl_pct, 2)}% | {fmt_num(pnl_usdt, 4)} USDT\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin est.: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
@@ -13070,7 +13448,9 @@ class TradingEngine:
             f"/RR_MIN <angka> - RR dasar/fallback dan batas bawah liquidity (default {volumatic.RR_MIN:g})\n"
             f"/RR_MAX <angka> - batas atas TP liquidity (default {volumatic.RR_MAX:g})\n"
             "/max [angka] - batas total pending + filled\n"
-            "/trade - lihat pending order dan posisi aktif\n"
+            "/trade - lihat pending order, posisi, dan EMA H1 candle terakhir\n"
+            "/banned [PAIR ...] - tambah ban permanen; tanpa argumen tampilkan daftar\n"
+            "/unbanned PAIR ... - hapus ban permanen\n"
             "/stats - statistik trade, PnL, win rate, DD, R\n"
             "/setup - simpan snapshot trade aktif ke GitHub\n"
             "/open - pulihkan snapshot secara manual (tidak otomatis saat /try)\n"
@@ -13120,6 +13500,8 @@ class TradingEngine:
             await self._set_real(text)
         elif command == "/autostop": await self._handle_autostop_command(text)
         elif command == "/trade": await self.show_trades()
+        elif command in {"/banned", "/ban"}: await self._handle_banned(text)
+        elif command in {"/unbanned", "/unban"}: await self._handle_unbanned(text)
         elif command == "/stats": await self.show_stats()
         elif command == "/status": await self.show_status()
         elif command in {"/help", "/start"}: await self.show_help()
