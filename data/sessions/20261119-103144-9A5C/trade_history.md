@@ -90,3 +90,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-19T08:14:25.636413+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## JTOUSDT SHORT — CANCELED
+- Trade ID: `JTOUSDT-20261119-152025-060815`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-19T08:20:46.625460+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
