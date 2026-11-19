@@ -532,12 +532,14 @@
     "M15:\u54c8\u57fa\u7c73USDT": 1795105800000,
     "M15:\u5e01\u5b89\u4eba\u751fUSDT": 1795105800000,
     "M15:\u725b\u6765USDT": 1795105800000,
-    "M15:\u9f99\u867eUSDT": 1795105800000
+    "M15:\u9f99\u867eUSDT": 1795105800000,
+    "M15:DEEPUSDT": 1795105800000,
+    "M15:DEXEUSDT": 1795105800000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 150,
+  "scan_resume_cursor": 200,
   "scan_resume_boundary_ms": 1795105800000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-19T16:41:34.201117+00:00"
+  "updated_at": "2026-11-19T16:41:39.804884+00:00"
 }
