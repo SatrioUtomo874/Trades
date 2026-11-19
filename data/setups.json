@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-19T01:41:13.002989+00:00",
+  "updated_at": "2026-11-19T01:41:15.909270+00:00",
   "active_trades": [
     {
       "trade_id": "HANAUSDT-20261119-070611-289A39",
@@ -828,11 +828,11 @@
       "liquidity_pool_timeframe": "H4",
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002172648537,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261119-083321-069ED8",
       "tp_client_algo_id": "VTTPSDT-20261119-083321-069ED8",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
