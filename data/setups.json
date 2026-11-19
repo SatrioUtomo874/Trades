@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-19T13:00:05.064310+00:00",
+  "updated_at": "2026-11-19T13:00:06.024294+00:00",
   "active_trades": [
     {
       "trade_id": "AVAUSDT-20261119-103203-E9E140",
@@ -265,10 +265,10 @@
       "ema_exit_trigger_close_ms": 1795093200000,
       "ema_exit_trigger_price": "0.08458",
       "ema_exit_reason": "EMA_H1_BULLISH_CROSS",
-      "ema_exit_client_order_id": null,
+      "ema_exit_client_order_id": "emaexitd234cf6b55b0843a2135de",
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
-      "ema_exit_attempts": 0,
+      "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-17T21:15:55.880000+00:00",
       "status": "FILLED",
