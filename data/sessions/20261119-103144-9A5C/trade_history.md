@@ -84,3 +84,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-19T08:01:39.303141+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SIGNUSDT SHORT — CANCELED
+- Trade ID: `SIGNUSDT-20261119-151402-97A370`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-19T08:14:25.636413+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
