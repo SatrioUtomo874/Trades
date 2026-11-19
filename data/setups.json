@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-19T01:41:50.341090+00:00",
+  "updated_at": "2026-11-19T01:41:51.422401+00:00",
   "active_trades": [
     {
       "trade_id": "HANAUSDT-20261119-070611-289A39",
@@ -883,7 +883,7 @@
       "target_notional": "10",
       "actual_notional": "7.4369",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 2017711917,
       "entry_client_order_id": "VT68423412638661d7f4bbbf1ba3fe",
