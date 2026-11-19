@@ -102,3 +102,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-19T08:21:40.071772+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## HBARUSDT SHORT — CANCELED
+- Trade ID: `HBARUSDT-20261119-153205-27B58C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-19T08:32:27.811952+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
