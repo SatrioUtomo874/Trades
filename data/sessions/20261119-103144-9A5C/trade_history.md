@@ -96,3 +96,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-19T08:20:46.625460+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## LDOUSDT SHORT — CANCELED
+- Trade ID: `LDOUSDT-20261119-152118-049069`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-19T08:21:40.071772+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
