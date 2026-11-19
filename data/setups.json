@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-19T19:05:56.759702+00:00",
+  "updated_at": "2026-11-19T19:06:00.425113+00:00",
   "active_trades": [
     {
       "trade_id": "KAVAUSDT-20261120-020213-4C6537",
@@ -194,7 +194,7 @@
       "target_notional": "5.5",
       "actual_notional": "3.5133399",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 3907480202,
       "entry_client_order_id": "VT90c47c73eac56da582ba3e359ad5",
