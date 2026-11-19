@@ -512,9 +512,9 @@
     "M15:XRPUSDT": 1795056300000,
     "M15:XTZUSDT": 1795056300000,
     "M15:XVGUSDT": 1795056300000,
-    "M15:XVSUSDT": 1795055400000,
-    "M15:YBUSDT": 1795055400000,
-    "M15:YFIUSDT": 1795055400000,
+    "M15:XVSUSDT": 1795056300000,
+    "M15:YBUSDT": 1795056300000,
+    "M15:YFIUSDT": 1795056300000,
     "M15:YGGUSDT": 1795055400000,
     "M15:ZAMAUSDT": 1795055400000,
     "M15:ZBTUSDT": 1795055400000,
@@ -539,8 +539,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 497,
+  "scan_resume_cursor": 500,
   "scan_resume_boundary_ms": 1795056300000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-19T02:48:06.039901+00:00"
+  "updated_at": "2026-11-19T02:48:08.916395+00:00"
 }
