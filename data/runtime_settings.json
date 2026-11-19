@@ -12,7 +12,7 @@
   "rr_min": "3",
   "rr_max": "5",
   "max_active_trades": 8,
-  "margin_usdt": "1",
+  "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": false,
   "last_processed_candles": {
@@ -542,5 +542,5 @@
   "scan_resume_cursor": 150,
   "scan_resume_boundary_ms": 1795079700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-19T09:16:03.735177+00:00"
+  "updated_at": "2026-11-19T16:23:44.081052+00:00"
 }
