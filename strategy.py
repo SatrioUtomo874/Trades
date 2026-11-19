@@ -930,7 +930,7 @@ __all__ = [
     "calculate_indicators", "detect_latest_signal", "detect_signals_since", "signals_since", "analyze",
     "confirmed_bubble_events_since", "prepare_bubble_trace_state", "advance_bubble_trace_state",
     "prepare_live_visual_context", "evaluate_live_visual_context", "detect_live_visual_signal",
-    "reference_risk", "trade_result_r",
+    "reference_risk", "trade_result_r", "ema_sma_seeded", "ema_cross_direction",
 ]
 
 
@@ -967,6 +967,45 @@ def _backtest_smooth(values: np.ndarray, length: int, alpha: float) -> np.ndarra
         previous += float(alpha) * (value - previous)
         out[i] = previous
     return out
+
+
+def ema_sma_seeded(values: Any, period: int) -> np.ndarray:
+    """Return a TradingView/backtest-style EMA seeded by the first SMA window.
+
+    The output has the same length as ``values``; positions before the seed
+    window are NaN. This is shared by live H1 forced-close calculations and
+    strategy diagnostics so both use one EMA implementation.
+    """
+    if isinstance(period, bool):
+        raise ValueError("EMA period harus berupa bilangan bulat positif.")
+    try:
+        length = int(period)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("EMA period harus berupa bilangan bulat positif.") from exc
+    if length < 1 or str(period).strip() not in {str(length), f"+{length}"}:
+        raise ValueError("EMA period harus berupa bilangan bulat positif.")
+    x = np.asarray(values, dtype=np.float64).reshape(-1)
+    return _backtest_smooth(x, length, 2.0 / (float(length) + 1.0))
+
+
+def ema_cross_direction(
+    previous_fast: Any,
+    previous_slow: Any,
+    current_fast: Any,
+    current_slow: Any,
+) -> str | None:
+    """Classify a confirmed fast/slow EMA cross as BULLISH, BEARISH, or None."""
+    try:
+        pf, ps, cf, cs = map(float, (previous_fast, previous_slow, current_fast, current_slow))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not all(np.isfinite(value) for value in (pf, ps, cf, cs)):
+        return None
+    if cf < cs and pf >= ps:
+        return "BEARISH"
+    if cf > cs and pf <= ps:
+        return "BULLISH"
+    return None
 
 
 def _backtest_volumatic_events(close: np.ndarray, length: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
