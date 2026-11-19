@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-19T19:47:46.438764+00:00",
+  "updated_at": "2026-11-19T20:00:00.066311+00:00",
   "active_trades": [
     {
       "trade_id": "KAVAUSDT-20261120-020213-4C6537",
@@ -52,10 +52,10 @@
       "ema_exit_slow_length": 21,
       "ema_exit_config_source": "SIGNAL_EMA_SNAPSHOT",
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1795111200000,
-      "ema_exit_last_fast": "0.028882283909918597",
-      "ema_exit_last_slow": "0.02890757127770896",
-      "ema_exit_last_close": "0.02875",
+      "ema_exit_last_open_ms": 1795114800000,
+      "ema_exit_last_fast": "0.028823827127934878",
+      "ema_exit_last_slow": "0.0288787011615536",
+      "ema_exit_last_close": "0.02859",
       "ema_exit_ignore_cross_until_ms": 0,
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
