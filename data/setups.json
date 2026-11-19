@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-19T23:17:34.698432+00:00",
+  "updated_at": "2026-11-19T23:17:40.992610+00:00",
   "active_trades": [
     {
       "trade_id": "KAVAUSDT-20261120-020213-4C6537",
@@ -245,9 +245,9 @@
       "tp_algo_id": 4000002177060534,
       "sl_client_algo_id": "VTSLSDT-20261120-050010-D161C0",
       "tp_client_algo_id": "VTTPSDT-20261120-050010-D161C0",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "sl_algo_status": "FINISHED",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
