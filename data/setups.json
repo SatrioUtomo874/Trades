@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-19T00:12:02.912463+00:00",
+  "updated_at": "2026-11-19T00:14:37.475069+00:00",
   "active_trades": [
     {
       "trade_id": "HANAUSDT-20261119-070611-289A39",
@@ -666,12 +666,12 @@
       "pnl_usdt": null,
       "initial_risk": null,
       "realized_r": null,
-      "quantity": "756",
+      "quantity": "261",
       "margin_usdt": "1.07618793",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "9.98676",
-      "actual_notional": "9.98676",
+      "actual_notional": "3.44781",
       "real_enabled": true,
       "real_state": "REAL_EXCHANGE_ADOPTED",
       "position_side": "BOTH",
@@ -679,7 +679,7 @@
       "entry_client_order_id": null,
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "756",
+      "entry_executed_qty": "261",
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
