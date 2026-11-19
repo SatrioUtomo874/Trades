@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-19T05:01:41.205487+00:00",
+  "updated_at": "2026-11-19T05:01:48.639089+00:00",
   "active_trades": [
     {
       "trade_id": "HANAUSDT-20261119-103203-B52B50",
@@ -548,11 +548,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002173271544,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002173271948,
       "sl_client_algo_id": "VTSLSDT-20261119-120050-7563BF",
       "tp_client_algo_id": "VTTPSDT-20261119-120050-7563BF",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
@@ -617,7 +617,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "1868547682:NEW:NEW:0:0",
+      "last_ws_event_key": "1868547682:TRADE:FILLED:337:191962424",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
