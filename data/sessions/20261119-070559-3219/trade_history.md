@@ -24,3 +24,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-19T01:42:40.366653+00:00 | Reason: SIZE_REJECTED
+## ZESTUSDT SHORT — CANCELED
+- Trade ID: `ZESTUSDT-20261119-083549-F14ECE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-19T01:58:40.092974+00:00 | Reason: SIZE_REJECTED
