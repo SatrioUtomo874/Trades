@@ -42,3 +42,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-19T05:23:46.751748+00:00 | Reason: SIZE_REJECTED
+## MOODENGUSDT SHORT — CANCELED
+- Trade ID: `MOODENGUSDT-20261119-121825-65C815`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-19T05:24:29.676420+00:00 | Reason: SIZE_REJECTED
