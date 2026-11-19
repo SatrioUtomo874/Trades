@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-19T01:00:03.070189+00:00",
+  "updated_at": "2026-11-19T01:00:05.590605+00:00",
   "active_trades": [
     {
       "trade_id": "HANAUSDT-20261119-070611-289A39",
@@ -544,9 +544,9 @@
       "ema_filter_slow_value": "0.03445720674715947",
       "ema_filter_passed": true,
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1795042800000,
-      "ema_exit_last_fast": "0.03374137447768982",
-      "ema_exit_last_slow": "0.03387618141371231",
+      "ema_exit_last_open_ms": 1795046400000,
+      "ema_exit_last_fast": "0.03376509958215186",
+      "ema_exit_last_slow": "0.0338747103761021",
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
       "ema_exit_reason": null,
