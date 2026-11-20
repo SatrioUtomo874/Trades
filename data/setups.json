@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T07:00:15.233040+00:00",
+  "updated_at": "2026-11-20T07:00:15.956404+00:00",
   "active_trades": [
     {
       "trade_id": "1000CHEEMSUSDT-20261120-061509-A75C09",
@@ -373,10 +373,10 @@
       "ema_exit_slow_length": 21,
       "ema_exit_config_source": "SIGNAL_EMA_SNAPSHOT",
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1795150800000,
-      "ema_exit_last_fast": "0.0014092412293806142",
-      "ema_exit_last_slow": "0.0014173036526738837",
-      "ema_exit_last_close": "0.001399",
+      "ema_exit_last_open_ms": 1795154400000,
+      "ema_exit_last_fast": "0.0014101929835044914",
+      "ema_exit_last_slow": "0.0014170033206126215",
+      "ema_exit_last_close": "0.001414",
       "ema_exit_ignore_cross_until_ms": 0,
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
