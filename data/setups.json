@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T10:02:17.845113+00:00",
+  "updated_at": "2026-11-20T10:02:23.134135+00:00",
   "active_trades": [
     {
       "trade_id": "1000CHEEMSUSDT-20261120-061509-A75C09",
@@ -884,11 +884,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002179335099,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002179335757,
       "sl_client_algo_id": "VTSLSDT-20261120-170151-789E63",
       "tp_client_algo_id": "VTTPSDT-20261120-170151-789E63",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
@@ -953,7 +953,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "2793254389:NEW:NEW:0:0",
+      "last_ws_event_key": "2793254389:TRADE:FILLED:3.9:139623768",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
