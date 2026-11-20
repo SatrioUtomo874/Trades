@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T17:45:27.916811+00:00",
+  "updated_at": "2026-11-20T17:45:28.581831+00:00",
   "active_trades": [
     {
       "trade_id": "DOODUSDT-20261120-090143-723049",
@@ -460,8 +460,8 @@
       "sl_client_algo_id": "VTSLSDT-20261120-221555-0E49B2",
       "tp_client_algo_id": "VTTPSDT-20261120-221555-0E49B2",
       "sl_algo_status": "FINISHED",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
