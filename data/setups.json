@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T02:02:46.550241+00:00",
+  "updated_at": "2026-11-20T02:02:48.721003+00:00",
   "active_trades": [
     {
       "trade_id": "KAVAUSDT-20261120-020213-4C6537",
@@ -615,12 +615,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.000038",
       "realized_r": null,
-      "quantity": "3594",
-      "margin_usdt": "0.5089104",
+      "quantity": "3883",
+      "margin_usdt": "0.5498328",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5",
-      "actual_notional": "5.089104",
+      "actual_notional": "5.498328",
       "real_enabled": true,
       "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
@@ -628,7 +628,7 @@
       "entry_client_order_id": "VTcca2df1e56cd0bfd536c8b4dc857",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "3594",
+      "entry_executed_qty": "3883",
       "entry_order_status": "PARTIALLY_FILLED",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
