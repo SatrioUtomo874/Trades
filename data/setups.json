@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T02:31:14.910032+00:00",
+  "updated_at": "2026-11-20T02:31:16.487540+00:00",
   "active_trades": [
     {
       "trade_id": "KAVAUSDT-20261120-020213-4C6537",
@@ -838,15 +838,15 @@
       "real_enabled": true,
       "real_state": "REAL_SUBMITTING",
       "position_side": "BOTH",
-      "entry_order_id": null,
+      "entry_order_id": 911719496,
       "entry_client_order_id": "VT5985927b8066b71b367d375e748d",
       "real_error": null,
       "real_submit_ambiguous": false,
       "entry_executed_qty": null,
-      "entry_order_status": "SUBMITTING",
+      "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
-      "last_ws_event_key": null,
+      "last_ws_event_key": "911719496:NEW:NEW:0:0",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
