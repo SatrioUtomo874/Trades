@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T15:16:59.046279+00:00",
+  "updated_at": "2026-11-20T15:17:11.703663+00:00",
   "active_trades": [
     {
       "trade_id": "2ZUSDT-20261120-074538-1DCC50",
@@ -943,7 +943,7 @@
       "target_notional": "5.5",
       "actual_notional": "5.1936",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 198843678,
       "entry_client_order_id": "VT44a17946fefb16a72d640f0b57f6",
