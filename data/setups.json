@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T13:00:38.761370+00:00",
+  "updated_at": "2026-11-20T13:00:39.950147+00:00",
   "active_trades": [
     {
       "trade_id": "1000CHEEMSUSDT-20261120-061509-A75C09",
@@ -567,8 +567,8 @@
       "sl_client_algo_id": "VTSLSDT-20261120-134642-59C98E",
       "tp_client_algo_id": "VTTPSDT-20261120-134642-59C98E",
       "sl_algo_status": "EXPIRED",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
