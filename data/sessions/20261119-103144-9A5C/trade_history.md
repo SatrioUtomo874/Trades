@@ -294,3 +294,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-20T11:46:01.274866+00:00 | Reason: PRICE_BEYOND_SL_BEFORE_ENTRY
+## BSBUSDT SHORT — CANCELED
+- Trade ID: `BSBUSDT-20261120-191525-04DFE2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-20T12:15:51.596478+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
