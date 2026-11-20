@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T03:26:42.022544+00:00",
+  "updated_at": "2026-11-20T03:26:44.221239+00:00",
   "active_trades": [
     {
       "trade_id": "KAVAUSDT-20261120-020213-4C6537",
@@ -36,7 +36,7 @@
       "protection_state": "CANCEL_WAIT_API",
       "protection_error": "SL: status tetap NEW",
       "protection_warning_sent": false,
-      "protection_exit_reason": null,
+      "protection_exit_reason": "EXCHANGE_POSITION_FLAT_WS",
       "sl_submit_ambiguous": false,
       "tp_submit_ambiguous": false,
       "entry": "0.02875",
