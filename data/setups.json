@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T15:45:33.495346+00:00",
+  "updated_at": "2026-11-20T15:45:33.516082+00:00",
   "active_trades": [
     {
       "trade_id": "2ZUSDT-20261120-074538-1DCC50",
@@ -31,10 +31,10 @@
       "tp_algo_id": 4000002177524289,
       "sl_client_algo_id": "VTSLSDT-20261120-074538-1DCC50",
       "tp_client_algo_id": "VTTPSDT-20261120-074538-1DCC50",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "EXPIRED",
       "tp_algo_status": "FINISHED",
-      "protection_state": "CANCEL_WAIT_API",
-      "protection_error": "SL: status tetap NEW",
+      "protection_state": "CANCELED",
+      "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": "EXCHANGE_POSITION_FLAT_WS",
       "sl_submit_ambiguous": false,
