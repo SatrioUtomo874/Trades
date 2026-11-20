@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T12:15:33.072843+00:00",
+  "updated_at": "2026-11-20T12:15:47.284763+00:00",
   "active_trades": [
     {
       "trade_id": "1000CHEEMSUSDT-20261120-061509-A75C09",
@@ -1387,8 +1387,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-20T12:15:38.742631+00:00",
+      "entry_trigger_price": "0.07208",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "2.4.0",
       "entry_reason": "Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN; TP baseline 3.0R with farthest unmitigated Volume Liquidity Trend pool across M5/M15/H1/H4 up to 5.0R",
