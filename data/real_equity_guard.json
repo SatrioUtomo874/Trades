@@ -1,11 +1,11 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "real_equity_baseline": "8.59844609",
-  "realized_since_baseline": "1.319303355149",
+  "realized_since_baseline": "1.388982654249",
   "autostop_percent": "55",
   "autostop_peak_equity": "10.849515465149",
-  "autostop_last_equity": "9.855311515449",
+  "autostop_last_equity": "10.155775684249",
   "autostop_triggered": false,
   "autostop_source": "REAL",
-  "updated_at": "2026-11-20T01:09:49.002799+00:00"
+  "updated_at": "2026-11-20T01:37:49.996127+00:00"
 }
