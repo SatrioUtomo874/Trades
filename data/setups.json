@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T15:09:52.023400+00:00",
+  "updated_at": "2026-11-20T15:09:57.811343+00:00",
   "active_trades": [
     {
       "trade_id": "2ZUSDT-20261120-074538-1DCC50",
@@ -904,11 +904,11 @@
       "ema_exit_fast_length": 9,
       "ema_exit_slow_length": 21,
       "ema_exit_config_source": "CURRENT_EMA_CONFIG_AT_ADOPTION",
-      "ema_exit_state": "INITIALIZING",
-      "ema_exit_last_open_ms": 0,
-      "ema_exit_last_fast": null,
-      "ema_exit_last_slow": null,
-      "ema_exit_last_close": null,
+      "ema_exit_state": "ACTIVE",
+      "ema_exit_last_open_ms": 1795183200000,
+      "ema_exit_last_fast": "0.00029859025097089543",
+      "ema_exit_last_slow": "0.00030072237076489455",
+      "ema_exit_last_close": "0.0002957",
       "ema_exit_ignore_cross_until_ms": 0,
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
