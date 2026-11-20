@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T15:17:11.703663+00:00",
+  "updated_at": "2026-11-20T15:17:15.680761+00:00",
   "active_trades": [
     {
       "trade_id": "2ZUSDT-20261120-074538-1DCC50",
@@ -936,12 +936,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.0028",
       "realized_r": null,
-      "quantity": "32",
-      "margin_usdt": "0.51936",
+      "quantity": "34",
+      "margin_usdt": "0.55182",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5",
-      "actual_notional": "5.1936",
+      "actual_notional": "5.5182",
       "real_enabled": true,
       "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
@@ -949,7 +949,7 @@
       "entry_client_order_id": "VT44a17946fefb16a72d640f0b57f6",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "32",
+      "entry_executed_qty": "34",
       "entry_order_status": "PARTIALLY_FILLED",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
