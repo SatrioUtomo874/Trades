@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-20T23:00:04.484464+00:00",
+  "updated_at": "2026-11-20T23:00:06.675484+00:00",
   "active_trades": [
     {
       "trade_id": "DOODUSDT-20261120-090143-723049",
@@ -52,10 +52,10 @@
       "ema_exit_slow_length": 21,
       "ema_exit_config_source": "SIGNAL_EMA_SNAPSHOT",
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1795208400000,
-      "ema_exit_last_fast": "0.001350565849224122",
-      "ema_exit_last_slow": "0.0013708668416638895",
-      "ema_exit_last_close": "0.001378",
+      "ema_exit_last_open_ms": 1795212000000,
+      "ema_exit_last_fast": "0.0013564526793792976",
+      "ema_exit_last_slow": "0.0013716971287853542",
+      "ema_exit_last_close": "0.00138",
       "ema_exit_ignore_cross_until_ms": 0,
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
