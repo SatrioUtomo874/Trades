@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-21T12:51:30.328313+00:00",
+  "updated_at": "2026-11-21T12:51:33.828175+00:00",
   "active_trades": [
     {
       "trade_id": "AVAAIUSDT-20261121-104622-5AA0FD",
@@ -418,7 +418,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "3955300315:NEW:NEW:0:0",
+      "last_ws_event_key": "3955300315:TRADE:FILLED:77.8:244881795",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
