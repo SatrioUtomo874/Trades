@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-21T14:00:00.313398+00:00",
+  "updated_at": "2026-11-21T14:00:02.552886+00:00",
   "active_trades": [
     {
       "trade_id": "AVAAIUSDT-20261121-104622-5AA0FD",
@@ -159,10 +159,10 @@
       "ema_exit_slow_length": 21,
       "ema_exit_config_source": "SIGNAL_EMA_SNAPSHOT",
       "ema_exit_state": "ACTIVE",
-      "ema_exit_last_open_ms": 1795262400000,
-      "ema_exit_last_fast": "0.06769541315379782",
-      "ema_exit_last_slow": "0.06933880938273686",
-      "ema_exit_last_close": "0.06653",
+      "ema_exit_last_open_ms": 1795266000000,
+      "ema_exit_last_fast": "0.06774633052303826",
+      "ema_exit_last_slow": "0.06921255398430623",
+      "ema_exit_last_close": "0.06795",
       "ema_exit_ignore_cross_until_ms": 0,
       "ema_exit_trigger_close_ms": null,
       "ema_exit_trigger_price": null,
