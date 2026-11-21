@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Volumatic Trend M15 + H4 EMA + M15 Supertrend + H1 inverse EMA exit engine.
+"""Volumatic v3.0.0 live engine matching the current backtest baseline.
 
-The lifecycle functions on_start(), handle_update(), and on_stop() remain
-available to an external launcher. Running this file directly also starts a
-local Telegram Bot API long-polling adapter, so no separate try.py is needed.
+Entry: confirmed M15 Volumatic LEN100 event; ALT and BTC H4 EMA9/21 direction;
+ALT H1 EMA9/21 entry-only direction; signed M15 EMA50/100 distance >= 0.075%;
+entry target is the next M15 open. PAPER uses that candle open. REAL sends one
+MARKET order in that M15 window and records Binance's actual average fill.
+Protection: static M15 Supertrend ATR14 x 2.5 SL; nearest unmitigated M15
+Volume Liquidity Trend pool in RR 3R-5R, fallback 3R. PAPER checks M5 OHLC
+with backtest gap/SL-first rules. REAL protection remains on Binance. M15
+opposite-bubble/sideways forced exits wait for the final M5 bar before close.
 
-The strategy combines confirmed M15 Volumatic bubble flips, the latest
-closed H4 EMA direction filter, and M15 Supertrend SL. TP starts at the configurable RR_MIN, then extends to the furthest unmitigated
-Volume Liquidity Trend pool across M5/M15/H1/H4, capped by configurable RR_MAX.
-Entries are MARKET-on-touch: a signal stores its entry level locally, the
-market WebSocket watches it, and one MARKET order is sent when price touches
-the level; closePosition TP/SL are installed right after the fill.
-The main process owns Binance REST/private execution, WebSocket prices,
-Telegram, PAPER/REAL ledger, scanner schedule, logging and GitHub history.
+H1 is entry-only: no H1 forced exit. The main process owns Binance REST/private
+execution, WebSocket streams, Telegram, PAPER/REAL ledger, scanner, logging,
+and GitHub persistence.
 """
 
 import asyncio
@@ -74,9 +74,9 @@ if not isinstance(getattr(volumatic, "TIMEFRAME_MS", None), dict) or not {"M15",
     raise RuntimeError("strategy module mismatch: TIMEFRAME_MS M15/H4 tidak tersedia. Pastikan try.py dan STRATEGY_FILE satu versi.")
 if not isinstance(getattr(volumatic, "TIMEFRAME_INTERVALS", None), dict) or not {"M15", "H4"}.issubset(volumatic.TIMEFRAME_INTERVALS):
     raise RuntimeError("strategy module mismatch: TIMEFRAME_INTERVALS M15/H4 tidak tersedia.")
-if str(getattr(volumatic, "STRATEGY_VERSION", "")) != "2.4.0":
+if str(getattr(volumatic, "STRATEGY_VERSION", "")) != "3.0.0":
     raise RuntimeError(
-        "strategy module mismatch: dibutuhkan STRATEGY_VERSION 2.4.0 "
+        "strategy module mismatch: dibutuhkan STRATEGY_VERSION 3.0.0 "
         "dengan RR_MIN/RR_MAX configurable dan Volume Liquidity TP. Sinkronkan main.py dan strategy.py."
     )
 if (
@@ -415,7 +415,7 @@ def directional_reward_r(
 def is_valid_liquidity_reward_r(
     value: Decimal | None,
     rr_min: Decimal = Decimal("3"),
-    rr_max: Decimal = Decimal("4"),
+    rr_max: Decimal = Decimal("5"),
 ) -> bool:
     """A liquidity TP must remain inside the trade's configured RR band."""
     if value is None:
@@ -664,13 +664,13 @@ class Trade:
     signal_atr: Decimal | None
     reference_sl: Decimal | None      # M15 Supertrend line from confirmed signal candle
     entry: Decimal                    # LIMIT price
-    expires_at: datetime              # bubble formation time + one-hour trace TTL
+    expires_at: datetime              # next M15 candle close; deadline for next-open execution
     bubble_time: datetime | None = None  # M15 candle open on which the bubble formed
     stop_loss: Decimal | None = None
     take_profit: Decimal | None = None
     rr_target: Decimal = Decimal("3")  # legacy alias; always equals this trade's RR_MIN
     rr_min: Decimal = Decimal("3")
-    rr_max: Decimal = Decimal("4")
+    rr_max: Decimal = Decimal("5")
     take_profit_source: str = "RR_MIN_BASE"
     take_profit_rr: Decimal = Decimal("3")
     liquidity_pool_price: Decimal | None = None
@@ -690,19 +690,18 @@ class Trade:
     sl_submit_ambiguous: bool = False
     tp_submit_ambiguous: bool = False
     signal_close_price: Decimal | None = None  # close of the M15 signal candle
-    ema_filter_length: int | tuple[int, int] | None = 100
+    ema_filter_length: int | tuple[int, int] | None = (9, 21)
     ema_filter_value: Decimal | None = None
     ema_filter_slow_value: Decimal | None = None
     ema_filter_passed: bool | None = None
-    # H1 exit uses its own immutable EMA-pair snapshot. This is separate from
-    # the H4-at-entry display so adopted exchange positions can use the current
-    # dual-EMA config without falsely claiming that H4 was enabled at entry.
+    # Legacy H1 snapshot fields are retained only for backward-compatible state
+    # loading. Baseline v3 uses H1 as an entry filter only, never as a forced exit.
     ema_exit_fast_length: int | None = None
     ema_exit_slow_length: int | None = None
     ema_exit_config_source: str = "NOT_SET"
-    # H1 inverse-EMA exit state. EMA levels are seeded from closed H1 candles
-    # using the same SMA-seeded recurrence as backtest(10).py.
-    ema_exit_state: str = "UNINITIALIZED"
+    # Legacy exit fields carry M15 forced-exit state in v3.0.0 to keep the saved
+    # state schema stable across the strategy migration.
+    ema_exit_state: str = "DISABLED"
     ema_exit_last_open_ms: int = 0
     ema_exit_last_fast: Decimal | None = None
     ema_exit_last_slow: Decimal | None = None
@@ -720,8 +719,8 @@ class Trade:
     ema_exit_last_error: str | None = None
     status: str = "PENDING"
     created_at: datetime = field(default_factory=now_utc)
-    entry_order_created_at: datetime | None = None  # actual local/Binance LIMIT creation timestamp
-    entry_window_closes_at: datetime | None = None  # next M15 candle close; deadline to CREATE the LIMIT
+    entry_order_created_at: datetime | None = None  # actual local/Binance MARKET dispatch timestamp
+    entry_window_closes_at: datetime | None = None  # next M15 candle close; entry-window deadline
     filled_at: datetime | None = None
     closed_at: datetime | None = None
     fill_price: Decimal | None = None
@@ -756,17 +755,14 @@ class Trade:
     pending_cancel_reason: str | None = None
     last_ws_event_key: str | None = None
     late_fill_during_api_cooldown: bool = False
-    # Preserve an already-submitted exchange GTC LIMIT if its candle deadline
-    # passed while Binance REST was IP-banned. It remains until fill, reversal,
-    # or explicit manual cancellation.
+    # Legacy field retained for safely reconciling pre-v3 GTC orders only.
     preserve_gtc_after_cooldown: bool = False
     # Live exchange snapshot adoption is not a local-history restore. It lets a
     # fresh /try session display/manage existing bot-created Binance exposure.
     exchange_adopted: bool = False
     exchange_adoption_source: str | None = None
-    # MARKET-on-touch: while waiting, `entry` is only a local watch level and no
-    # exchange order exists (real_enabled stays False). real_intent marks a setup
-    # that must be executed as a REAL MARKET order when price touches the level.
+    # In v3, real_intent is a next-M15-open MARKET request; PAPER records the
+    # official M15 open. Legacy local touch-entry is not used for new signals.
     real_intent: bool = False
     entry_inflight: bool = False  # runtime-only single-flight guard; never persisted
     entry_triggered_at: datetime | None = None
@@ -857,7 +853,7 @@ class Trade:
             "entry_triggered_at": iso_utc(self.entry_triggered_at) if self.entry_triggered_at else None,
             "entry_trigger_price": decimal_to_str(self.entry_trigger_price),
             "strategy_name": volumatic.STRATEGY_NAME, "strategy_version": volumatic.STRATEGY_VERSION,
-            "entry_reason": f"Confirmed M15 Volumatic bubble + H4 EMA; entry level = next M15 OPEN; TP baseline {self.rr_min}R with farthest unmitigated Volume Liquidity Trend pool across M5/M15/H1/H4 up to {self.rr_max}R",
+            "entry_reason": f"Confirmed M15 Volumatic bubble + H4/H1 EMA 9/21 + M15 distance; entry = next M15 OPEN; M15 nearest liquidity TP RR 3R-5R",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
             ),
@@ -3920,10 +3916,10 @@ class BinanceWebSocket:
         self._desired_symbols: set[str] = set()  # union; retained for status/backward compatibility
         self._desired_trade_symbols: set[str] = set()
         self._desired_kline_symbols: set[str] = set()
-        self._desired_exit_symbols: set[str] = set()  # only filled strategy positions
+        self._desired_protection_symbols: set[str] = set()  # FILLED positions: M5 SL/TP and M15 forced exits
         self._subscribed_symbols: set[str] = set()  # aggTrade
-        self._subscribed_kline_symbols: set[str] = set()  # scanner M15
-        self._subscribed_exit_symbols: set[str] = set()  # position H1 exit
+        self._subscribed_kline_symbols: set[str] = set()  # M15 signals and position exits
+        self._subscribed_protection_symbols: set[str] = set()  # active-position M5 protection candles
 
         self._command_lock = asyncio.Lock()
 
@@ -4007,11 +4003,11 @@ class BinanceWebSocket:
         self.connected = False
         self._subscribed_symbols.clear()
         self._subscribed_kline_symbols.clear()
-        self._subscribed_exit_symbols.clear()
+        self._subscribed_protection_symbols.clear()
         self._desired_symbols.clear()
         self._desired_trade_symbols.clear()
         self._desired_kline_symbols.clear()
-        self._desired_exit_symbols.clear()
+        self._desired_protection_symbols.clear()
         self._last_market_event_key.clear()
 
     async def set_symbols(
@@ -4019,27 +4015,27 @@ class BinanceWebSocket:
         symbols: set[str] | list[str] | tuple[str, ...],
         *,
         scanner_symbols: set[str] | list[str] | tuple[str, ...] | None = None,
-        exit_symbols: set[str] | list[str] | tuple[str, ...] | None = None,
+        protection_symbols: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> None:
-        """Reconcile trade ticks, scanner M15 candles, and active-position H1 candles."""
+        """Reconcile aggTrade, M15 strategy, and M5 active-position streams."""
         trade = {normalize_symbol(value) for value in symbols if str(value).strip()}
         scanner = {normalize_symbol(value) for value in (scanner_symbols or ()) if str(value).strip()}
-        exits = {normalize_symbol(value) for value in (exit_symbols or ()) if str(value).strip()}
+        protection = {normalize_symbol(value) for value in (protection_symbols or ()) if str(value).strip()}
         old_trade = set(self._desired_trade_symbols)
         old_scanner = set(self._desired_kline_symbols)
-        old_exits = set(self._desired_exit_symbols)
+        old_protection = set(self._desired_protection_symbols)
         self._desired_trade_symbols = trade
         self._desired_kline_symbols = scanner
-        self._desired_exit_symbols = exits
-        self._desired_symbols = trade | scanner | exits
+        self._desired_protection_symbols = protection
+        self._desired_symbols = trade | scanner | protection
         if not self.connected or self._ws is None:
             return
 
-        batch_size = 100  # 4 control messages/sec at 250ms spacing, below Binance's limit.
+        batch_size = 100  # Binance control-message rate remains below the exchange limit.
         plans = (
             (self._subscribed_symbols, trade, "aggTrade"),
             (self._subscribed_kline_symbols, scanner, "kline_15m"),
-            (self._subscribed_exit_symbols, exits, "kline_1h"),
+            (self._subscribed_protection_symbols, protection, "kline_5m"),
         )
         for subscribed, desired, stream_type in plans:
             remove = sorted(subscribed - desired)
@@ -4051,10 +4047,10 @@ class BinanceWebSocket:
                 await self._send_subscribe(add[start:start + batch_size], stream_type)
                 await asyncio.sleep(0.25)
 
-        if old_trade != trade or old_scanner != scanner or old_exits != exits:
+        if old_trade != trade or old_scanner != scanner or old_protection != protection:
             log.info(
-                "[WS] subscriptions reconciled | aggTrade=%s M15=%s H1-exit=%s total=%s",
-                len(trade), len(scanner), len(exits), len(self._desired_symbols),
+                "[WS] subscriptions reconciled | aggTrade=%s M15=%s M5-position=%s total=%s",
+                len(trade), len(scanner), len(protection), len(self._desired_symbols),
             )
 
     async def add_symbol(self, symbol: str) -> None:
@@ -4074,14 +4070,15 @@ class BinanceWebSocket:
         symbol = normalize_symbol(symbol)
         self._desired_trade_symbols.discard(symbol)
         self._desired_kline_symbols.discard(symbol)
-        self._desired_symbols = self._desired_trade_symbols | self._desired_kline_symbols
+        self._desired_protection_symbols.discard(symbol)
+        self._desired_symbols = self._desired_trade_symbols | self._desired_kline_symbols | self._desired_protection_symbols
         if self.connected and self._ws is not None:
             if symbol in self._subscribed_symbols:
                 await self._send_unsubscribe([symbol])
             if symbol in self._subscribed_kline_symbols:
                 await self._send_unsubscribe([symbol], "kline_15m")
-            if symbol in self._subscribed_exit_symbols:
-                await self._send_unsubscribe([symbol], "kline_1h")
+            if symbol in self._subscribed_protection_symbols:
+                await self._send_unsubscribe([symbol], "kline_5m")
 
     async def _send_request(
         self,
@@ -4162,7 +4159,7 @@ class BinanceWebSocket:
         if sent:
             target = (
                 self._subscribed_kline_symbols if stream_type == "kline_15m" else
-                self._subscribed_exit_symbols if stream_type == "kline_1h" else
+                self._subscribed_protection_symbols if stream_type == "kline_5m" else
                 self._subscribed_symbols
             )
             target.update(normalize_symbol(symbol) for symbol in symbols)
@@ -4177,7 +4174,7 @@ class BinanceWebSocket:
         if sent:
             target = (
                 self._subscribed_kline_symbols if stream_type == "kline_15m" else
-                self._subscribed_exit_symbols if stream_type == "kline_1h" else
+                self._subscribed_protection_symbols if stream_type == "kline_5m" else
                 self._subscribed_symbols
             )
             target.difference_update(normalize_symbol(symbol) for symbol in symbols)
@@ -4201,10 +4198,10 @@ class BinanceWebSocket:
     async def _resubscribe_all(self) -> None:
         self._subscribed_symbols.clear()
         self._subscribed_kline_symbols.clear()
-        self._subscribed_exit_symbols.clear()
+        self._subscribed_protection_symbols.clear()
         trade_symbols = sorted(self._desired_trade_symbols)
         scanner_symbols = sorted(self._desired_kline_symbols)
-        exit_symbols = sorted(self._desired_exit_symbols)
+        protection_symbols = sorted(self._desired_protection_symbols)
         # One global mark-price stream plus small batches of active trades and
         # scanner kline streams. This remains comfortably below 1,024 streams
         # for the configured 522-symbol universe + normal active-trade count.
@@ -4213,7 +4210,7 @@ class BinanceWebSocket:
         for symbols, stream_type in (
             (trade_symbols, "aggTrade"),
             (scanner_symbols, "kline_15m"),
-            (exit_symbols, "kline_1h"),
+            (protection_symbols, "kline_5m"),
         ):
             for start in range(0, len(symbols), batch_size):
                 if self._stop.is_set():
@@ -4381,7 +4378,7 @@ class BinanceWebSocket:
                 self._ws = None
                 self._subscribed_symbols.clear()
                 self._subscribed_kline_symbols.clear()
-                self._subscribed_exit_symbols.clear()
+                self._subscribed_protection_symbols.clear()
 
             if self._stop.is_set():
                 break
@@ -5137,12 +5134,12 @@ class TradingEngine:
         self.timeframe = "M15"
         self.trend_length = volumatic.DEFAULT_TREND_LENGTH
         self.ema_filter_length: int | tuple[int, int] | None = volumatic.DEFAULT_EMA_FILTER_LENGTH
-        self.h1_enabled = True  # one master switch for H1 entry filter + H1 inverse-cross forced exit
+        self.h1_enabled = True  # H1 EMA 9/21 is mandatory for entry; H1 forced exit is disabled
         self._h1_toggle_generation = 0
-        self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
-        self.supertrend_factor = volumatic.SUPERTREND_FACTOR
-        self.rr_min = Decimal(str(volumatic.RR_MIN))
-        self.rr_max = Decimal(str(volumatic.RR_MAX))
+        self.supertrend_atr_length = 14
+        self.supertrend_factor = 2.5
+        self.rr_min = Decimal("3")
+        self.rr_max = Decimal("5")
         self.scan_enabled = False
         # Session-only delayed scanner activation. It is deliberately not
         # persisted: every fresh /try starts with scanner OFF and no schedule.
@@ -5203,6 +5200,10 @@ class TradingEngine:
         self._live_signal_seen: dict[str, set[str]] = {}
         self._signal_retries: dict[str, dict[str, Any]] = {}
         self._bubble_trace_states: dict[str, dict[str, Any]] = {}
+        self._m15_distance_states: dict[str, dict[str, Any]] = {}
+        self._m5_last_closed_end_ms: dict[str, int] = {}
+        self._m5_last_closed_open_ms: dict[str, int] = {}
+        self._m5_gap_warning_at: dict[str, float] = {}
         self._position_sync_warning_at: dict[str, float] = {}
         self._position_sync_warning_suppressed: dict[str, int] = {}
         self.deferred_commands: list[dict[str, Any]] = []
@@ -5232,7 +5233,7 @@ class TradingEngine:
         self._last_scan_boundary_ms = 0
         self._scan_cycle_lock = asyncio.Lock()
         self._trade_lock = asyncio.Lock()
-        # MARKET-on-touch execution: one entry at a time so every margin check
+        # Next-M15-open execution: one entry at a time so every margin check
         # sees the balance left by the previous fill; tasks are kept referenced.
         self._entry_exec_lock = asyncio.Lock()
         self._entry_tasks: set[asyncio.Task] = set()
@@ -5379,45 +5380,15 @@ class TradingEngine:
         try:
             payload = json.loads(raw.decode("utf-8"))
             self.timeframe = "M15"
-            raw_trend_length = payload.get("trend_length", volumatic.DEFAULT_TREND_LENGTH)
-            try:
-                self.trend_length = volumatic.normalize_trend_length(raw_trend_length)
-            except ValueError:
-                self.trend_length = volumatic.DEFAULT_TREND_LENGTH
-                log.warning("trend_length tidak valid; default %s dipakai.", self.trend_length)
-            raw_ema_filter = payload.get("ema_filter_length", volumatic.DEFAULT_EMA_FILTER_LENGTH)
-            try:
-                self.ema_filter_length = volumatic.normalize_ema_filter_length(raw_ema_filter)
-            except ValueError:
-                self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
-                log.warning("ema_filter_length tidak valid; default EMA %s dipakai.", self.ema_filter_length)
-            raw_h1_enabled = payload.get("h1_enabled", True)
-            self.h1_enabled = raw_h1_enabled if isinstance(raw_h1_enabled, bool) else True
-            try:
-                self.supertrend_atr_length = volumatic.normalize_supertrend_atr_length(
-                    payload.get("supertrend_atr_length", volumatic.SUPERTREND_ATR_LENGTH)
-                )
-            except (TypeError, ValueError):
-                self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
-                log.warning("supertrend_atr_length tidak valid; default %s dipakai.", self.supertrend_atr_length)
-            try:
-                self.supertrend_factor = volumatic.normalize_supertrend_factor(
-                    payload.get("supertrend_factor", volumatic.SUPERTREND_FACTOR)
-                )
-            except (TypeError, ValueError):
-                self.supertrend_factor = volumatic.SUPERTREND_FACTOR
-                log.warning("supertrend_factor tidak valid; default %s dipakai.", self.supertrend_factor)
-            try:
-                loaded_rr_min, loaded_rr_max = volumatic.normalize_rr_range(
-                    payload.get("rr_min", volumatic.RR_MIN),
-                    payload.get("rr_max", volumatic.RR_MAX),
-                )
-                self.rr_min = Decimal(str(loaded_rr_min))
-                self.rr_max = Decimal(str(loaded_rr_max))
-            except (TypeError, ValueError):
-                self.rr_min = Decimal(str(volumatic.RR_MIN))
-                self.rr_max = Decimal(str(volumatic.RR_MAX))
-                log.warning("RR_MIN/RR_MAX runtime tidak valid; default RR 1:%s–1:%s dipakai.", self.rr_min, self.rr_max)
+            # These are baseline constants, not runtime tuning parameters. Ignore
+            # obsolete persisted values written by older versions of the bot.
+            self.trend_length = 100
+            self.ema_filter_length = (9, 21)
+            self.h1_enabled = True  # H1 EMA9/21 is mandatory for entry only.
+            self.supertrend_atr_length = 14
+            self.supertrend_factor = 2.5
+            self.rr_min = Decimal("3")
+            self.rr_max = Decimal("5")
             # Scanner arming is intentionally SESSION-ONLY. A fresh /try (or
             # Render restart) must never resume a previous scan automatically.
             # The only way to arm scanning is an explicit Telegram `/scan on`.
@@ -6373,7 +6344,7 @@ class TradingEngine:
         self._scan_schedule_last_fired_minute = None
         self.timeframe = "M15"
         self.trend_length = volumatic.DEFAULT_TREND_LENGTH
-        self.ema_filter_length = volumatic.DEFAULT_EMA_FILTER_LENGTH
+        self.ema_filter_length = (9, 21)
         self.h1_enabled = True
         self._h1_toggle_generation = 0
         self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
@@ -6472,7 +6443,7 @@ class TradingEngine:
             "Signal TF     : M15\nEMA Trend TF  : H4\n"
             f"Trend length  : {self.trend_length} (default {volumatic.DEFAULT_TREND_LENGTH})\n"
             f"EMA filter    : {ema_filter_label(self.ema_filter_length)}\n"
-            f"H1 logic      : {'ON' if self.h1_enabled else 'OFF'} (entry filter + inverse-cross exit)\n"
+            f"H1 entry filter: ON (EMA9/21; entry-only)\nM15 forced exit: opposite bubble / sideways distance\n"
             f"SuperTrend    : ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
             f"Max positions : {self.max_active_trades}\n"
             "Scanner       : OFF — menunggu /scan on atau /scan schedule\n"
@@ -6510,8 +6481,8 @@ class TradingEngine:
         self._scan_schedule_last_fired_minute = None
         self.real_mode = False
 
-        # Signal every loop/socket worker and every per-trade H1 warm-up task
-        # to stop. EMA initialization tasks are explicitly tracked so they cannot
+        # Signal every loop/socket worker and any legacy EMA-init worker
+        # to stop. EMA initialization tasks remain tracked for older restored states so they cannot
         # outlive /end or a Render redeploy and mutate a fresh engine instance.
         ema_workers = list(self._ema_exit_init_tasks.values())
         workers = [self._scan_task, self._maintenance_task, self.ws._task, self.user_ws._task, *ema_workers]
@@ -6570,6 +6541,10 @@ class TradingEngine:
         self._live_signal_last_eval.clear()
         self._live_signal_seen.clear()
         self._bubble_trace_states.clear()
+        self._m15_distance_states.clear()
+        self._m5_last_closed_end_ms.clear()
+        self._m5_last_closed_open_ms.clear()
+        self._m5_gap_warning_at.clear()
         self._scanner_symbols.clear()
         self._signal_retries.clear()
         if self._telegram_error_handler_added:
@@ -6660,7 +6635,7 @@ class TradingEngine:
         lines = [
             "╔══ VOL / SCAN BATCH REPORT ══╗",
             f"ENGINE    : M15 VOLUMATIC · H4 EMA ALT+BTC · M15 SUPERTREND · LEN{trend_length} · {ema} · ATR{supertrend_atr_length} · FACTOR{supertrend_factor:g}",
-            f"H1 LOGIC  : {'ON' if self.h1_enabled else 'OFF'} · ENTRY FILTER + INVERSE-CROSS EXIT",
+            f"H1 ENTRY FILTER : ON (EMA9/21) · M15 FORCED EXIT",
             f"TP RULE   : BASE RR 1:{fmt_num(rr_min, 3)} · LIQUIDITY RANGE 1:{fmt_num(rr_min, 3)}–1:{fmt_num(rr_max, 3)}",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
@@ -6886,57 +6861,42 @@ class TradingEngine:
                 trend_length, ema_filter_label(ema_filter_length), supertrend_atr_length, supertrend_factor, len(universe),
                 SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
             )
-            # The BTC H4 reference is fetched once per scan cycle, not once per
-            # altcoin. A dual /EMA pair is required because this market-regime
-            # gate is mandatory even when the per-altcoin filter is single/OFF.
+            # BTC H4 EMA9/21 is fetched once per scan cycle and is a mandatory
+            # direction gate. All values come from completed H4 candles.
+            ema_filter_length = (9, 21)
+            h1_enabled = True
             btc_h4_closed = None
-            btc_filter_status = "NEED /EMA FAST SLOW"
-            if isinstance(ema_filter_length, tuple):
-                try:
-                    btc_h4_closed = await self.rest.get_klines(
-                        BTC_EMA_FILTER_SYMBOL,
-                        "4h",
-                        self._h4_ema_history_limit(ema_filter_length),
-                        volumatic.TIMEFRAME_MS["H4"],
-                        force_refresh=False,
-                    )
-                    if btc_h4_closed is None or len(btc_h4_closed) < 3:
-                        raise RuntimeError("Riwayat H4 BTC tidak cukup.")
-                    required_bars = max(ema_filter_length)
-                    if len(btc_h4_closed) < required_bars:
-                        btc_filter_status = f"WARMUP {len(btc_h4_closed)}/{required_bars} H4"
-                    else:
-                        btc_filter_status = (
-                            f"EMA{ema_filter_length[0]}/EMA{ema_filter_length[1]} DATA READY"
-                        )
-                    log.info(
-                        "[BTC EMA] H4 reference loaded once | symbol=%s | periods=%s/%s | candles=%s | status=%s",
-                        BTC_EMA_FILTER_SYMBOL, ema_filter_length[0], ema_filter_length[1],
-                        len(btc_h4_closed), btc_filter_status,
-                    )
-                except BinanceRateLimitError as exc:
-                    self._scan_interrupted_by_cooldown = True
-                    self._scan_trigger_now = True
-                    await self._notify_binance_cooldown(
-                        exc, source="BTC H4 EMA REFERENCE", symbol=BTC_EMA_FILTER_SYMBOL
-                    )
-                    await self.reply(
-                        "⚠️ VOL / SCANNER PAUSED BEFORE BATCH\n"
-                        f"CAUSE     : BTC H4 reference tertahan REST cooldown ({self._short_duration(self._binance_cooldown_remaining())})\n"
-                        f"CURSOR    : coin #{self._scan_resume_cursor + 1:04d} belum diproses pada siklus ini\n"
-                        "DATA      : metadata universe tetap disimpan; tidak ada candle lama yang akan dipakai untuk entry\n"
-                        "RESUME    : otomatis setelah cooldown; scanner memakai candle M15 terbaru yang masih valid."
-                    )
-                    return
-                except Exception as exc:
-                    btc_h4_closed = None
-                    btc_filter_status = f"DATA UNAVAILABLE: {str(exc)[:90]}"
-                    log.exception("[BTC EMA] mandatory BTC H4 filter data unavailable; all new signals will fail closed.")
-            else:
-                log.warning(
-                    "[BTC EMA] new entries are blocked until /EMA FAST SLOW is configured; current=%s",
-                    ema_filter_label(ema_filter_length),
+            btc_filter_status = "H4 EMA9/21 BTC DATA UNAVAILABLE"
+            try:
+                btc_h4_closed = await self.rest.get_klines(
+                    BTC_EMA_FILTER_SYMBOL, "4h",
+                    max(120, self._h4_ema_history_limit((9, 21))),
+                    volumatic.TIMEFRAME_MS["H4"], force_refresh=False,
                 )
+                if btc_h4_closed is None or len(btc_h4_closed) < 21:
+                    raise RuntimeError("Riwayat H4 BTC tidak cukup untuk EMA21.")
+                btc_filter_status = f"EMA9/EMA21 DATA READY ({len(btc_h4_closed)} H4)"
+                log.info(
+                    "[BTC EMA] H4 reference loaded once | symbol=%s | periods=9/21 | candles=%s",
+                    BTC_EMA_FILTER_SYMBOL, len(btc_h4_closed),
+                )
+            except BinanceRateLimitError as exc:
+                self._scan_interrupted_by_cooldown = True
+                self._scan_trigger_now = True
+                await self._notify_binance_cooldown(
+                    exc, source="BTC H4 EMA REFERENCE", symbol=BTC_EMA_FILTER_SYMBOL
+                )
+                await self.reply(
+                    "⚠️ VOL / SCANNER PAUSED BEFORE BATCH\n"
+                    f"CAUSE     : BTC H4 reference tertahan REST cooldown ({self._short_duration(self._binance_cooldown_remaining())})\n"
+                    f"CURSOR    : coin #{self._scan_resume_cursor + 1:04d} belum diproses pada siklus ini\n"
+                    "RESUME    : otomatis setelah cooldown; tidak ada candle H4 lama yang dipakai sebagai fallback."
+                )
+                return
+            except Exception as exc:
+                btc_h4_closed = None
+                btc_filter_status = f"DATA UNAVAILABLE: {str(exc)[:90]}"
+                log.exception("[BTC EMA] mandatory BTC H4 filter unavailable; all new entries fail closed.")
 
             await self._expire_due_pending()
             offset = self._scan_resume_cursor
@@ -7024,8 +6984,8 @@ class TradingEngine:
                             self._scan_resume_cursor = 0
                             self._scan_resume_boundary_ms = 0
                             break
-                        min_m15 = max(12, trend_length + 8, supertrend_atr_length + 1)
-                        min_h4 = max(3, (max(ema_filter_length) if isinstance(ema_filter_length, tuple) else (ema_filter_length or 1)))
+                        min_m15 = max(108, trend_length + 8, supertrend_atr_length + 1)
+                        min_h4 = 21
                         if m15 is None or len(m15) < min_m15 or h4 is None or len(h4) < min_h4:
                             stats["warmup"] += 1
                             self._scan_resume_cursor = absolute_index + 1
@@ -7043,20 +7003,15 @@ class TradingEngine:
                             stats["stale"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
+
                         signal_diagnostics: dict[str, Any] = {}
-                        signal = volumatic.detect_backtest_signal(
-                            m15, h4, symbol=symbol, trend_length=trend_length,
-                            ema_filter_length=ema_filter_length,
-                            btc_h4_closed=btc_h4_closed,
-                            supertrend_atr_length=supertrend_atr_length,
-                            supertrend_factor=supertrend_factor,
-                            rr_min=float(rr_min),
-                            rr_max=float(rr_max),
+                        signal = volumatic.detect_distance_filter_signal(
+                            m15, h4, symbol=symbol, btc_h4_closed=btc_h4_closed,
+                            trend_length=100, supertrend_atr_length=14,
+                            supertrend_factor=2.5, rr_min=3.0, rr_max=5.0,
                             diagnostics=signal_diagnostics,
                         )
                         stats["analyzed"] += 1
-                        if signal is not None:
-                            signal["h1_enabled_at_scan"] = h1_enabled
                         if signal is None:
                             rejection_reason = str(signal_diagnostics.get("reason") or "UNCLASSIFIED_REJECTION")
                             if rejection_reason == "NO_NEW_BUBBLE":
@@ -7068,78 +7023,35 @@ class TradingEngine:
                             self.last_processed_candles[key] = entry_open_ms
                             self._scan_resume_cursor = absolute_index + 1
                             continue
-                        # Liquidity TP uses only M5 + M15 + H1 + H4. Fetch the
-                        # extra M5/H1 histories only after a genuine M15/H4/BTC
-                        # signal exists, so the added REST weight is not paid by
-                        # every symbol in the universe. H1 is reused for its EMA gate.
-                        m5_liquidity = None
+
+                        # H1 EMA9/21 is queried only for an otherwise-valid M15/H4/BTC candidate.
+                        # H1 is entry-only; it is never subscribed as a position exit stream.
                         h1 = None
                         try:
-                            m5_liquidity = await self.rest.get_klines(
-                                symbol, "5m", max(KLINE_HISTORY, 220), 300_000, force_refresh=False,
-                            )
-                        except BinanceRateLimitError:
-                            raise
-                        except Exception as m5_exc:
-                            log.warning("[LIQUIDITY] %s M5 data unavailable; TP will use available M15/H1/H4 pools: %s", symbol, str(m5_exc)[:180])
-                        try:
-                            h1_liquidity_count = max(KLINE_HISTORY, self._h4_ema_history_limit(ema_filter_length))
                             h1 = await self.rest.get_klines(
-                                symbol, "1h", h1_liquidity_count, H1_MS, force_refresh=False,
+                                symbol, "1h", max(120, self._h4_ema_history_limit((9, 21))),
+                                H1_MS, force_refresh=False,
                             )
                         except BinanceRateLimitError:
                             raise
                         except Exception as h1_exc:
-                            h1 = None
-                            log.warning("[LIQUIDITY] %s H1 data unavailable; TP will use available M5/M15/H4 pools: %s", symbol, str(h1_exc)[:180])
-
-                        # Re-evaluate the same confirmed M15 setup with all four
-                        # liquidity sources. Entry, EMA gates, Supertrend SL and RR
-                        # rules remain identical; only the TP pool search expands.
-                        liquidity_diagnostics: dict[str, Any] = {}
-                        multi_tf_signal = volumatic.detect_backtest_signal(
-                            m15, h4, symbol=symbol, trend_length=trend_length,
-                            ema_filter_length=ema_filter_length,
-                            btc_h4_closed=btc_h4_closed,
-                            liquidity_m5_closed=m5_liquidity,
-                            liquidity_h1_closed=h1,
-                            supertrend_atr_length=supertrend_atr_length,
-                            supertrend_factor=supertrend_factor,
-                            rr_min=float(rr_min),
-                            rr_max=float(rr_max),
-                            diagnostics=liquidity_diagnostics,
-                        )
-                        if multi_tf_signal is None:
-                            rejection_reason = str(liquidity_diagnostics.get("reason") or "LIQUIDITY_RECHECK_FAILED")
-                            if rejection_reason == "M15_ENTRY_WINDOW_EXPIRED":
-                                stats["stale"] += 1
-                            else:
-                                stats["rejected"] += 1
-                                reasons = stats["rejection_reasons"]
-                                reasons[rejection_reason] = int(reasons.get(rejection_reason, 0)) + 1
+                            log.warning("[H1 ENTRY] %s H1 history unavailable; candidate fails closed: %s", symbol, str(h1_exc)[:180])
+                        signal.update(volumatic.h1_ema_filter_state(
+                            h1, (9, 21), str(signal.get("direction") or ""),
+                            int(signal.get("signal_close_time_ms") or 0),
+                        ))
+                        signal["h1_enabled_at_scan"] = True
+                        if not signal.get("h1_ema_filter_ready") or not signal.get("h1_ema_filter_passed"):
+                            stats["h1_ema_blocked"] += 1
+                            reason = str(signal.get("h1_ema_filter_reason") or "H1_EMA_NOT_READY")
+                            stats["rejection_reasons"][reason] = int(stats["rejection_reasons"].get(reason, 0)) + 1
                             self.last_processed_candles[key] = entry_open_ms
                             self._scan_resume_cursor = absolute_index + 1
                             continue
-                        signal = multi_tf_signal
-                        signal["h1_enabled_at_scan"] = h1_enabled
 
-                        # H1 EMA entry gate: the H1 history fetched for liquidity
-                        # above is reused, including its existing fail-closed rule.
-                        if h1_enabled and ema_filter_length is not None and (
-                            signal.get("ema_filter_passed") is True
-                        ):
-                            # Keep the original H1 EMA warm-up window exactly
-                            # as before; the longer H1 history is only for pools.
-                            h1_ema_history_count = self._h4_ema_history_limit(ema_filter_length)
-                            h1_ema_history = (
-                                h1[-h1_ema_history_count:]
-                                if h1 is not None and len(h1) >= h1_ema_history_count
-                                else h1
-                            )
-                            signal.update(volumatic.h1_ema_filter_state(
-                                h1_ema_history, ema_filter_length, str(signal.get("direction") or ""),
-                                int(signal.get("signal_close_time_ms") or 0),
-                            ))
+                        # Keep the incremental M15 exit state warm from the exact same
+                        # closed history used for signal calculation. This costs no extra REST call.
+                        await self._refresh_signal_trace_state(symbol, m15[:-1], trend_length)
                         bubble = str(signal.get("signal") or "?").upper()
                         direction = str(signal.get("direction") or "?").upper()
                         stats["blue" if bubble == "BLUE" else "red"] += 1
@@ -7784,7 +7696,10 @@ class TradingEngine:
             # when the scanner later creates its local entry watch.
             entry_order_created_at = trade_created_at
             entry_window_closes_at = datetime.fromtimestamp(entry_close_ms / 1000, tz=timezone.utc)
-            expiry_dt = bubble_time + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS)
+            # The backtest enters at the next M15 candle OPEN. This setup is
+            # valid only during that single 15-minute candle; it is never a
+            # one-hour touch-watch or a late LIMIT order.
+            expiry_dt = datetime.fromtimestamp(entry_close_ms / 1000, tz=timezone.utc)
             if trade_created_at >= expiry_dt:
                 await self._record_event(
                     "M15_SIGNAL_TRACE_EXPIRED_BEFORE_WATCH", None, pair=pair, direction=direction,
@@ -7870,8 +7785,9 @@ class TradingEngine:
             else:
                 trade.quantity = (trade.target_notional or (trade.margin_usdt * trade.leverage)) / trade.entry
                 trade.actual_notional = trade.quantity * trade.entry
-            # No exchange order is created here. REAL setups only store the entry
-            # level; the WebSocket price watch sends one MARKET order on touch.
+            # Entry is dispatched immediately at the next M15 candle open.
+            # For PAPER the backtest's exact M15 open is used; REAL sends one
+            # protected MARKET entry and records Binance's actual average fill.
             trade.real_enabled = False
             trade.real_intent = bool(self.real_mode)
             trade.real_state = "REAL_WAITING_TRIGGER" if trade.real_intent else "PAPER_PENDING"
@@ -7881,7 +7797,7 @@ class TradingEngine:
             try:
                 await self._record_event(
                     "M15_ENTRY_PENDING_CREATED", trade,
-                    order_type="MARKET_ON_TOUCH" if trade.real_intent else "PAPER_TOUCH",
+                    order_type="MARKET_NEXT_M15_OPEN" if trade.real_intent else "PAPER_NEXT_M15_OPEN",
                     signal_mode="CONFIRMED_M15_NEXT_OPEN",
                     entry=decimal_to_str(trade.entry), stop_loss=decimal_to_str(trade.stop_loss),
                     take_profit=decimal_to_str(trade.take_profit),
@@ -7891,7 +7807,7 @@ class TradingEngine:
                     liquidity_pool_price=decimal_to_str(trade.liquidity_pool_price),
                     liquidity_pool_timeframe=trade.liquidity_pool_timeframe,
                     signal_close_time_ms=signal_close_ms, entry_candle_open_time_ms=entry_open_ms,
-                    expires_at=iso_utc(trade.expires_at), expiry_seconds=ENTRY_ORDER_TTL_SECONDS,
+                    expires_at=iso_utc(trade.expires_at), expiry_seconds=900,
                     real=trade.real_intent, quantity=decimal_to_str(trade.quantity),
                     margin_usdt=decimal_to_str(trade.margin_usdt),
                     leverage=trade.leverage, min_margin_mode=trade.min_margin_mode,
@@ -7911,11 +7827,11 @@ class TradingEngine:
                         else "H1 reference close: UNAVAILABLE\n"
                     )
                     + f"Entry level (next M15 OPEN): {fmt_price(trade.entry)}\n"
-                    f"Eksekusi: {'MARKET saat harga menyentuh level (dipantau WebSocket)' if trade.real_intent else 'PAPER saat harga menyentuh level'}\n"
+                    f"Eksekusi: {'MARKET segera pada window open M15; fill mengikuti harga Binance' if trade.real_intent else 'PAPER pada harga OPEN M15 (backtest parity)'}\n"
                     f"Supertrend M15 SL: {fmt_price(trade.stop_loss)} • ATR {trade.supertrend_atr_length} / Factor {trade.supertrend_factor:g}\n"
                     f"TP: {fmt_price(trade.take_profit)} • RR 1:{fmt_num(trade.take_profit_rr, 2)} "
                     f"({'Volume Liquidity Trend' + (' · ' + trade.liquidity_pool_timeframe if trade.liquidity_pool_timeframe else '') if trade.take_profit_source == 'VOLUME_LIQUIDITY' else f'baseline {trade.rr_min}R'})\n"
-                    f"Auto-expire: 1 jam sejak bubble M15 terbentuk ({format_wib(trade.expires_at)})\n"
+                    f"Entry window tutup: akhir candle M15 berikutnya ({format_wib(trade.expires_at)})\n"
                     f"Margin target: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
                     + (
                         f"Estimasi margin qty: {fmt_num((trade.actual_notional or Decimal('0')) / Decimal(trade.leverage), 5)} USDT "
@@ -7927,23 +7843,27 @@ class TradingEngine:
                 )
             finally:
                 trade.entry_inflight = False
-            paper_entry_blocked = False
-            observed = self._current_price(pair)
-            if observed is not None and (observed <= trade.entry if direction == "LONG" else observed >= trade.entry):
-                if trade.real_intent:
-                    self._schedule_market_entry(trade, observed, "SIGNAL_TIME_TOUCH")
-                else:
-                    paper_entry_blocked = not await self._fill_paper_entry_if_capacity(
-                        trade, trade.entry, "PAPER_MARKETABLE_AT_SUBMIT"
-                    )
-            if paper_entry_blocked:
+            if trade.status != "PENDING":
+                return "ORDER_FILLED" if trade.status == "FILLED" else str(trade.status)
+            if trade.real_intent:
+                # Single-flight MARKET dispatch in the current M15 entry window.
+                # If a Binance cooldown blocks preflight, this setup expires at
+                # the window close and is never submitted late.
+                self._schedule_market_entry(trade, trade.entry, "M15_NEXT_OPEN")
+                return "ORDER_CREATED"
+            paper_filled = await self._fill_paper_entry_if_capacity(
+                trade, trade.entry, "PAPER_M15_NEXT_OPEN",
+                filled_at=datetime.fromtimestamp(entry_open_ms / 1000, tz=timezone.utc),
+            )
+            if not paper_filled:
                 return "MAX_BLOCKED"
-            return "ORDER_CREATED" if trade.status == "PENDING" else "ORDER_FILLED"
+            return "ORDER_FILLED"
 
     async def _fill_paper_entry_if_capacity(
         self, trade: Trade, price: Decimal, source: str,
+        *, filled_at: datetime | None = None,
     ) -> bool:
-        """Fill a PAPER touch only when an active-position slot is available."""
+        """Fill PAPER at the official next-M15 open when a position slot is available."""
         if trade.status != "PENDING":
             return False
         active_positions = len(self._active_slot_projection())
@@ -7958,10 +7878,10 @@ class TradingEngine:
                 trade, "CANCELED", None, "MAX_ACTIVE_POSITIONS_REACHED_AT_PAPER_TOUCH"
             )
             return False
-        await self._mark_filled(trade, price, source)
+        await self._mark_filled(trade, price, source, filled_at=filled_at)
         return True
 
-    # --------------- MARKET-on-touch entry (no exchange LIMIT orders) --------------
+    # --------------- NEXT-M15-OPEN MARKET/PAPER ENTRY ----------------------------
     @staticmethod
     def _safe_decimal(raw: Any) -> Decimal:
         try:
@@ -8105,7 +8025,7 @@ class TradingEngine:
         if self._autostop_triggered:
             raise MarketEntryRejected("AUTOSTOP_BEFORE_ENTRY", "AUTOSTOP aktif; entry baru diblokir.")
         if now_utc() >= trade.expires_at:
-            raise MarketEntryRejected("ENTRY_WATCH_EXPIRED_1H", "Batas 1 jam habis sebelum eksekusi.", result="EXPIRED", notify=False)
+            raise MarketEntryRejected("ENTRY_NEXT_M15_OPEN_WINDOW_EXPIRED", "Window entry pada candle M15 berikutnya sudah berakhir.", result="EXPIRED", notify=False)
         if not REAL_EXECUTION_ENABLED or not self.real.configured:
             raise MarketEntryRejected("REAL_UNAVAILABLE", "API Binance tidak tersedia/tidak dikonfigurasi.")
         if any(
@@ -9203,8 +9123,8 @@ class TradingEngine:
             if trade.entry_inflight:
                 continue
             if trade.real_enabled and trade.status == "PENDING" and trade.real_state == "REAL_PREPARED" and trade.entry_order_created_at is None:
-                # No Binance order exists yet. The one-hour timer has not started,
-                # but the setup may only CREATE its LIMIT during the next M15 candle.
+                # No Binance order exists yet. A confirmed M15 entry intent may
+                # only be submitted before the next M15 candle closes.
                 if trade.entry_window_closes_at and now >= trade.entry_window_closes_at:
                     await self._finalize_trade(trade, "EXPIRED", None, "ENTRY_WINDOW_CLOSED_BEFORE_SUBMIT")
                 continue
@@ -9249,7 +9169,7 @@ class TradingEngine:
                         log.info("[REAL] GTC preserved | pair=%s | 1h timeout during REST cooldown; order remains on Binance until fill/reversal/cancel", trade.pair)
                         continue
                 await self._cancel_pending_trade(
-                    trade, "ENTRY_WATCH_EXPIRED_1H" if trade.real_intent else "ENTRY_LIMIT_TIMEOUT_1H"
+                    trade, "ENTRY_NEXT_M15_OPEN_WINDOW_EXPIRED" if trade.real_intent else "ENTRY_WINDOW_EXPIRED"
                 )
 
             elif trade.status == "FILLED" and trade.real_enabled and not trade.entry_order_terminal and now >= trade.expires_at:
@@ -9478,9 +9398,12 @@ class TradingEngine:
         if self._binance_cooldown_remaining() > 0:
             return
         if trade.ema_exit_state in {"EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN"}:
-            await self._process_ema_exit_real(trade)
-            if trade.status != "FILLED" or trade.ema_exit_state in {"EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN", "CLEANUP_WAIT_API"}:
-                return
+            trigger_close_ms = int(trade.ema_exit_trigger_close_ms or 0)
+            m5_bar_ready = bool(trigger_close_ms and self._m5_last_closed_end_ms.get(trade.pair, 0) >= trigger_close_ms)
+            if trade.ema_exit_state != "EXIT_PENDING" or m5_bar_ready:
+                await self._process_ema_exit_real(trade)
+                if trade.status != "FILLED" or trade.ema_exit_state in {"EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN", "CLEANUP_WAIT_API"}:
+                    return
         if trade.protection_state == "CANCEL_WAIT_API":
             if trade.ema_exit_state == "CLEANUP_WAIT_API":
                 now_mono = time.monotonic()
@@ -9967,10 +9890,11 @@ class TradingEngine:
             )
 
     async def _refresh_signal_trace_state(self, symbol: str, closed_candles: np.ndarray, trend_length: int) -> None:
-        """Refresh state from scanner history and catch opposite bubbles missed by WS."""
+        """Seed M15 bubble/distance state and replay missed position exits."""
         pair = normalize_symbol(symbol)
         if not pair or not isinstance(closed_candles, np.ndarray) or not closed_candles.size:
             return
+
         pending_traces = [
             trade for trade in self.active_trades.values()
             if trade.pair == pair and trade.timeframe == "M15"
@@ -9987,33 +9911,117 @@ class TradingEngine:
                 trend_length=trend_length, interval_ms=volumatic.TIMEFRAME_MS["M15"],
             ):
                 await self._cancel_opposite_signal_trace(pair, bubble)
-        state = volumatic.prepare_bubble_trace_state(closed_candles, trend_length=trend_length)
-        if state is None:
+
+        bubble_state = volumatic.prepare_bubble_trace_state(closed_candles, trend_length=trend_length)
+        if bubble_state is None:
             self._bubble_trace_states.pop(pair, None)
         else:
-            self._bubble_trace_states[pair] = state
+            self._bubble_trace_states[pair] = bubble_state
+
+        distance_state = volumatic.prepare_m15_distance_state(closed_candles)
+        if distance_state is None:
+            self._m15_distance_states.pop(pair, None)
+        else:
+            self._m15_distance_states[pair] = distance_state
+
+        # REST refresh / scanner refresh also acts as a bounded recovery path
+        # when WebSocket was disconnected. The backtest's earliest M15 forced
+        # exit is replayed only once for each still-open trade.
+        for trade in list(self.active_trades.values()):
+            if trade.pair != pair or trade.timeframe != "M15" or trade.status != "FILLED":
+                continue
+            if trade.ema_exit_state in {
+                "EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN",
+                "CLEANUP_WAIT_API", "SUPERSEDED_BY_PROTECTION",
+            }:
+                continue
+            filled_ms = int((trade.filled_at or trade.created_at).timestamp() * 1000)
+            missed = volumatic.find_m15_forced_exit(
+                closed_candles, direction=trade.direction, filled_at_ms=filled_ms,
+                trend_length=trade.trend_length or trend_length,
+                threshold_pct=volumatic.M15_DISTANCE_THRESHOLD_PCT,
+            )
+            if missed is not None:
+                await self._queue_m15_forced_exit(
+                    trade, int(missed["close_time_ms"]),
+                    Decimal(str(missed["close_price"])), str(missed["reason"]),
+                )
+
+    async def _queue_m15_forced_exit(
+        self, trade: Trade, close_ms: int, close_price: Decimal, reason: str,
+    ) -> None:
+        """Persist one confirmed M15 exit; execute only after its final M5 bar."""
+        if trade.status != "FILLED" or trade.timeframe != "M15":
+            return
+        filled_ms = int((trade.filled_at or trade.created_at).timestamp() * 1000)
+        if int(close_ms) <= filled_ms or close_price <= 0:
+            return
+        if trade.ema_exit_state in {
+            "EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN",
+            "CLEANUP_WAIT_API", "SUPERSEDED_BY_PROTECTION",
+        }:
+            return
+        trade.ema_exit_state = "EXIT_PENDING"
+        trade.ema_exit_trigger_close_ms = int(close_ms)
+        trade.ema_exit_trigger_price = close_price
+        trade.ema_exit_reason = str(reason)
+        trade.ema_exit_last_error = None
+        trade.ema_exit_order_status = "NOT_SUBMITTED"
+        await self._record_event(
+            "M15_FORCED_EXIT_CONFIRMED", trade,
+            trigger_close_time_ms=int(close_ms),
+            trigger_close_price=decimal_to_str(close_price),
+            forced_exit_reason=str(reason),
+            execution_gate="WAIT_FOR_FINAL_M5_CANDLE",
+        )
+        await self._save_active_state()
+        log.warning(
+            "[M15 EXIT] %s %s reason=%s close=%s; waiting final M5 candle before exit",
+            trade.pair, trade.direction, reason, close_price,
+        )
+        await self._sync_ws_symbols()
+        if self._m5_last_closed_end_ms.get(trade.pair, 0) >= int(close_ms):
+            if trade.real_enabled:
+                await self._process_ema_exit_real(trade)
+            else:
+                await self._finalize_trade(trade, "CLOSED", close_price, str(reason))
 
     async def _handle_closed_m15_bubble(self, symbol: str, kline: dict[str, Any]) -> None:
-        """Process closed M15 candles from the existing scanner kline stream."""
-        if kline.get("x") is not True:
+        """Advance confirmed M15 bubble + EMA-distance states for open positions."""
+        if kline.get("x") is not True or str(kline.get("i") or "").lower() != "15m":
             return
         pair = normalize_symbol(symbol)
         if pair in self.banned_symbols:
             self._bubble_trace_states.pop(pair, None)
+            self._m15_distance_states.pop(pair, None)
             return
-        state = self._bubble_trace_states.get(pair)
-        if state is None:
-            has_pending_trace = any(
-                trade.pair == pair and trade.timeframe == "M15"
-                and trade.status == "PENDING" and not trade.entry_inflight
-                and not trade.real_enabled
-                for trade in self.active_trades.values()
-            )
-            if not has_pending_trace:
+        try:
+            open_ms = int(kline["t"])
+            close_ms = open_ms + volumatic.TIMEFRAME_MS["M15"]
+            close_price = Decimal(str(kline["c"]))
+            if not close_price.is_finite() or close_price <= 0:
+                return
+        except (KeyError, TypeError, ValueError, InvalidOperation, OverflowError):
+            return
+
+        bubble_state = self._bubble_trace_states.get(pair)
+        distance_state = self._m15_distance_states.get(pair)
+        active_m15_positions = [
+            trade for trade in self.active_trades.values()
+            if trade.pair == pair and trade.timeframe == "M15" and trade.status == "FILLED"
+        ]
+        has_pending_trace = any(
+            trade.pair == pair and trade.timeframe == "M15"
+            and trade.status == "PENDING" and not trade.entry_inflight
+            and not trade.real_enabled
+            for trade in self.active_trades.values()
+        )
+        if bubble_state is None or (active_m15_positions and distance_state is None):
+            if not active_m15_positions and not has_pending_trace:
                 return
             try:
                 history = await self.rest.get_klines(
-                    pair, "15m", self._kline_history_limit(self.trend_length, self.supertrend_atr_length),
+                    pair, "15m", max(self._kline_history_limit(self.trend_length, self.supertrend_atr_length), 120),
                     volumatic.TIMEFRAME_MS["M15"], force_refresh=True,
                 )
                 if history is not None and len(history) >= 5:
@@ -10021,22 +10029,230 @@ class TradingEngine:
             except BinanceRateLimitError:
                 return
             except Exception as exc:
-                log.info("[SIGNAL TRACE] %s state belum bisa dipulihkan dari M15 history: %s", pair, exc)
+                log.info("[M15 TRACE] %s state belum bisa dipulihkan dari M15 history: %s", pair, exc)
+            # The history is the source of truth and may already include this
+            # just-closed candle; replay above handles both signal trace and exits.
             return
+
+        previous_open = int(bubble_state.get("last_candle_open_time_ms") or 0)
+        if open_ms <= previous_open:
+            return  # duplicate/out-of-order candle after reconnect
         try:
-            next_state, bubble = volumatic.advance_bubble_trace_state(
-                state, open_time_ms=int(kline.get("t")), close_price=float(kline.get("c")),
+            next_bubble_state, bubble = volumatic.advance_bubble_trace_state(
+                bubble_state, open_time_ms=open_ms, close_price=float(close_price),
+                interval_ms=volumatic.TIMEFRAME_MS["M15"],
+            )
+            next_distance_state, signed_distance, _absolute_distance = volumatic.advance_m15_distance_state(
+                distance_state, open_time_ms=open_ms, close_price=float(close_price),
                 interval_ms=volumatic.TIMEFRAME_MS["M15"],
             )
         except (TypeError, ValueError, OverflowError):
-            next_state, bubble = None, None
-        if next_state is None:
-            # A gap or invalid candle means the next scanner history load must reseed it.
+            next_bubble_state, bubble = None, None
+            next_distance_state, signed_distance = None, None
+
+        if next_bubble_state is None or next_distance_state is None or signed_distance is None:
             self._bubble_trace_states.pop(pair, None)
+            self._m15_distance_states.pop(pair, None)
+            # A timestamp gap must be reseeded from REST rather than guessed.
+            try:
+                history = await self.rest.get_klines(
+                    pair, "15m", max(self._kline_history_limit(self.trend_length, self.supertrend_atr_length), 120),
+                    volumatic.TIMEFRAME_MS["M15"], force_refresh=True,
+                )
+                if history is not None and len(history) >= 5:
+                    await self._refresh_signal_trace_state(pair, history, self.trend_length)
+            except BinanceRateLimitError:
+                pass
+            except Exception as exc:
+                log.info("[M15 TRACE] %s gap recovery deferred: %s", pair, exc)
             return
-        self._bubble_trace_states[pair] = next_state
+
+        self._bubble_trace_states[pair] = next_bubble_state
+        self._m15_distance_states[pair] = next_distance_state
         if bubble is not None:
             await self._cancel_opposite_signal_trace(pair, bubble)
+
+        for trade in list(active_m15_positions):
+            if trade.status != "FILLED":
+                continue
+            filled_ms = int((trade.filled_at or trade.created_at).timestamp() * 1000)
+            if close_ms <= filled_ms:
+                continue
+            side = 1 if trade.direction == "LONG" else -1
+            sideways = (float(signed_distance) * side) < volumatic.M15_DISTANCE_THRESHOLD_PCT
+            opposite_bubble = bool(
+                bubble is not None and str(bubble.get("direction") or "").upper() != trade.direction
+            )
+            if opposite_bubble or sideways:
+                reason = "OPPOSITE_BUBBLE_M15" if opposite_bubble else "SIDEWAYS_EXIT_M15"
+                await self._queue_m15_forced_exit(trade, close_ms, close_price, reason)
+
+    async def _backfill_m5_position_history(self, pair: str, before_open_ms: int, after_open_ms: int | None) -> bool:
+        """Recover missing closed M5 candles for PAPER SL/TP before processing a gap."""
+        paper_positions = [
+            trade for trade in self.active_trades.values()
+            if trade.pair == pair and trade.timeframe == "M15" and trade.status == "FILLED"
+            and not trade.real_enabled and trade.fill_price is not None
+        ]
+        if not paper_positions:
+            return True
+        fill_times = [int((trade.filled_at or trade.created_at).timestamp() * 1000) for trade in paper_positions]
+        oldest_fill = min(fill_times)
+        start_open = (oldest_fill // 300_000) * 300_000
+        if after_open_ms is not None:
+            start_open = max(start_open, int(after_open_ms) + 300_000)
+        if start_open >= int(before_open_ms):
+            return True
+        bars_needed = max(3, int((int(before_open_ms) - start_open + 299_999) // 300_000) + 2)
+        limit = min(1500, bars_needed)
+        try:
+            history = await self.rest.get_klines(pair, "5m", limit, 300_000, force_refresh=True)
+        except BinanceRateLimitError:
+            raise
+        except Exception as exc:
+            log.warning("[M5 RECOVERY] %s REST backfill unavailable: %s", pair, str(exc)[:180])
+            return False
+        if history is None or not len(history):
+            return False
+        first_open = int(history["t"][0])
+        if first_open > start_open:
+            now = time.monotonic()
+            if now - self._m5_gap_warning_at.get(pair, 0.0) >= 300:
+                self._m5_gap_warning_at[pair] = now
+                log.error(
+                    "[M5 RECOVERY] %s incomplete history: first=%s expected=%s; PAPER exit processing paused",
+                    pair, first_open, start_open,
+                )
+            return False
+        expected_open = start_open
+        processed_any = False
+        for row in history:
+            row_open = int(row["t"])
+            if row_open < start_open or row_open >= int(before_open_ms):
+                continue
+            if row_open != expected_open:
+                return False
+            await self._apply_m5_position_ohlc(
+                pair, row_open, Decimal(str(row["o"])), Decimal(str(row["h"])),
+                Decimal(str(row["l"])), Decimal(str(row["c"])),
+            )
+            self._m5_last_closed_open_ms[pair] = row_open
+            self._m5_last_closed_end_ms[pair] = row_open + 300_000
+            expected_open = row_open + 300_000
+            processed_any = True
+        # When a PAPER position predates this WS bar, do not advance across a
+        # hole: a missed M5 SL/TP could otherwise be overwritten by an M15 exit.
+        if expected_open < int(before_open_ms):
+            return False
+        return True
+
+    async def _apply_m5_position_ohlc(
+        self, pair: str, open_ms: int, open_price: Decimal, high: Decimal,
+        low: Decimal, close_price: Decimal,
+    ) -> None:
+        """Apply one closed M5 candle using the backtest's gap and SL-first rules."""
+        close_ms = int(open_ms) + 300_000
+        for trade in list(self.active_trades.values()):
+            if trade.pair != pair or trade.timeframe != "M15" or trade.status != "FILLED":
+                continue
+            filled_ms = int((trade.filled_at or trade.created_at).timestamp() * 1000)
+            # Backtest starts at the first M5 bar whose OPEN is >= entry timestamp.
+            if int(open_ms) < filled_ms:
+                continue
+            if not trade.real_enabled:
+                stop = trade.stop_loss or trade.reference_sl
+                target = trade.take_profit
+                if stop is None or target is None:
+                    continue
+                reason = None
+                fill = None
+                if trade.direction == "LONG":
+                    if open_price <= stop:
+                        reason, fill = "STOP_LOSS", open_price
+                    elif open_price >= target:
+                        reason, fill = "TAKE_PROFIT", target
+                    elif low <= stop:
+                        reason, fill = "STOP_LOSS", stop
+                    elif high >= target:
+                        reason, fill = "TAKE_PROFIT", target
+                else:
+                    if open_price >= stop:
+                        reason, fill = "STOP_LOSS", open_price
+                    elif open_price <= target:
+                        reason, fill = "TAKE_PROFIT", target
+                    elif high >= stop:
+                        reason, fill = "STOP_LOSS", stop
+                    elif low <= target:
+                        reason, fill = "TAKE_PROFIT", target
+                if reason is not None and fill is not None:
+                    await self._finalize_trade(trade, "CLOSED", fill, reason)
+                    continue
+            # REAL SL/TP are Binance Algo orders. M5 candles are used as an
+            # ordering barrier only; actual fills/flat state come from Binance.
+            if (
+                trade.status == "FILLED" and trade.ema_exit_state == "EXIT_PENDING"
+                and trade.ema_exit_trigger_close_ms is not None
+                and close_ms >= int(trade.ema_exit_trigger_close_ms)
+            ):
+                if trade.real_enabled:
+                    await self._process_ema_exit_real(trade)
+                else:
+                    forced_price = trade.ema_exit_trigger_price or close_price
+                    await self._finalize_trade(
+                        trade, "CLOSED", forced_price,
+                        trade.ema_exit_reason or "M15_FORCED_EXIT",
+                    )
+
+    async def _process_m5_position_candle(self, symbol: str, kline: dict[str, Any]) -> None:
+        """Consume one closed M5 candle for active-position SL/TP and exit ordering."""
+        if not isinstance(kline, dict) or kline.get("x") is not True or str(kline.get("i") or "").lower() != "5m":
+            return
+        pair = normalize_symbol(symbol)
+        try:
+            open_ms = int(kline["t"])
+            open_price = Decimal(str(kline["o"]))
+            high = Decimal(str(kline["h"]))
+            low = Decimal(str(kline["l"]))
+            close_price = Decimal(str(kline["c"]))
+            if not all(v.is_finite() and v > 0 for v in (open_price, high, low, close_price)):
+                return
+            if high < max(open_price, close_price, low) or low > min(open_price, close_price, high):
+                return
+        except (KeyError, TypeError, ValueError, InvalidOperation, OverflowError):
+            return
+
+        last_open = self._m5_last_closed_open_ms.get(pair)
+        if last_open is None:
+            try:
+                recovered = await self._backfill_m5_position_history(pair, open_ms, None)
+            except BinanceRateLimitError:
+                return
+            if not recovered:
+                return
+            last_open = self._m5_last_closed_open_ms.get(pair)
+        elif open_ms > last_open + 300_000:
+            try:
+                recovered = await self._backfill_m5_position_history(pair, open_ms, last_open)
+            except BinanceRateLimitError:
+                # Do not advance past the gap; the next M5 close can retry REST.
+                return
+            if not recovered:
+                return
+            last_open = self._m5_last_closed_open_ms.get(pair)
+
+        if last_open is not None and open_ms <= last_open:
+            return  # duplicate, including an event already recovered through REST
+        if last_open is not None and open_ms != last_open + 300_000:
+            now = time.monotonic()
+            if now - self._m5_gap_warning_at.get(pair, 0.0) >= 300:
+                self._m5_gap_warning_at[pair] = now
+                log.error("[M5] %s gap remains unresolved before open=%s; refusing to skip missing bars", pair, open_ms)
+            return
+
+        await self._apply_m5_position_ohlc(pair, open_ms, open_price, high, low, close_price)
+        self._m5_last_closed_open_ms[pair] = open_ms
+        self._m5_last_closed_end_ms[pair] = open_ms + 300_000
+        await self._save_active_state()
 
     def _cache_live_signal_context(
         self, symbol: str, timeframe: str, candles: np.ndarray,
@@ -10268,205 +10484,19 @@ class TradingEngine:
         return current
 
     def _schedule_ema_exit_initialization(self, trade: Trade) -> None:
-        """Start at most one low-priority H1 history warm-up per filled trade."""
-        if trade.status != "FILLED":
-            return
-        periods = self._bind_trade_h1_ema_config(trade)
-        if trade.ema_exit_state in {
-            "ACTIVE", "ACTIVE_WITH_GAP", "EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY",
-            "CLOSE_UNKNOWN", "CLEANUP_WAIT_API", "SUPERSEDED_BY_PROTECTION",
-            "DISABLED", "UNAVAILABLE",
-        }:
-            return
-        if periods is None:
+        """Legacy no-op: H1 EMA is entry-only in strategy v3.0.0."""
+        if trade.status == "FILLED" and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}:
             trade.ema_exit_state = "DISABLED"
-            trade.ema_exit_last_error = "Forced close H1 memerlukan pasangan /EMA FAST SLOW; konfigurasi trade dan current config bukan dual EMA."
-            return
-        if self._binance_cooldown_remaining() > 0:
-            trade.ema_exit_state = "WAITING_API"
-            trade.ema_exit_last_error = "H1 EMA warm-up menunggu Binance REST cooldown."
-            return
-        now = time.monotonic()
-        last_attempt = self._ema_exit_last_retry.get(trade.trade_id, 0.0)
-        if now - last_attempt < EMA_EXIT_INIT_RETRY_SECONDS:
-            return
-        existing = self._ema_exit_init_tasks.get(trade.trade_id)
-        if existing is not None and not existing.done():
-            return
-        self._ema_exit_last_retry[trade.trade_id] = now
-        task = asyncio.create_task(
-            self._initialize_ema_exit_trade(trade.trade_id),
-            name=f"ema-h1-init-{trade.pair}",
-        )
-        self._ema_exit_init_tasks[trade.trade_id] = task
+            trade.ema_exit_last_error = "H1 EMA forced exit disabled by strategy v3.0.0; M15 bubble/sideways exits are active."
+        return
 
     async def _initialize_ema_exit_trade(self, trade_id: str) -> None:
-        """Seed/repair the H1 EMA exit state and replay any missed closed candles."""
-        try:
-            async with self._ema_exit_init_semaphore:
-                trade = self.active_trades.get(trade_id)
-                if trade is None or trade.status != "FILLED":
-                    return
-                periods = self._ema_exit_periods(trade)
-                if periods is None:
-                    trade.ema_exit_state = "DISABLED"
-                    trade.ema_exit_last_error = "Dual EMA tidak tersedia pada trade snapshot."
-                    await self._save_active_state()
-                    return
-                fast_len, slow_len = periods
-                # Four EMA periods provide a stable SMA-seeded warm-up, while
-                # also replaying the interval since the last persisted H1 state.
-                slow_bars = max(99, min(1500, slow_len * 4 + 12))
-                saved_open = int(trade.ema_exit_last_open_ms or 0)
-                filled_ms = int((trade.filled_at or trade.created_at).timestamp() * 1000)
-                if saved_open:
-                    replay_bars = max(99, int(max(0, int(time.time() * 1000) - saved_open) / H1_MS) + 4)
-                    count = min(1500, max(slow_bars, replay_bars))
-                else:
-                    age_bars = max(0, int((int(time.time() * 1000) - filled_ms) / H1_MS) + 4)
-                    count = min(1500, max(slow_bars, age_bars))
-                if slow_len > count:
-                    trade.ema_exit_state = "UNAVAILABLE"
-                    trade.ema_exit_last_error = (
-                        f"EMA slow {slow_len} membutuhkan lebih dari {count} candle H1; "
-                        "histori Binance yang diminta tidak cukup."
-                    )
-                    await self._save_active_state()
-                    await self.reply(
-                        f"⚠️ EMA H1 EXIT BELUM AKTIF • {trade.pair}\n"
-                        f"EMA: {fast_len}/{slow_len}\n"
-                        f"Alasan: {trade.ema_exit_last_error}\n"
-                        "SL/TP tetap aktif di Binance; periksa konfigurasi EMA/history."
-                    )
-                    return
-
-                trade.ema_exit_state = "INITIALIZING"
-                await self._save_active_state()
-                candles = await self.rest.get_klines(
-                    trade.pair, "1h", count, H1_MS, force_refresh=False
-                )
-                if not isinstance(candles, np.ndarray) or candles.size < slow_len:
-                    raise RuntimeError(
-                        f"Histori H1 tidak cukup untuk EMA{slow_len}: "
-                        f"{len(candles) if isinstance(candles, np.ndarray) else 0}/{slow_len}."
-                    )
-                opens = np.asarray(candles["t"], dtype=np.int64)
-                closes = np.asarray(candles["c"], dtype=np.float64)
-                fast_values = self._ema_sma_seeded(closes, fast_len)
-                slow_values = self._ema_sma_seeded(closes, slow_len)
-                valid = np.isfinite(fast_values) & np.isfinite(slow_values)
-                valid_indices = np.flatnonzero(valid)
-                if valid_indices.size == 0:
-                    raise RuntimeError("EMA H1 belum memiliki warm-up yang valid.")
-
-                # If a legacy/opened trade predates the available history window,
-                # its past cross cannot be reconstructed safely. Resume from the
-                # latest confirmed candle and surface the gap instead of inventing
-                # an exit signal from the current EMA relationship.
-                first_valid = int(valid_indices[0])
-                history_first_open = int(opens[first_valid])
-                uncovered_gap = False
-                if saved_open and history_first_open > saved_open + H1_MS:
-                    uncovered_gap = True
-                elif not saved_open and history_first_open > (filled_ms // H1_MS) * H1_MS:
-                    uncovered_gap = True
-
-                start_index = first_valid + 1
-                if saved_open:
-                    start_index = max(start_index, int(np.searchsorted(opens, saved_open, side="right")))
-                elif not uncovered_gap:
-                    fill_bucket = (filled_ms // H1_MS) * H1_MS
-                    start_index = max(start_index, int(np.searchsorted(opens, fill_bucket, side="left")))
-
-                triggered = False
-                for i in range(start_index, len(opens)):
-                    if not (np.isfinite(fast_values[i - 1]) and np.isfinite(slow_values[i - 1])
-                            and np.isfinite(fast_values[i]) and np.isfinite(slow_values[i])):
-                        continue
-                    candle_close_ms = int(opens[i]) + H1_MS
-                    if candle_close_ms <= max(
-                        filled_ms, int(trade.ema_exit_ignore_cross_until_ms or 0)
-                    ):
-                        continue
-                    previous_fast = float(fast_values[i - 1])
-                    previous_slow = float(slow_values[i - 1])
-                    current_fast = float(fast_values[i])
-                    current_slow = float(slow_values[i])
-                    cross_direction = volumatic.ema_cross_direction(
-                        previous_fast, previous_slow, current_fast, current_slow
-                    )
-                    bearish_cross = cross_direction == "BEARISH"
-                    bullish_cross = cross_direction == "BULLISH"
-                    trade.ema_exit_last_open_ms = int(opens[i])
-                    trade.ema_exit_last_fast = Decimal(str(current_fast))
-                    trade.ema_exit_last_slow = Decimal(str(current_slow))
-                    trade.ema_exit_last_close = Decimal(str(float(closes[i])))
-                    should_exit = (
-                        (trade.direction == "LONG" and bearish_cross)
-                        or (trade.direction == "SHORT" and bullish_cross)
-                    )
-                    if should_exit and self.h1_enabled:
-                        reason = "EMA_H1_BEARISH_CROSS" if trade.direction == "LONG" else "EMA_H1_BULLISH_CROSS"
-                        trade.ema_exit_state = "EXIT_PENDING"
-                        trade.ema_exit_trigger_close_ms = candle_close_ms
-                        trade.ema_exit_trigger_price = Decimal(str(float(closes[i])))
-                        trade.ema_exit_reason = reason
-                        trade.ema_exit_last_error = None
-                        triggered = True
-                        log.warning(
-                            "[EMA EXIT] recovered H1 inverse cross | %s %s EMA%s/%s close=%s",
-                            trade.pair, trade.direction, fast_len, slow_len,
-                            trade.ema_exit_trigger_price,
-                        )
-                        break
-
-                if not triggered:
-                    last_index = int(valid_indices[-1])
-                    trade.ema_exit_last_open_ms = int(opens[last_index])
-                    trade.ema_exit_last_fast = Decimal(str(float(fast_values[last_index])))
-                    trade.ema_exit_last_slow = Decimal(str(float(slow_values[last_index])))
-                    trade.ema_exit_last_close = Decimal(str(float(closes[last_index])))
-                    trade.ema_exit_state = "ACTIVE_WITH_GAP" if uncovered_gap else "ACTIVE"
-                    trade.ema_exit_last_error = (
-                        "Sebagian riwayat H1 sebelum warm-up tidak tersedia; exit dilanjutkan dari candle terbaru. "
-                        "Cross yang terjadi saat bot tidak aktif di luar histori ini tidak dapat direkonstruksi."
-                        if uncovered_gap else None
-                    )
-                await self._save_active_state()
-                await self._sync_ws_symbols()
-                if uncovered_gap:
-                    await self.reply(
-                        f"⚠️ EMA H1 HISTORY GAP • {trade.pair} {trade.direction}\n"
-                        f"EMA: {fast_len}/{slow_len}\n"
-                        "Histori candle sebelum warm-up tidak cukup untuk merekonstruksi semua cross saat bot tidak aktif.\n"
-                        "Exit EMA tetap aktif untuk cross baru; SL/TP tetap dipertahankan. Periksa posisi ini."
-                    )
-                if triggered and trade.ema_exit_state == "EXIT_PENDING" and self.h1_enabled:
-                    if not trade.real_enabled:
-                        await self._finalize_trade(
-                            trade, "CLOSED", trade.ema_exit_trigger_price,
-                            trade.ema_exit_reason or "EMA_H1_INVERSE_CROSS",
-                        )
-                    else:
-                        await self._sync_ws_symbols()
-        except BinanceRateLimitError as exc:
-            trade = self.active_trades.get(trade_id)
-            if trade is not None and trade.status == "FILLED":
-                trade.ema_exit_state = "WAITING_API"
-                trade.ema_exit_last_error = str(exc)[:400]
-                await self._save_active_state()
-            log.info("[EMA EXIT] H1 initialization deferred by rate governor | trade=%s | %s", trade_id, exc)
-        except Exception as exc:
-            trade = self.active_trades.get(trade_id)
-            if trade is not None and trade.status == "FILLED":
-                trade.ema_exit_state = "INIT_RETRY"
-                trade.ema_exit_last_error = str(exc)[:500]
-                await self._save_active_state()
-            log.warning("[EMA EXIT] H1 initialization failed | trade=%s | %s", trade_id, exc)
-        finally:
-            current = asyncio.current_task()
-            if self._ema_exit_init_tasks.get(trade_id) is current:
-                self._ema_exit_init_tasks.pop(trade_id, None)
+        """Compatibility no-op: H1 never drives exits in baseline v3.0.0."""
+        trade = self.active_trades.get(trade_id)
+        if trade is not None and trade.status == "FILLED":
+            trade.ema_exit_state = "DISABLED"
+            trade.ema_exit_last_error = "H1 forced exit disabled; M15 bubble/sideways exit is active."
+            await self._save_active_state()
 
     async def _finalize_ema_exit_after_flat(
         self, trade: Trade, reason: str | None = None, *, market_close_confirmed: bool = False,
@@ -10475,7 +10505,7 @@ class TradingEngine:
         if trade.protection_exit_reason in {"STOP_LOSS", "TAKE_PROFIT"}:
             final_reason = trade.protection_exit_reason
         elif market_close_confirmed:
-            final_reason = trade.ema_exit_reason or reason or "EMA_H1_INVERSE_CROSS"
+            final_reason = trade.ema_exit_reason or reason or "M15_FORCED_EXIT"
         else:
             final_reason = reason or ("TP_SL_EXIT_RECONCILED" if trade.protection_state == "ACTIVE" else "EXTERNAL_CLOSE_RECONCILED")
         keep = None
@@ -10548,8 +10578,11 @@ class TradingEngine:
             return
 
     async def _process_ema_exit_real(self, trade: Trade) -> None:
-        """Execute/reconcile one H1 exit while leaving Binance SL/TP armed until flat."""
+        """Execute/reconcile one M15 forced exit after the final M5 bar is processed."""
         if not trade.real_enabled or trade.status != "FILLED":
+            return
+        trigger_close_ms = int(trade.ema_exit_trigger_close_ms or 0)
+        if trigger_close_ms and self._m5_last_closed_end_ms.get(trade.pair, 0) < trigger_close_ms:
             return
         if self._real_ip_permission_blocked_for_current_route():
             return
@@ -10592,7 +10625,7 @@ class TradingEngine:
             try:
                 await self._close_trade(
                     trade, reference,
-                    trade.ema_exit_reason or "EMA_H1_INVERSE_CROSS",
+                    trade.ema_exit_reason or "M15_FORCED_EXIT",
                     keep_protections_until_flat=True,
                     client_order_id=trade.ema_exit_client_order_id,
                 )
@@ -10635,117 +10668,23 @@ class TradingEngine:
                     await self._save_active_state()
 
     async def _process_ema_exit_candle(self, symbol: str, kline: dict[str, Any]) -> None:
-        """Consume only a confirmed H1 close; intrabar EMA crosses are ignored."""
-        if not isinstance(kline, dict) or kline.get("i") != "1h" or kline.get("x") is not True:
-            return
-        try:
-            open_ms = int(kline["t"])
-            close_ms = open_ms + H1_MS
-            close_price = Decimal(str(kline["c"]))
-            if not close_price.is_finite() or close_price <= 0:
-                return
-        except (KeyError, TypeError, ValueError, InvalidOperation, OverflowError):
-            return
-
-        changed = False
-        for trade in list(self.active_trades.values()):
-            if (
-                trade.pair != symbol or trade.status != "FILLED"
-                or self._ema_exit_periods(trade) is None
-            ):
-                continue
-            if trade.ema_exit_state in {"EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN", "CLEANUP_WAIT_API", "SUPERSEDED_BY_PROTECTION", "DISABLED", "UNAVAILABLE"}:
-                continue
-            if trade.ema_exit_state not in {"ACTIVE", "ACTIVE_WITH_GAP"}:
-                self._schedule_ema_exit_initialization(trade)
-                continue
-            last_open = int(trade.ema_exit_last_open_ms or 0)
-            if open_ms <= last_open:
-                continue  # duplicate close event after reconnect
-            if last_open <= 0 or open_ms != last_open + H1_MS:
-                trade.ema_exit_state = "BACKFILL_PENDING"
-                trade.ema_exit_last_error = (
-                    f"H1 event gap: last={last_open}, current={open_ms}; reconstructing closed candles."
-                )
-                changed = True
-                self._schedule_ema_exit_initialization(trade)
-                continue
-            if trade.ema_exit_last_fast is None or trade.ema_exit_last_slow is None:
-                trade.ema_exit_state = "INIT_RETRY"
-                self._schedule_ema_exit_initialization(trade)
-                changed = True
-                continue
-            periods = self._ema_exit_periods(trade)
-            if periods is None:
-                trade.ema_exit_state = "DISABLED"
-                continue
-            fast_len, slow_len = periods
-            alpha_fast = 2.0 / (fast_len + 1.0)
-            alpha_slow = 2.0 / (slow_len + 1.0)
-            previous_fast = float(trade.ema_exit_last_fast)
-            previous_slow = float(trade.ema_exit_last_slow)
-            current_fast = previous_fast + alpha_fast * (float(close_price) - previous_fast)
-            current_slow = previous_slow + alpha_slow * (float(close_price) - previous_slow)
-            cross_direction = volumatic.ema_cross_direction(
-                previous_fast, previous_slow, current_fast, current_slow
-            )
-            bearish_cross = cross_direction == "BEARISH"
-            bullish_cross = cross_direction == "BULLISH"
-            trade.ema_exit_last_open_ms = open_ms
-            trade.ema_exit_last_fast = Decimal(str(current_fast))
-            trade.ema_exit_last_slow = Decimal(str(current_slow))
-            trade.ema_exit_last_close = close_price
-            changed = True
-            should_exit = (
-                (trade.direction == "LONG" and bearish_cross)
-                or (trade.direction == "SHORT" and bullish_cross)
-            )
-            if not self.h1_enabled:
-                continue  # update EMA baseline only; ignore H1 crosses while the master switch is OFF
-            if not should_exit or close_ms <= max(
-                int((trade.filled_at or trade.created_at).timestamp() * 1000),
-                int(trade.ema_exit_ignore_cross_until_ms or 0),
-            ):
-                continue
-            reason = "EMA_H1_BEARISH_CROSS" if trade.direction == "LONG" else "EMA_H1_BULLISH_CROSS"
-            trade.ema_exit_state = "EXIT_PENDING"
-            trade.ema_exit_trigger_close_ms = close_ms
-            trade.ema_exit_trigger_price = close_price
-            trade.ema_exit_reason = reason
-            trade.ema_exit_last_error = None
-            log.warning(
-                "[EMA EXIT] confirmed H1 inverse cross | %s %s EMA%s/%s close=%s | SL=%s TP=%s remain armed",
-                trade.pair, trade.direction, fast_len, slow_len, close_price,
-                trade.stop_loss, trade.take_profit,
-            )
-            if not trade.real_enabled:
-                # Paper mirrors backtest's H1-close price. Earlier local SL/TP
-                # handling removes the trade before this callback can reach it.
-                await self._finalize_trade(trade, "CLOSED", close_price, reason)
-            else:
-                await self.reply(
-                    f"🔔 EMA H1 EXIT DETECTED • {trade.pair} {trade.direction}\n"
-                    f"EMA: {fast_len}/{slow_len}\n"
-                    f"H1 close: {fmt_price(close_price)}\n"
-                    f"SL: {fmt_price(trade.stop_loss)} · TP: {fmt_price(trade.take_profit)}\n"
-                    "SL/TP tetap aktif sampai MARKET close terkonfirmasi."
-                )
-        if changed:
-            await self._save_active_state()
-            await self._sync_ws_symbols()
+        """Compatibility no-op. No H1 kline is consumed for position exits."""
+        return
 
     async def _on_kline(self, symbol: str, kline: dict[str, Any]) -> None:
-        """Route M15 scanner and H1 position-exit candles through one cache owner."""
+        """Route only confirmed M15 strategy and active-position M5 candles."""
         if not isinstance(kline, dict):
             return
         self.rest.update_kline_from_ws(symbol, kline)
         interval = str(kline.get("i") or "").lower()
+        pair = normalize_symbol(symbol)
         if interval == "15m":
-            await self._handle_closed_m15_bubble(normalize_symbol(symbol), kline)
-        elif interval == "1h":
-            await self._process_ema_exit_candle(normalize_symbol(symbol), kline)
+            await self._handle_closed_m15_bubble(pair, kline)
+        elif interval == "5m":
+            await self._process_m5_position_candle(pair, kline)
 
     async def _on_price(self, symbol: str, price: Decimal, event_time_ms: int, aggregate_trade_id: int = -1) -> None:
+        """Keep the latest trade price; entry/SL/TP are candle-driven in this baseline."""
         symbol = normalize_symbol(symbol)
         key = (int(event_time_ms), int(aggregate_trade_id))
         previous_key = self._last_market_event_key.get(symbol)
@@ -10753,41 +10692,6 @@ class TradingEngine:
             return
         self._last_market_event_key[symbol] = key
         self.prices[symbol] = PriceSnapshot(symbol, price, int(event_time_ms), now_utc())
-        for trade in list(self.active_trades.values()):
-            if trade.pair != symbol:
-                continue
-            if trade.status == "PENDING" and trade.pair in self.banned_symbols:
-                # /banned attempts exchange cancellation; never let a local
-                # touch-watch submit a fresh MARKET entry after the ban.
-                continue
-            if trade.status == "PENDING" and trade.real_intent and not trade.real_enabled:
-                if not trade.entry_inflight and now_utc() < trade.expires_at:
-                    touched = price <= trade.entry if trade.direction == "LONG" else price >= trade.entry
-                    if touched:
-                        self._schedule_market_entry(trade, price, "WEBSOCKET_TOUCH")
-                continue
-            if trade.status == "PENDING" and not trade.real_enabled:
-                if now_utc() < trade.expires_at:
-                    touched = price <= trade.entry if trade.direction == "LONG" else price >= trade.entry
-                    if touched:
-                        await self._fill_paper_entry_if_capacity(
-                            trade, trade.entry, "PAPER_WEBSOCKET_LIMIT_TOUCH"
-                        )
-            elif trade.status == "FILLED" and not trade.real_enabled:
-                stop = trade.stop_loss or trade.reference_sl
-                target = trade.take_profit
-                if stop is None or target is None:
-                    continue
-                reason = None
-                fill = None
-                if trade.direction == "LONG":
-                    if price <= stop: reason, fill = "STOP_LOSS", stop
-                    elif price >= target: reason, fill = "TAKE_PROFIT", target
-                else:
-                    if price >= stop: reason, fill = "STOP_LOSS", stop
-                    elif price <= target: reason, fill = "TAKE_PROFIT", target
-                if reason:
-                    await self._finalize_trade(trade, "CLOSED", fill, reason)
 
     @staticmethod
     def _exchange_event_time(row: dict[str, Any]) -> datetime:
@@ -10912,7 +10816,7 @@ class TradingEngine:
             real_enabled=True,
             real_state=("REAL_EXCHANGE_ADOPTED" if status == "FILLED" else "REAL_EXCHANGE_ADOPTED_PENDING"),
             ema_exit_state=("UNINITIALIZED" if adopted_h1_pair else "DISABLED"),
-            ema_exit_last_error=(None if adopted_h1_pair else "Forced close H1 membutuhkan pasangan /EMA FAST SLOW; konfigurasi saat adopsi bukan dual EMA."),
+            ema_exit_last_error="Exchange-adopted position: no M15 strategy forced-exit state; review its Binance protection independently.",
             position_side=position_side or "BOTH",
             entry_order_id=order_id,
             entry_client_order_id=client_order_id,
@@ -11548,32 +11452,21 @@ class TradingEngine:
             if order.get("symbol")
         )
         scanner_symbols = set(self._scanner_symbols) if self.scan_enabled else set()
-        # Keep M15 candles flowing while any unfilled local signal trace exists,
-        # even when the broad scanner has been switched OFF.
+        # M15 candles are required while a setup is pending and throughout every
+        # filled M15 position's bubble/sideways forced-exit lifecycle.
         scanner_symbols.update(
             t.pair for t in self.active_trades.values()
-            if t.status == "PENDING" and t.timeframe == "M15"
-            and not t.entry_inflight and not t.real_enabled
+            if t.status in {"PENDING", "FILLED"} and t.timeframe == "M15"
         )
-        exit_symbols = {
+        # M5 OHLC is streamed only for active positions, never for the full universe.
+        protection_symbols = {
             t.pair for t in self.active_trades.values()
-            if t.status == "FILLED"
-            and self._ema_exit_periods(t) is not None
-            and (
-                not t.real_enabled
-                or t.exchange_adopted
-                or t.protection_state in {"ACTIVE", "PARTIAL", "INVALID_RISK", "ERROR_REJECTED"}
-                or t.ema_exit_state in {"UNINITIALIZED", "INITIALIZING", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING", "ACTIVE", "ACTIVE_WITH_GAP"}
-            )
-            and t.ema_exit_state not in {
-                "DISABLED", "UNAVAILABLE", "EXIT_PENDING", "CLOSE_SUBMITTING",
-                "CLOSE_VERIFY", "CLOSE_UNKNOWN", "CLEANUP_WAIT_API",
-                "SUPERSEDED_BY_PROTECTION",
-            }
+            if t.status == "FILLED" and t.timeframe == "M15"
         }
-        desired = trade_symbols | scanner_symbols | exit_symbols
+        desired = trade_symbols | scanner_symbols | protection_symbols
         await self.ws.set_symbols(
-            trade_symbols, scanner_symbols=scanner_symbols, exit_symbols=exit_symbols
+            trade_symbols, scanner_symbols=scanner_symbols,
+            protection_symbols=protection_symbols,
         )
         for key in list(self._live_signal_candles):
             _tf, pair = key.split(":", 1)
@@ -11675,7 +11568,7 @@ class TradingEngine:
             await self._save_runtime_settings()
             await self._save_real_guard_checkpoint()
             await self.reply(
-                "🟢 REAL ON. Entry baru: level disimpan lokal, MARKET order dikirim ke Binance USD-M Futures LIVE saat harga menyentuh level.\n"
+                "🟢 REAL ON. Entry baru: satu MARKET order dikirim pada window open candle M15 berikutnya; tidak ada LIMIT touch-entry. Harga fill REAL mengikuti eksekusi Binance dan dapat berbeda dari open backtest.\n"
                 f"Live snapshot : {adopted_positions} posisi · {adopted_orders} open order dimuat dari Binance.\n"
                 f"Equity baseline: {'baru diambil dari Binance' if balance_baseline_created else 'checkpoint lokal dipertahankan'}; selanjutnya dihitung lokal dari PnL + floating.\n"
                 f"Private User Data WS: {self.user_ws.status}. ORDER_TRADE_UPDATE + ACCOUNT_UPDATE menjaga /trade realtime; /trade tidak memanggil REST.\n"
@@ -11683,7 +11576,7 @@ class TradingEngine:
             )
         elif arg == "off":
             self.real_mode = False
-            await self.reply("🟡 REAL OFF untuk entry baru. Pending lokal tidak akan dieksekusi (dibatalkan saat tersentuh); posisi REAL yang sudah ada tetap direkonsiliasi dan dikelola sampai selesai.")
+            await self.reply("🟡 REAL OFF untuk entry baru. Pending entry-window yang belum dikirim tidak dieksekusi; posisi REAL yang sudah ada tetap direkonsiliasi dan dikelola sampai selesai.")
         else:
             await self.reply(f"REAL: {'ON' if self.real_mode else 'OFF'}\nGunakan /real on atau /real off.")
 
@@ -11691,180 +11584,37 @@ class TradingEngine:
         parts = str(text or "").split()
         if len(parts) == 1:
             await self.reply(
-                f"VOLUMATIC TREND LENGTH: {self.trend_length}\n"
-                f"Default fresh session: {volumatic.DEFAULT_TREND_LENGTH}\n"
-                "Input: semua bilangan bulat positif. Data Binance per request maksimal 1.500 candle; nilai sangat besar dapat menunggu warm-up dan belum menghasilkan sinyal.\n\n"
-                "Gunakan /length <angka>, misalnya /length 89 atau /length 500.\n"
-                "Length berlaku untuk EMA-SWMA dan EMA close Volumatic Trend; ATR tetap 200.\n"
-                "Perubahan berlaku pada sinyal baru dan scanner akan membangun ulang konteks candle aktif."
+                "VOLUMATIC LENGTH: 100 (LOCKED BASELINE)\n"
+                "EMA-SWMA(100) + EMA(Close, 100).\n"
+                "Baseline backtest memakai LEN100; nilai lain ditolak agar konfigurasi tidak berbeda dari strategi aktif."
             )
             return
-        if len(parts) != 2:
-            await self.reply("Gunakan /length <angka> dengan bilangan bulat positif, misalnya /length 89.")
+        if len(parts) != 2 or parts[1] != "100":
+            await self.reply("❌ Length dikunci pada 100 sesuai baseline backtest. Gunakan /length 100 untuk konfirmasi.")
             return
-        try:
-            selected = volumatic.normalize_trend_length(parts[1])
-        except ValueError as exc:
-            await self.reply(f"❌ {exc}")
-            return
-        old = self.trend_length
-        if selected == old:
-            await self.reply(f"Trend length sudah {selected}.")
-            return
-
-        self.trend_length = selected
-        # Invalidate cached contexts and restart scanner cursor so every symbol
-        # in the next pass is evaluated with the same new indicator length.
-        self._live_signal_candles.clear()
-        self._live_signal_last_eval.clear()
-        self._live_signal_seen.clear()
-        self._bubble_trace_states.clear()
-        self.last_processed_candles.clear()
-        self._scan_resume_cursor = 0
-        self._scan_resume_boundary_ms = 0
-        self._scan_resume_trend_length = selected
-        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
-        await self._save_runtime_settings()
-        await self.reply(
-            f"✅ VOLUMATIC LENGTH UPDATED\n\n"
-            f"Previous : {old}\n"
-            f"Current  : {selected}\n"
-            f"EMA1     : EMA-SWMA({selected})\n"
-            f"EMA2     : EMA(Close, {selected})\n"
-            f"ATR      : {volumatic.ATR_LENGTH} (unchanged)\n\n"
-            "Cache indikator dibangun ulang. Pengaturan berlaku untuk sinyal berikutnya.\n"
-            "Catatan: /try berikutnya memulai fresh session dengan default 100."
-        )
-        log.info("[CONFIG] Volumatic length changed: %s -> %s", old, selected)
+        await self.reply("✅ Konfigurasi tetap LEN100. Tidak ada perubahan state.")
 
     async def _handle_h1(self, text: str) -> None:
         parts = str(text or "").split()
         if len(parts) == 1:
-            state = "ON" if self.h1_enabled else "OFF"
+            self.h1_enabled = True
             await self.reply(
-                f"H1 LOGIC: {state}\n\n"
-                f"ENTRY FILTER : {state} — sinyal baru wajib lolos directional EMA H1 saat ON.\n"
-                f"FORCED CLOSE: {state} — posisi LONG ditutup pada bearish EMA cross H1; "
-                "posisi SHORT ditutup pada bullish EMA cross H1 saat ON.\n"
-                "Gunakan /EMA FAST SLOW (contoh /EMA 9 21); pair H1 tiap posisi terlihat di /trade.\n\n"
-                "Gunakan /H1 on atau /H1 off. Saklar ini mengatur kedua logika sekaligus.\n"
-                "Saat OFF, EMA H1 tetap diperbarui sebagai baseline agar cross yang terjadi selama OFF "
-                "tidak memicu forced close setelah H1 dinyalakan kembali. SL/TP exchange tidak diubah."
+                "H1 EMA9/21: ON (LOCKED)\n"
+                "Fungsi: filter arah ENTRY saja, memakai candle H1 yang sudah tertutup.\n"
+                "Forced exit H1: DISABLED. Forced exit strategi dijalankan pada close M15 melalui opposite bubble atau sideways EMA-distance.\n"
+                "Gunakan /H1 on untuk memeriksa baseline. /H1 off ditolak agar hasil tidak menyimpang dari backtest."
             )
             return
         if len(parts) != 2 or parts[1].lower() not in {"on", "off"}:
-            await self.reply("Gunakan /H1 on atau /H1 off.")
+            await self.reply("Gunakan /H1 on. Filter H1 adalah syarat wajib entry pada baseline.")
             return
-
-        enabled = parts[1].lower() == "on"
-        if enabled:
-            try:
-                active_ema_config = volumatic.normalize_ema_filter_length(self.ema_filter_length)
-            except (TypeError, ValueError):
-                active_ema_config = None
-            if not isinstance(active_ema_config, tuple):
-                await self.reply(
-                    "❌ H1 LOGIC tidak bisa ON tanpa pasangan EMA ganda. "
-                    "Atur /EMA FAST SLOW terlebih dahulu, contoh /EMA 9 21. "
-                    "Forced close membutuhkan cross EMA fast/slow yang terkonfirmasi pada candle H1 tertutup."
-                )
-                return
-        previous = self.h1_enabled
-        if enabled == previous:
-            repaired = 0
-            if enabled:
-                for trade in list(self.active_trades.values()):
-                    if trade.status == "FILLED":
-                        before = trade.ema_exit_state
-                        self._bind_trade_h1_ema_config(trade)
-                        if trade.ema_exit_state in {"DISABLED", "UNAVAILABLE"} and self._ema_exit_periods(trade) is not None:
-                            trade.ema_exit_state = "UNINITIALIZED"
-                            trade.ema_exit_last_error = None
-                            self._ema_exit_last_retry.pop(trade.trade_id, None)
-                        self._schedule_ema_exit_initialization(trade)
-                        if before != trade.ema_exit_state or trade.trade_id in self._ema_exit_init_tasks:
-                            repaired += 1
-                await self._save_active_state()
-                await self._sync_ws_symbols()
-                await self.reply(
-                    f"H1 LOGIC tetap ON. Pemeriksaan ulang posisi FILLED selesai; warm-up/repair dipicu: {repaired}.\n"
-                    "Gunakan /trade untuk melihat nilai EMA H1 candle terakhir dan status exit tiap posisi."
-                )
-            else:
-                await self.reply("H1 LOGIC sudah OFF. Kedua logika tidak berubah.")
+        if parts[1].lower() == "off":
+            self.h1_enabled = True
+            await self.reply("❌ H1 entry filter tidak dapat dimatikan pada baseline. H1 EMA9/21 tetap ON; tidak ada H1 forced exit.")
             return
+        self.h1_enabled = True
+        await self.reply("✅ H1 EMA9/21 tetap ON sebagai filter entry saja. H1 forced exit tetap nonaktif.")
 
-        self.h1_enabled = enabled
-        self._h1_toggle_generation += 1
-        # A scan must not mix H1 filter modes inside one batch. Re-scan the
-        # current universe with the new setting; no active trade is modified.
-        self._signal_retries.clear()
-        self._live_signal_candles.clear()
-        self._live_signal_last_eval.clear()
-        self._live_signal_seen.clear()
-        self._bubble_trace_states.clear()
-        self.last_processed_candles.clear()
-        self._scan_resume_cursor = 0
-        self._scan_resume_boundary_ms = 0
-        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
-        await self._save_runtime_settings()
-
-        state = "ON" if enabled else "OFF"
-        if enabled:
-            # The last fully closed H1 candle at activation becomes the new
-            # baseline boundary. Any recovered candle at/before it is not an
-            # actionable cross because forced close was OFF during that period.
-            activation_boundary_ms = (int(time.time() * 1000) // H1_MS) * H1_MS
-            for trade in list(self.active_trades.values()):
-                if trade.status == "FILLED":
-                    trade.ema_exit_ignore_cross_until_ms = max(
-                        int(trade.ema_exit_ignore_cross_until_ms or 0), activation_boundary_ms
-                    )
-                    self._bind_trade_h1_ema_config(trade)
-                    if trade.ema_exit_state in {"DISABLED", "UNAVAILABLE"} and self._ema_exit_periods(trade) is not None:
-                        trade.ema_exit_state = "UNINITIALIZED"
-                        trade.ema_exit_last_error = None
-                        self._ema_exit_last_retry.pop(trade.trade_id, None)
-                    self._schedule_ema_exit_initialization(trade)
-            detail = (
-                "Filter entry H1 kembali wajib lolos. Forced close mengikuti cross H1 yang "
-                "terkonfirmasi setelah baseline EMA terbaru; cross yang terjadi ketika OFF diabaikan."
-            )
-        else:
-            # An inverse cross that has been detected but whose MARKET close has
-            # not been submitted yet can still be cancelled by this switch.
-            # Once submission starts, retain reconciliation to avoid duplicate or
-            # ambiguous close orders.
-            cancelled_pending = 0
-            for trade in self.active_trades.values():
-                if (
-                    trade.status == "FILLED"
-                    and trade.ema_exit_state == "EXIT_PENDING"
-                    and not trade.ema_exit_client_order_id
-                    and int(trade.ema_exit_attempts or 0) == 0
-                ):
-                    trade.ema_exit_state = "ACTIVE" if trade.ema_exit_last_fast is not None and trade.ema_exit_last_slow is not None else "UNINITIALIZED"
-                    trade.ema_exit_trigger_close_ms = None
-                    trade.ema_exit_trigger_price = None
-                    trade.ema_exit_reason = None
-                    trade.ema_exit_last_error = "Forced close H1 dibatalkan karena /H1 off sebelum MARKET close dikirim."
-                    cancelled_pending += 1
-            detail = (
-                "Filter entry H1 dinonaktifkan. Cross H1 tidak lagi memicu forced close. "
-                "Close yang sudah mulai dikirim ke Binance tetap direkonsiliasi; SL/TP tetap aktif."
-            )
-            if cancelled_pending:
-                detail += f"\nPending close yang belum dikirim dibatalkan: {cancelled_pending}."
-
-        await self._save_active_state()
-        await self._sync_ws_symbols()
-        await self.reply(
-            f"✅ H1 LOGIC {state}\n\n"
-            f"ENTRY FILTER : {state}\nFORCED CLOSE: {state}\n\n{detail}"
-        )
-        log.info("[CONFIG] H1 master switch: %s -> %s", "ON" if previous else "OFF", state)
-
-    @staticmethod
     def _symbols_from_command(text: str) -> list[str]:
         parts = str(text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
@@ -11947,7 +11697,7 @@ class TradingEngine:
         await self.reply(
             f"✅ PERMANENT BAN SAVED\nAdded: {added_text}\nTotal banned: {len(self.banned_symbols)}"
             f"\nPending entries cancelled: {cancelled}{extra}\n"
-            "Posisi yang sudah FILLED tidak ditutup oleh perintah ban; posisi tetap dikelola oleh SL/TP dan H1."
+            "Perintah ban hanya memblokir entry baru. Trade strategi M15 yang sudah FILLED tetap mengikuti SL/TP dan forced exit M15; posisi exchange-adopted harus ditinjau terpisah."
         )
         log.info("[BAN] permanent symbols updated | added=%s | total=%s", added, len(self.banned_symbols))
 
@@ -11974,96 +11724,20 @@ class TradingEngine:
     async def _handle_ema(self, text: str) -> None:
         parts = str(text or "").split()
         if len(parts) == 1:
-            active = ema_filter_label(self.ema_filter_length)
-            if isinstance(self.ema_filter_length, tuple):
-                rule = (
-                    f"BLUE/LONG hanya jika EMA{self.ema_filter_length[0]} > EMA{self.ema_filter_length[1]}.\n"
-                    f"RED/SHORT hanya jika EMA{self.ema_filter_length[0]} < EMA{self.ema_filter_length[1]}."
-                )
-            elif self.ema_filter_length is not None:
-                rule = (
-                    f"BLUE/LONG hanya jika close candle H4 terakhir > EMA{self.ema_filter_length}.\n"
-                    f"RED/SHORT hanya jika close candle H4 terakhir < EMA{self.ema_filter_length}."
-                )
-            else:
-                rule = "Filter EMA OFF: BLUE dan RED tidak memakai filter EMA."
             await self.reply(
-                f"Directional EMA filter: {active}\n{rule}\n"
-                "Pair yang masih punya posisi/order aktif diabaikan sampai SL/TP atau close manual.\n\n"
-                "Single: /EMA 89 (close H4 dibandingkan EMA89) atau /EMA off.\n"
-                "Dual: /EMA 89 95 (LONG jika EMA89 > EMA95; SHORT jika EMA89 < EMA95).\n"
-                "Dua angka otomatis diurutkan: periode lebih kecil menjadi EMA fast, lebih besar menjadi EMA slow.\n\n"
-                "BTCUSDT.P H4 juga menjadi filter wajib: LONG hanya jika BTC EMA fast > slow; SHORT hanya jika fast < slow. "
-                "Filter BTC memakai periode dual /EMA yang sama. Mode single atau OFF tidak dapat membentuk pasangan BTC fast/slow, sehingga entry baru diblokir."
+                "EMA CONFIGURATION: LOCKED EMA9/EMA21\n"
+                "H4 ALT : LONG jika EMA9 > EMA21; SHORT jika EMA9 < EMA21.\n"
+                "H4 BTC : arah EMA9/EMA21 wajib selaras dengan posisi.\n"
+                "H1 ALT : aturan EMA9/EMA21 yang sama sebagai filter ENTRY saja.\n"
+                "M15 ALT: signed (EMA50-EMA100)/EMA100 × 100, dikalikan arah posisi, harus >= 0.075%.\n"
+                "Konfigurasi EMA lain/OFF ditolak agar tetap identik dengan backtest."
             )
             return
-        if len(parts) not in (2, 3):
-            await self.reply("Gunakan /EMA <angka>, /EMA off, atau dua angka seperti /EMA 89 95.")
-            return
-        raw_selection: Any = parts[1] if len(parts) == 2 else (parts[1], parts[2])
-        try:
-            selected = volumatic.normalize_ema_filter_length(raw_selection)
-        except ValueError as exc:
-            await self.reply(f"❌ {exc}\nContoh: /EMA 89, /EMA 89 95, atau /EMA off.")
-            return
-        if self.h1_enabled and not isinstance(selected, tuple):
-            await self.reply(
-                "❌ H1 LOGIC sedang ON dan memerlukan dual EMA untuk forced close. "
-                "Gunakan dua periode seperti /EMA 9 21, atau matikan /H1 off sebelum memakai single/OFF."
-            )
-            return
-        old = self.ema_filter_length
-        self.ema_filter_length = selected
-        # Existing positions keep their own H1 snapshot. Only trades with no
-        # usable pair are backfilled from this newly selected dual configuration.
-        if isinstance(selected, tuple):
-            for active_trade in list(self.active_trades.values()):
-                if active_trade.status == "FILLED" and self._ema_exit_periods(active_trade) is None:
-                    self._bind_trade_h1_ema_config(active_trade)
-                    self._schedule_ema_exit_initialization(active_trade)
-            await self._sync_ws_symbols()
-        # Queued signals carry their old EMA snapshot; discard them when periods change.
-        self._signal_retries.clear()
-        # A new EMA configuration invalidates cached signal and scan cursors.
-        self._live_signal_candles.clear()
-        self._live_signal_last_eval.clear()
-        self._live_signal_seen.clear()
-        self._bubble_trace_states.clear()
-        self.last_processed_candles.clear()
-        self._scan_resume_cursor = 0
-        self._scan_resume_boundary_ms = 0
-        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
-        await self._save_runtime_settings()
-        old_text = ema_filter_label(old)
-        new_text = ema_filter_label(selected)
-        if selected is None:
-            rule = "Filter arah dinonaktifkan; BLUE dapat membuka LONG dan RED dapat membuka SHORT."
-        elif isinstance(selected, tuple):
-            rule = (
-                f"LONG hanya jika EMA{selected[0]} > EMA{selected[1]}.\n"
-                f"SHORT hanya jika EMA{selected[0]} < EMA{selected[1]}.\n"
-                "Jika kedua EMA sama, entry baru ditolak."
-            )
+        valid = len(parts) == 3 and {parts[1], parts[2]} == {"9", "21"}
+        if valid:
+            await self.reply("✅ EMA9/EMA21 sudah aktif dan terkunci sesuai baseline. Tidak ada perubahan state.")
         else:
-            rule = (
-                f"LONG hanya jika close candle H4 terakhir > EMA{selected}.\n"
-                f"SHORT hanya jika close candle H4 terakhir < EMA{selected}.\n"
-                "Close tepat pada EMA menolak entry baru."
-            )
-        btc_rule = (
-            f"BTCUSDT.P H4: LONG jika EMA{selected[0]} > EMA{selected[1]}; "
-            f"SHORT jika EMA{selected[0]} < EMA{selected[1]}."
-            if isinstance(selected, tuple)
-            else "BTCUSDT.P H4: filter wajib membutuhkan /EMA FAST SLOW. Mode single/OFF akan memblokir entry baru."
-        )
-        await self.reply(
-            f"✅ EMA FILTER UPDATED\n\nPrevious : {old_text}\nCurrent  : {new_text}\n\n{rule}\n"
-            f"{btc_rule}\n"
-            "Filter H1 (pair yang sama, periode /EMA yang sama, aturan arah sama dengan H4) juga wajib lolos.\n"
-            "Kedua filter H4 memakai candle yang sudah ditutup.\n"
-            "Sinyal ketika pair masih memiliki posisi/order aktif diabaikan sampai SL/TP atau close manual."
-        )
-        log.info("[CONFIG] EMA directional filter: %s -> %s", old_text, new_text)
+            await self.reply("❌ EMA dikunci pada pasangan 9/21. H4 ALT + H4 BTC + H1 ALT memakai EMA9/EMA21.")
 
     def _reset_scan_after_supertrend_change(self) -> None:
         self._live_signal_candles.clear()
@@ -12090,144 +11764,40 @@ class TradingEngine:
 
     async def _handle_rr_min(self, text: str) -> None:
         parts = str(text or "").split()
-        if len(parts) == 1:
-            await self.reply(
-                f"RR_MIN: {self.rr_min}R\nRR_MAX: {self.rr_max}R\n\n"
-                "RR_MIN adalah TP dasar/fallback dan batas bawah pencarian liquidity pool.\n"
-                "Gunakan /RR_MIN <angka>, contoh /RR_MIN 3 atau /RR_MIN 2.5.\n"
-                f"Nilai harus > 0 dan tidak boleh melebihi RR_MAX ({self.rr_max}).\n"
-                "Perubahan berlaku untuk sinyal baru; pending/filled trade yang sudah ada tetap memakai RR saat dibuat."
-            )
-            return
-        if len(parts) != 2:
-            await self.reply("Gunakan /RR_MIN <angka>, contoh /RR_MIN 3 atau /RR_MIN 2.5.")
-            return
-        try:
-            selected = Decimal(str(volumatic.normalize_rr_value(parts[1], "RR_MIN")))
-        except ValueError as exc:
-            await self.reply(f"❌ {exc}")
-            return
-        if selected > self.rr_max:
-            await self.reply(f"❌ RR_MIN {selected} tidak boleh lebih besar dari RR_MAX {self.rr_max}.")
-            return
-        old = self.rr_min
-        if selected == old:
-            await self.reply(f"RR_MIN sudah {selected}R.")
-            return
-        self.rr_min = selected
-        self._reset_scan_after_rr_change()
-        await self._save_runtime_settings()
         await self.reply(
-            f"✅ RR_MIN UPDATED\n\nPrevious: {old}R\nCurrent : {self.rr_min}R\n"
-            f"RR_MAX  : {self.rr_max}R\n\n"
-            f"TP dasar/fallback sekarang 1:{self.rr_min}. Liquidity pool dicari pada rentang "
-            f"1:{self.rr_min} sampai 1:{self.rr_max}, lalu dipilih pool paling jauh yang masih masuk batas.\n"
-            "Trade yang sudah dibuat tidak berubah."
+            "RR_MIN: 3R (LOCKED BASELINE)\n"
+            "RR_MAX: 5R (LOCKED BASELINE)\n"
+            "TP fallback adalah 3R. Pool Volume Liquidity Trend M15 terdekat yang valid dalam rentang 3R–5R dipilih; jika tidak ada, TP tetap 3R."
+            if len(parts) == 1 or (len(parts) == 2 and parts[1] == "3")
+            else "❌ RR_MIN dikunci pada 3R sesuai baseline backtest."
         )
-        log.info("[CONFIG] RR_MIN changed: %s -> %s | RR_MAX=%s", old, self.rr_min, self.rr_max)
 
     async def _handle_rr_max(self, text: str) -> None:
         parts = str(text or "").split()
-        if len(parts) == 1:
-            await self.reply(
-                f"RR_MIN: {self.rr_min}R\nRR_MAX: {self.rr_max}R\n\n"
-                "RR_MAX adalah batas maksimal reward untuk memperpanjang TP ke liquidity pool.\n"
-                "Gunakan /RR_MAX <angka>, contoh /RR_MAX 4 atau /RR_MAX 4.5.\n"
-                f"Nilai harus >= RR_MIN ({self.rr_min}) dan maksimal {volumatic.MAX_RR_VALUE:g}.\n"
-                "Perubahan berlaku untuk sinyal baru; pending/filled trade yang sudah ada tetap memakai RR saat dibuat."
-            )
-            return
-        if len(parts) != 2:
-            await self.reply("Gunakan /RR_MAX <angka>, contoh /RR_MAX 4 atau /RR_MAX 4.5.")
-            return
-        try:
-            selected = Decimal(str(volumatic.normalize_rr_value(parts[1], "RR_MAX")))
-        except ValueError as exc:
-            await self.reply(f"❌ {exc}")
-            return
-        if selected < self.rr_min:
-            await self.reply(f"❌ RR_MAX {selected} tidak boleh lebih kecil dari RR_MIN {self.rr_min}.")
-            return
-        old = self.rr_max
-        if selected == old:
-            await self.reply(f"RR_MAX sudah {selected}R.")
-            return
-        self.rr_max = selected
-        self._reset_scan_after_rr_change()
-        await self._save_runtime_settings()
         await self.reply(
-            f"✅ RR_MAX UPDATED\n\nPrevious: {old}R\nCurrent : {self.rr_max}R\n"
-            f"RR_MIN  : {self.rr_min}R\n\n"
-            f"TP dasar/fallback tetap 1:{self.rr_min}. Liquidity pool dapat memperpanjang TP hingga "
-            f"maksimal 1:{self.rr_max}; dipilih pool paling jauh yang masih masuk rentang.\n"
-            "Trade yang sudah dibuat tidak berubah."
+            "RR_MIN: 3R (LOCKED BASELINE)\nRR_MAX: 5R (LOCKED BASELINE)\n"
+            "Liquidity target M15 dibatasi pada 3R–5R; tanpa pool yang valid, TP fallback 3R."
+            if len(parts) == 1 or (len(parts) == 2 and parts[1] == "5")
+            else "❌ RR_MAX dikunci pada 5R sesuai baseline backtest."
         )
-        log.info("[CONFIG] RR_MAX changed: %s -> %s | RR_MIN=%s", old, self.rr_max, self.rr_min)
 
     async def _handle_atr(self, text: str) -> None:
         parts = str(text or "").split()
-        if len(parts) == 1:
-            await self.reply(
-                f"SUPERTREND M15 ATR LENGTH: {self.supertrend_atr_length}\n"
-                f"Default: {volumatic.SUPERTREND_ATR_LENGTH}\n\n"
-                "Gunakan /ATR <angka>, contoh /ATR 14.\n"
-                f"Rentang: {volumatic.MIN_SUPERTREND_ATR_LENGTH}–{volumatic.MAX_SUPERTREND_ATR_LENGTH}.\n"
-                "Ini hanya mengubah ATR untuk garis SuperTrend/SL M15; ATR internal Volumatic tetap 200."
-            )
-            return
-        if len(parts) != 2:
-            await self.reply("Gunakan /ATR <angka> dengan bilangan bulat positif, contoh /ATR 14.")
-            return
-        try:
-            selected = volumatic.normalize_supertrend_atr_length(parts[1])
-        except ValueError as exc:
-            await self.reply(f"❌ {exc}")
-            return
-        old = self.supertrend_atr_length
-        if selected == old:
-            await self.reply(f"SuperTrend ATR Length sudah {selected}.")
-            return
-        self.supertrend_atr_length = selected
-        self._reset_scan_after_supertrend_change()
-        await self._save_runtime_settings()
         await self.reply(
-            f"✅ SUPERTREND ATR LENGTH UPDATED\n\nPrevious : {old}\nCurrent  : {selected}\n"
-            f"Factor   : {self.supertrend_factor:g}\n"
-            "History M15 dan cursor scanner disesuaikan. Berlaku untuk sinyal/order baru; SL/TP trade aktif tidak berubah."
+            "SUPERTREND M15 ATR LENGTH: 14 (LOCKED BASELINE)\n"
+            "Baseline memakai ATR14 untuk SL M15. Perubahan ATR ditolak agar tidak berbeda dari backtest."
+            if len(parts) == 1 or (len(parts) == 2 and parts[1] == "14")
+            else "❌ Supertrend ATR Length dikunci pada 14 sesuai baseline backtest."
         )
-        log.info("[CONFIG] SuperTrend M15 ATR Length changed: %s -> %s", old, selected)
 
     async def _handle_factor(self, text: str) -> None:
         parts = str(text or "").split()
-        if len(parts) == 1:
-            await self.reply(
-                f"SUPERTREND M15 FACTOR: {self.supertrend_factor:g}\n"
-                f"Default: {volumatic.SUPERTREND_FACTOR:g}\n\n"
-                "Gunakan /Factor <angka>, contoh /Factor 3 atau /Factor 2.5.\n"
-                "Desimal boleh memakai titik atau koma. Rentang: lebih besar dari 0 sampai 1000."
-            )
-            return
-        if len(parts) != 2:
-            await self.reply("Gunakan /Factor <angka>, contoh /Factor 3 atau /Factor 2.5.")
-            return
-        try:
-            selected = volumatic.normalize_supertrend_factor(parts[1])
-        except ValueError as exc:
-            await self.reply(f"❌ {exc}")
-            return
-        old = self.supertrend_factor
-        if selected == old:
-            await self.reply(f"SuperTrend Factor sudah {selected:g}.")
-            return
-        self.supertrend_factor = selected
-        self._reset_scan_after_supertrend_change()
-        await self._save_runtime_settings()
         await self.reply(
-            f"✅ SUPERTREND FACTOR UPDATED\n\nPrevious : {old:g}\nCurrent  : {selected:g}\n"
-            f"ATR Length: {self.supertrend_atr_length}\n"
-            "Cache/cursor scanner dibangun ulang. Berlaku untuk sinyal/order baru; SL/TP trade aktif tidak berubah."
+            "SUPERTREND M15 FACTOR: 2.5 (LOCKED BASELINE)\n"
+            "Perubahan factor ditolak agar penempatan SL tetap identik dengan backtest."
+            if len(parts) == 1 or (len(parts) == 2 and parts[1].replace(",", ".") == "2.5")
+            else "❌ Supertrend Factor dikunci pada 2.5 sesuai baseline backtest."
         )
-        log.info("[CONFIG] SuperTrend M15 Factor changed: %s -> %s", old, selected)
 
     async def _handle_timeframe(self, text: str) -> None:
         await self.reply(
@@ -12646,39 +12216,16 @@ class TradingEngine:
         return f"Binance snapshot: {len(live_rows)} open order aktif berhasil disinkronkan."
 
     def _trade_h1_ema_status_line(self, trade: Trade) -> str:
-        """Explain exactly which closed-H1 EMA values currently drive forced close."""
-        periods = self._ema_exit_periods(trade)
-        logic = "ON" if self.h1_enabled else "OFF"
-        if periods is None:
-            detail = trade.ema_exit_last_error or "belum ada konfigurasi dual EMA"
-            return f"EMA H1 EXIT: DISABLED • H1 {logic} • {detail}"
-        fast_len, slow_len = periods
-        fast = fmt_price(trade.ema_exit_last_fast)
-        slow = fmt_price(trade.ema_exit_last_slow)
-        if trade.ema_exit_last_fast is None or trade.ema_exit_last_slow is None:
-            values = f"EMA{fast_len}=WARMING UP · EMA{slow_len}=WARMING UP"
-            bias = "BIAS: UNKNOWN"
-        else:
-            values = f"EMA{fast_len}={fast} · EMA{slow_len}={slow}"
-            fast_value = trade.ema_exit_last_fast
-            slow_value = trade.ema_exit_last_slow
-            bias = "BIAS: BULLISH" if fast_value > slow_value else "BIAS: BEARISH" if fast_value < slow_value else "BIAS: FLAT"
-        closed_at = "-"
-        if int(trade.ema_exit_last_open_ms or 0) > 0:
-            close_ms = int(trade.ema_exit_last_open_ms) + H1_MS
-            closed_at = format_wib(datetime.fromtimestamp(close_ms / 1000.0, tz=timezone.utc))
-        source = trade.ema_exit_config_source or "UNKNOWN_SOURCE"
-        state = str(trade.ema_exit_state or "UNINITIALIZED").upper()
+        """Legacy method name retained; output now describes M15 forced exit."""
+        state = str(trade.ema_exit_state or "WAITING").upper()
+        reason = str(trade.ema_exit_reason or "-")
         trigger = ""
-        if state == "EXIT_PENDING" and trade.ema_exit_trigger_close_ms:
-            trigger = f" • TRIGGER {trade.ema_exit_reason or 'H1_CROSS'} @ {format_wib(datetime.fromtimestamp(int(trade.ema_exit_trigger_close_ms) / 1000.0, tz=timezone.utc))}"
-        error = f" • ERROR: {trade.ema_exit_last_error[:160]}" if trade.ema_exit_last_error and state not in {"ACTIVE", "ACTIVE_WITH_GAP"} else ""
-        reference_close = fmt_price(trade.ema_exit_last_close)
-        return (
-            f"EMA H1 EXIT: {values} • {bias} • H1 close: {reference_close}"
-            f" • last closed: {closed_at} • state: {state} • H1 {logic}"
-            f" • source: {source}{trigger}{error}"
-        )
+        if trade.ema_exit_trigger_close_ms:
+            trigger = " • close " + format_wib(datetime.fromtimestamp(
+                int(trade.ema_exit_trigger_close_ms) / 1000.0, tz=timezone.utc
+            ))
+        error = f" • ERROR: {trade.ema_exit_last_error[:140]}" if trade.ema_exit_last_error and state not in {"DISABLED", "ACTIVE"} else ""
+        return f"M15 FORCED EXIT: {state} • reason: {reason}{trigger}{error}"
 
     async def show_trades(self) -> None:
         snapshot_note = await self._refresh_exchange_open_orders_for_trade_view()
@@ -12719,7 +12266,7 @@ class TradingEngine:
             f"Scanner TF: {self.timeframe} • Length: {self.trend_length} • EMA filter: {current_ema}\n"
             f"SuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
             f"TP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\n"
-            f"H1 forced close: {'ON' if self.h1_enabled else 'OFF'} • current EMA: {ema_filter_label(self.ema_filter_length)}\n"
+            "H1 EMA9/21: ENTRY FILTER ON ONLY • H1 forced exit OFF\nM15 forced exit: opposite bubble / sideways EMA-distance\n"
             f"Permanent bans: {len(self.banned_symbols)}\n"
             + (f"{snapshot_note}\n" if snapshot_note else "")
         ]
@@ -12748,7 +12295,7 @@ class TradingEngine:
                         f" • Remaining: {format_qty(matching_order['remaining_qty'])}"
                     )
                 elif t.real_intent and not t.real_enabled:
-                    order_detail = "\nStatus: " + ("sedang dieksekusi (MARKET)" if t.entry_inflight else "menunggu harga menyentuh level → MARKET order (tanpa order di Binance)")
+                    order_detail = "\nStatus: " + ("sedang mengirim MARKET untuk window open M15" if t.entry_inflight else "menunggu rekonsiliasi entry MARKET dalam window M15")
                 elif t.real_enabled:
                     order_detail = f"\nBinance: {t.entry_order_status} • {t.real_state}"
                 lines.append(
@@ -12758,19 +12305,19 @@ class TradingEngine:
                     f"(RR 1:{fmt_num(t.take_profit_rr, 2)}; {t.take_profit_source}; band {t.rr_min}-{t.rr_max}R; installed after fill)\n"
                     f"SuperTrend source: ATR {t.supertrend_atr_length} • Factor {t.supertrend_factor:g}\n"
                     f"EMA H4 at signal: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
-                    f"H1 exit EMA config: {('EMA' + str(t.ema_exit_fast_length) + '/EMA' + str(t.ema_exit_slow_length)) if t.ema_exit_fast_length and t.ema_exit_slow_length else 'NO DUAL EMA'}\n"
+                    f"H1 entry EMA9/21: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
                     + (
                         "EXCHANGE ACK UNKNOWN: verifikasi clientOrderId; POST tidak akan dikirim ulang\n"
                         if t.real_enabled and t.real_submit_ambiguous
                         else (
-                            "Validity: GTC tidak disentuh selama REST cooldown; timeout 1 jam dibatalkan setelah REST pulih\n"
+                            "Legacy GTC state: hanya untuk rekonsiliasi order lama; baseline baru memakai MARKET pada window open M15\n"
                             if t.real_enabled and t.preserve_gtc_after_cooldown
                             else (
                                 f"Expires: {format_wib(t.expires_at)}\n"
                                 if t.entry_order_created_at else
-                                "Auto-expire: 1 jam setelah Binance menerima LIMIT (timer belum dimulai)\n"
+                                "Entry validity: hanya pada satu window candle M15 berikutnya\n"
                             )
                         )
                     )
@@ -13340,7 +12887,7 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nH1 logic: {'ON' if self.h1_enabled else 'OFF'} (entry filter + inverse-cross forced exit)\nSuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\nTP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
+            f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nH1 entry filter: ON (EMA9/21; entry-only)\nM15 forced exit: opposite bubble / sideways distance\nSuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\nTP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
             f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending setups (not counted): {pending} | Active positions: {filled}/{self.max_active_trades} | Live LIMITs: {live_limits}\n"
@@ -13440,15 +12987,15 @@ class TradingEngine:
             "/scan on|off|status - aktif/nonaktifkan/cek scanner M15 Volumatic + H4 EMA\n"
             "/scan schedule - lihat jadwal WIB; pilih dengan /scan schedule 1,3,6\n"
             "/timeframe - strategi tetap: H4 EMA + M15 Volumatic/Supertrend\n"
-            "/length <angka> - atur Trend Length Volumatic bebas (bilangan bulat positif; default 100)\n"
-            "/EMA <angka|off> atau /EMA <angka1> <angka2> - filter EMA single/dual bebas\n"
-            "/H1 on|off - saklar bersama filter entry H1 dan forced close saat EMA H1 cross\n"
-            f"/ATR <angka> - atur SuperTrend M15 ATR Length (default {volumatic.SUPERTREND_ATR_LENGTH})\n"
-            f"/Factor <angka> - atur SuperTrend M15 Factor (default {volumatic.SUPERTREND_FACTOR:g})\n"
-            f"/RR_MIN <angka> - RR dasar/fallback dan batas bawah liquidity (default {volumatic.RR_MIN:g})\n"
-            f"/RR_MAX <angka> - batas atas TP liquidity (default {volumatic.RR_MAX:g})\n"
+            "/length - baseline LEN100 (locked)\n"
+            "/EMA - baseline EMA9/21 (locked)\n"
+            "/H1 on - H1 EMA9/21 entry filter wajib; H1 forced exit OFF\n"
+            "/ATR - Supertrend ATR14 (locked)\n"
+            "/Factor - Supertrend factor 2.5 (locked)\n"
+            "/RR_MIN - TP fallback 3R (locked)\n"
+            "/RR_MAX - TP liquidity cap 5R (locked)\n"
             "/max [angka] - batas total pending + filled\n"
-            "/trade - lihat pending order, posisi, dan EMA H1 candle terakhir\n"
+            "/trade - lihat pending setup, posisi, proteksi SL/TP, dan status forced exit M15\n"
             "/banned [PAIR ...] - tambah ban permanen; tanpa argumen tampilkan daftar\n"
             "/unbanned PAIR ... - hapus ban permanen\n"
             "/stats - statistik trade, PnL, win rate, DD, R\n"
@@ -13469,7 +13016,7 @@ class TradingEngine:
             "/resetstats - arsipkan lalu reset statistik trade\n"
             "/reset CONFIRM - reset history/event/catatan (tanpa mengubah posisi)\n"
             "/status - status sistem\n/help - bantuan\n\n"
-            f"Aturan: BLUE=LONG, RED=SHORT; bubble M15 confirmed + filter EMA H4 + BTC H4; entry pada OPEN M15 berikutnya; SL Supertrend M15; TP dasar RR_MIN {self.rr_min}R, diperpanjang ke liquidity pool belum termitigasi paling jauh hingga RR_MAX {self.rr_max}R; posisi tidak reversal oleh bubble lawan."
+            f"Aturan baseline: BLUE=LONG / RED=SHORT pada bubble M15 confirmed LEN100; ALT H4 + BTC H4 EMA9/21 harus searah; ALT H1 EMA9/21 adalah filter entry saja; signed EMA50/100 M15 x arah posisi harus >= 0.075%; entry pada OPEN M15 berikutnya; SL statis Supertrend M15 ATR14 x 2.5; TP memilih pool Volume Liquidity Trend M15 belum termitigasi yang TERDEKAT dalam RR {self.rr_min}R–{self.rr_max}R (fallback {self.rr_min}R); SL/TP dipantau melalui OHLC M5; forced exit pada close M15 saat opposite bubble atau sideways filter gagal. Jika SL dan TP sama-sama tersentuh dalam satu candle M5, SL diprioritaskan."
         )
 
     async def _dispatch_command(self, text: str) -> None:
