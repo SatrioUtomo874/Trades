@@ -486,3 +486,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-21T04:15:01.509609+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## YGGUSDT SHORT — EXPIRED
+- Trade ID: `YGGUSDT-20261121-103321-A70655`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-21T04:15:17.829911+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
