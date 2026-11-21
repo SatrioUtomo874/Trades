@@ -492,3 +492,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-21T04:15:17.829911+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## FUSDT SHORT — EXPIRED
+- Trade ID: `FUSDT-20261121-105043-DFE2AA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-21T04:30:01.153578+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
