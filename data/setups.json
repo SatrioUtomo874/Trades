@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-21T03:47:13.548938+00:00",
+  "updated_at": "2026-11-21T03:47:18.597107+00:00",
   "active_trades": [
     {
       "trade_id": "DOODUSDT-20261120-090143-723049",
@@ -991,11 +991,11 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002183549097,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002183550033,
       "sl_client_algo_id": "VTSLSDT-20261121-104622-5AA0FD",
       "tp_client_algo_id": "VTTPSDT-20261121-104622-5AA0FD",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
@@ -1060,7 +1060,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "1766308549:NEW:NEW:0:0",
+      "last_ws_event_key": "1766308549:TRADE:FILLED:1897:111431333",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
