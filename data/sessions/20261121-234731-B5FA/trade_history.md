@@ -1,0 +1,8 @@
+# Trading Journal
+
+## UBUSDT SHORT — CLOSED
+- Trade ID: `UBUSDT-20261122-013129-F96C0D`
+- Timeframe: M15 | Signal: RED
+- Entry: 0.09481 | Exit: 0.09481
+- PnL: 0 USDT (0%) | R: 0
+- Closed: 2026-11-21T19:15:27.704855+00:00 | Reason: EXCHANGE_POSITION_FLAT_WS
