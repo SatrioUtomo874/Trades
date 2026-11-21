@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-21T19:04:06.138759+00:00",
+  "updated_at": "2026-11-21T19:04:08.758152+00:00",
   "active_trades": [
     {
       "trade_id": "BREVUSDT-20261121-234743-A00938",
@@ -666,11 +666,11 @@
       "liquidity_pool_timeframe": null,
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002186516425,
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261122-020351-ADD187",
       "tp_client_algo_id": "VTTPSDT-20261122-020351-ADD187",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
