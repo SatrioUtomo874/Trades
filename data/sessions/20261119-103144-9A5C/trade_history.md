@@ -444,3 +444,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-21T04:00:00.461534+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## LYNUSDT SHORT — CANCELED
+- Trade ID: `LYNUSDT-20261121-105209-FB862D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-21T04:00:57.042319+00:00 | Reason: PREFLIGHT_REJECTED
