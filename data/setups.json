@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-21T04:01:42.822154+00:00",
+  "updated_at": "2026-11-21T04:01:54.569073+00:00",
   "active_trades": [
     {
       "trade_id": "DOODUSDT-20261120-090143-723049",
@@ -1371,7 +1371,7 @@
       "target_notional": "10",
       "actual_notional": "0.9312",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 1101915635,
       "entry_client_order_id": "VTae6bf22fcd3788bf7f3f20ef75c3",
