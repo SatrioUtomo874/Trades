@@ -480,3 +480,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-21T04:15:01.224032+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
+## MAVUSDT SHORT — EXPIRED
+- Trade ID: `MAVUSDT-20261121-103120-708B48`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-21T04:15:01.509609+00:00 | Reason: ENTRY_WATCH_EXPIRED_1H
