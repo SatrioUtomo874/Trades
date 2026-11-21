@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-21T06:45:27.472881+00:00",
+  "updated_at": "2026-11-21T06:45:39.589428+00:00",
   "active_trades": [
     {
       "trade_id": "XPLUSDT-20261121-083258-FCCD74",
@@ -566,9 +566,9 @@
       "tp_algo_id": 4000002183582897,
       "sl_client_algo_id": "VTSLSDT-20261121-105447-F6ADA6",
       "tp_client_algo_id": "VTTPSDT-20261121-105447-F6ADA6",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "sl_algo_status": "FINISHED",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
