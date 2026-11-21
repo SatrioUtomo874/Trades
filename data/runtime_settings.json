@@ -342,12 +342,16 @@
     "M15:OGUSDT": 1795279500000,
     "M15:ONDOUSDT": 1795279500000,
     "M15:ONEUSDT": 1795279500000,
-    "M15:ONGUSDT": 1795279500000
+    "M15:ONGUSDT": 1795279500000,
+    "M15:ONTUSDT": 1795279500000,
+    "M15:ONUSDT": 1795279500000,
+    "M15:OPENUSDT": 1795279500000,
+    "M15:OPGUSDT": 1795279500000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 327,
+  "scan_resume_cursor": 331,
   "scan_resume_boundary_ms": 1795279500000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-21T16:59:03.461866+00:00"
+  "updated_at": "2026-11-21T16:59:21.133961+00:00"
 }
