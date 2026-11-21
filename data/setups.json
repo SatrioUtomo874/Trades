@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "2.4.0",
-  "updated_at": "2026-11-21T00:00:17.751789+00:00",
+  "updated_at": "2026-11-21T00:00:18.767237+00:00",
   "active_trades": [
     {
       "trade_id": "DOODUSDT-20261120-090143-723049",
@@ -488,10 +488,10 @@
       "ema_exit_trigger_close_ms": 1795219200000,
       "ema_exit_trigger_price": "7.05",
       "ema_exit_reason": "EMA_H1_BULLISH_CROSS",
-      "ema_exit_client_order_id": null,
+      "ema_exit_client_order_id": "emaexit8db45a6feceb9f267de271",
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
-      "ema_exit_attempts": 0,
+      "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-20T16:15:00+00:00",
       "status": "FILLED",
