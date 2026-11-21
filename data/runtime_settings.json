@@ -262,8 +262,8 @@
     "M15:IRYSUSDT": 1795233600000,
     "M15:JASMYUSDT": 1795233600000,
     "M15:JCTUSDT": 1795233600000,
-    "M15:JELLYJELLYUSDT": 1795232700000,
-    "M15:JOEUSDT": 1795232700000,
+    "M15:JELLYJELLYUSDT": 1795233600000,
+    "M15:JOEUSDT": 1795233600000,
     "M15:JSTUSDT": 1795232700000,
     "M15:JTOUSDT": 1795232700000,
     "M15:JUPUSDT": 1795232700000,
@@ -538,8 +538,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 248,
+  "scan_resume_cursor": 250,
   "scan_resume_boundary_ms": 1795233600000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-21T04:05:43.445328+00:00"
+  "updated_at": "2026-11-21T04:06:03.249758+00:00"
 }
