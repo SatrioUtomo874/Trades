@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-21T19:31:43.478035+00:00",
+  "updated_at": "2026-11-21T19:31:45.549059+00:00",
   "active_trades": [
     {
       "trade_id": "BREVUSDT-20261121-234743-A00938",
@@ -940,7 +940,7 @@
       "target_notional": "5.5",
       "actual_notional": "1.47805",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 1772851234,
       "entry_client_order_id": "VTcf86327d06b73f59042e8cfb5884",
