@@ -18,7 +18,7 @@ from typing import Any, Mapping
 import numpy as np
 
 STRATEGY_NAME = "VOLUMATIC_TREND"
-STRATEGY_VERSION = "2.4.0"
+STRATEGY_VERSION = "3.0.0"
 DEFAULT_TREND_LENGTH = 100
 TREND_LENGTH = DEFAULT_TREND_LENGTH  # backward-compatible public default
 MIN_TREND_LENGTH = 1
@@ -28,14 +28,14 @@ REFERENCE_BUFFER_ATR = 0.30
 SUPPORTED_EMA_FILTERS = ()  # kept for backward compatibility; all positive periods are accepted
 MIN_EMA_FILTER_LENGTH = 1
 MAX_EMA_FILTER_LENGTH = (2 ** 63) - 1
-DEFAULT_EMA_FILTER_LENGTH = 100
+DEFAULT_EMA_FILTER_LENGTH = (9, 21)
 TIMEFRAME_MS = {"M15": 900_000, "H4": 14_400_000, "D1": 86_400_000}
 TIMEFRAME_INTERVALS = {"M15": "15m", "H4": "4h", "D1": "1d"}
 SUPPORTED_TIMEFRAMES = ("M15",)
 EMA_TIMEFRAME = "H4"
 SIGNAL_TIMEFRAME = "M15"
-SUPERTREND_ATR_LENGTH = 10
-SUPERTREND_FACTOR = 3.0
+SUPERTREND_ATR_LENGTH = 14
+SUPERTREND_FACTOR = 2.5
 MIN_SUPERTREND_ATR_LENGTH = 1
 # Binance Futures returns at most 1,500 klines per request; reserve 20 bars
 # beyond the configured ATR window for adjacent indicator calculations.
@@ -43,15 +43,20 @@ MAX_SUPERTREND_ATR_LENGTH = 1480
 MAX_SUPERTREND_FACTOR = 1000.0
 RR_TARGET = 3.0  # legacy alias for the default RR_MIN
 RR_MIN = 3.0
-RR_MAX = 4.0
+RR_MAX = 5.0
 MAX_RR_VALUE = 1000.0
+H4_H1_EMA_FAST = 9
+H4_H1_EMA_SLOW = 21
+M15_DISTANCE_EMA_FAST = 50
+M15_DISTANCE_EMA_SLOW = 100
+M15_DISTANCE_THRESHOLD_PCT = 0.075
 LIQ_K = 0.05
 LIQ_LENGTH = 1
 LIQ_ATR_LEN = 200
 LIQ_ATR_MULT = 2.0
 LIQ_VOL_CUTOFF = 0.1
 LIQUIDITY_TIMEFRAME_MS = {"M5": 300_000, "M15": 900_000, "H1": 3_600_000, "H4": 14_400_000}
-LIQUIDITY_TIMEFRAMES = ("M5", "M15", "H1", "H4")
+LIQUIDITY_TIMEFRAMES = ("M15",)  # baseline TP pool source; legacy MTF helpers remain unused
 
 
 def normalize_rr_value(value: Any, field_name: str = "RR") -> float:
@@ -929,6 +934,8 @@ __all__ = [
     "SUPPORTED_EMA_FILTERS", "MIN_EMA_FILTER_LENGTH", "MAX_EMA_FILTER_LENGTH", "DEFAULT_EMA_FILTER_LENGTH", "normalize_ema_filter_length", "format_ema_filter_length", "ema_filter_lengths",
     "calculate_indicators", "detect_latest_signal", "detect_signals_since", "signals_since", "analyze",
     "confirmed_bubble_events_since", "prepare_bubble_trace_state", "advance_bubble_trace_state",
+    "detect_distance_filter_signal", "prepare_m15_distance_state", "advance_m15_distance_state",
+    "find_m15_forced_exit", "nearest_m15_liquidity_target",
     "prepare_live_visual_context", "evaluate_live_visual_context", "detect_live_visual_signal",
     "reference_risk", "trade_result_r", "ema_sma_seeded", "ema_cross_direction",
 ]
@@ -1757,4 +1764,363 @@ def detect_backtest_signal(
         "btc_ema_h4_open_time_ms": btc_h4_open_time_ms,
         "trend_length": length,
         "repaint_risk": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Baseline v3.0.0: LEN100 + H4/H1 EMA 9/21 + directional M15 EMA50/100
+# + M15-only nearest Volume Liquidity pool + M15 bubble/sideways forced exits.
+# The backtest(2).py implementation is the source of truth for numeric parity.
+# ---------------------------------------------------------------------------
+
+def nearest_m15_liquidity_target(
+    liquidity: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    index: int,
+    side: int,
+    entry: float,
+    risk: float,
+    rr_min: float = 3.0,
+    rr_max: float = 5.0,
+) -> tuple[float | None, float | None]:
+    """Choose the nearest valid, unmitigated M15 pool in the RR interval.
+
+    This matches the latest backtest's `liquidity_target`: candidate levels
+    are ordered ascending by level*side, and later candle bodies may mitigate
+    a pool. Do not use the legacy helper which deliberately selected farthest.
+    """
+    start, hlc3, body_max, body_min, volume = liquidity
+    i = int(index)
+    direction = int(side)
+    if direction not in (-1, 1) or i < 0 or i >= len(hlc3):
+        return None, None
+    if not (np.isfinite(entry) and np.isfinite(risk) and entry > 0 and risk > 0):
+        return None, None
+    segment_start = int(start[i])
+    segment_volume = np.asarray(volume[segment_start:i + 1], dtype=np.float64)
+    segment_levels = np.asarray(hlc3[segment_start:i + 1], dtype=np.float64)
+    if segment_volume.size == 0 or not np.all(np.isfinite(segment_volume)):
+        return None, None
+    max_volume = float(np.max(segment_volume))
+    if not max_volume > 0:
+        return None, None
+    near = float(entry) + direction * float(rr_min) * float(risk)
+    far = float(entry) + direction * float(rr_max) * float(risk)
+    if direction > 0:
+        in_range = (segment_levels >= near) & (segment_levels <= far)
+    else:
+        in_range = (segment_levels <= near) & (segment_levels >= far)
+    candidates = np.flatnonzero(in_range & (segment_volume / max_volume > LIQ_VOL_CUTOFF))
+    if candidates.size == 0:
+        return None, None
+    for offset in candidates[np.argsort(segment_levels[candidates] * direction, kind="stable")]:
+        pool = float(segment_levels[offset])
+        future = slice(segment_start + int(offset) + 1, i + 1)
+        mitigated = np.any(
+            (body_min[future] <= pool) & (body_max[future] >= pool)
+        )
+        if not mitigated:
+            rr = ((pool - float(entry)) * direction) / float(risk)
+            return pool, float(rr)
+    return None, None
+
+
+def detect_distance_filter_signal(
+    m15_with_forming: Any,
+    h4_closed: Any,
+    *,
+    symbol: str,
+    btc_h4_closed: Any | None,
+    trend_length: int = 100,
+    supertrend_atr_length: int = 14,
+    supertrend_factor: float = 2.5,
+    rr_min: float = 3.0,
+    rr_max: float = 5.0,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Detect one confirmed M15 bubble under the backtest(2).py baseline.
+
+    H1 is intentionally excluded here so the caller can defer its H1 REST
+    request until a genuine M15 + H4 + BTC + M15-distance candidate exists.
+    The returned signal must subsequently pass ``h1_ema_filter_state`` with
+    EMA 9/21 before it is dispatched.
+    """
+    if diagnostics is not None:
+        diagnostics.clear()
+
+    def reject(reason: str):
+        if diagnostics is not None:
+            diagnostics["reason"] = reason
+        return None
+
+    try:
+        length = normalize_trend_length(trend_length)
+        st_length = normalize_supertrend_atr_length(supertrend_atr_length)
+        st_factor = normalize_supertrend_factor(supertrend_factor)
+        rr_low, rr_high = normalize_rr_range(rr_min, rr_max)
+        mt, mo, mh, ml, mc, mv = _extract_columns(m15_with_forming)
+        ht, _ho, _hh, _hl, hc, _hv = _extract_columns(h4_closed)
+    except (TypeError, ValueError, KeyError, IndexError) as exc:
+        return reject(f"INVALID_INPUT:{str(exc)[:100]}")
+
+    min_m15 = max(length + 8, st_length + 1, M15_DISTANCE_EMA_SLOW + 1, 12)
+    if len(mt) < min_m15 or len(ht) < 21:
+        return reject("HISTORY_TOO_SHORT")
+    if len(mt) < 2:
+        return reject("M15_HISTORY_TOO_SHORT")
+
+    signal_open_ms = int(mt[-2])
+    signal_close_ms = signal_open_ms + TIMEFRAME_MS["M15"]
+    entry_open_ms = int(mt[-1])
+    entry_close_ms = entry_open_ms + TIMEFRAME_MS["M15"]
+    if entry_open_ms != signal_close_ms:
+        return reject("M15_ENTRY_CANDLE_MISMATCH")
+    now_ms = int(__import__("time").time() * 1000)
+    if not (entry_open_ms <= now_ms < entry_close_ms):
+        return reject("M15_ENTRY_WINDOW_EXPIRED")
+
+    # All calculations below are based on completed M15 candles only.
+    closed_o, closed_h = mo[:-1], mh[:-1]
+    closed_l, closed_c, closed_v = ml[:-1], mc[:-1], mv[:-1]
+    events, ema1, _ema2 = _backtest_volumatic_events(closed_c, length)
+    code = int(events[-1])
+    if code == 0:
+        return reject("NO_NEW_BUBBLE")
+    direction = "LONG" if code > 0 else "SHORT"
+    side = 1 if code > 0 else -1
+
+    # H4 ALT: exact last fully-closed candle known at M15 signal close.
+    h4_index = int(np.searchsorted(ht, signal_close_ms - TIMEFRAME_MS["H4"], side="right") - 1)
+    if h4_index < 0 or h4_index >= len(hc):
+        return reject("H4_CANDLE_NOT_READY")
+    expected_h4_open = (signal_close_ms // TIMEFRAME_MS["H4"]) * TIMEFRAME_MS["H4"] - TIMEFRAME_MS["H4"]
+    if int(ht[h4_index]) != expected_h4_open:
+        return reject("H4_CANDLE_STALE")
+    h4_fast, h4_slow, h4_ready, _ = _ema_pair_from_config(
+        hc[:h4_index + 1], (H4_H1_EMA_FAST, H4_H1_EMA_SLOW)
+    )
+    if not h4_ready or h4_fast is None or h4_slow is None:
+        return reject("H4_EMA_NOT_READY")
+    h4_passed = h4_fast > h4_slow if side > 0 else h4_fast < h4_slow
+    if not h4_passed:
+        return reject("H4_EMA_DIRECTION_NOT_ALIGNED")
+
+    btc = _btc_ema_filter_state(
+        btc_h4_closed, (H4_H1_EMA_FAST, H4_H1_EMA_SLOW), direction, signal_close_ms
+    )
+    btc_fast, btc_slow, btc_ready, btc_passed, btc_open, btc_close, btc_reason = btc
+    if not btc_ready or btc_fast is None or btc_slow is None:
+        return reject(btc_reason or "BTC_H4_EMA_NOT_READY")
+    if not btc_passed:
+        return reject(btc_reason or "BTC_H4_EMA_DIRECTION_NOT_ALIGNED")
+
+    # This signed distance is intentionally copied from backtest(2).py:
+    # side * ((EMA50-EMA100)/EMA100*100) >= 0.075.
+    # The prose document describes abs(distance); those two definitions differ.
+    ema50 = _backtest_smooth(closed_c, M15_DISTANCE_EMA_FAST, 2.0 / (M15_DISTANCE_EMA_FAST + 1.0))
+    ema100 = _backtest_smooth(closed_c, M15_DISTANCE_EMA_SLOW, 2.0 / (M15_DISTANCE_EMA_SLOW + 1.0))
+    if not (len(ema50) and np.isfinite(ema50[-1]) and np.isfinite(ema100[-1]) and ema100[-1] != 0):
+        return reject("M15_EMA_DISTANCE_NOT_READY")
+    signed_distance = float((ema50[-1] - ema100[-1]) / ema100[-1] * 100.0)
+    absolute_distance = abs(signed_distance)
+    directional_distance = signed_distance * side
+    if directional_distance < M15_DISTANCE_THRESHOLD_PCT:
+        return reject("M15_EMA_DISTANCE_FILTER_BLOCKED")
+
+    st_line, st_direction = _backtest_supertrend(
+        closed_h, closed_l, closed_c, st_length, st_factor
+    )
+    stop = float(st_line[-1]) if len(st_line) else float("nan")
+    entry = float(mo[-1])
+    if not (np.isfinite(stop) and np.isfinite(entry) and entry > 0):
+        return reject("SUPERTREND_INVALID")
+    if not (stop < entry if side > 0 else stop > entry):
+        return reject("SUPERTREND_NOT_PROTECTIVE")
+    risk = abs(entry - stop)
+    if not np.isfinite(risk) or risk <= max(1e-12, entry * 1e-12):
+        return reject("INVALID_RISK")
+
+    target = entry + side * rr_low * risk
+    target_source = "RR_MIN_BASE"
+    target_rr = rr_low
+    liquidity_pool_price = None
+    liquidity_pool_rr = None
+    liquidity = _volume_liquidity_state(closed_o, closed_h, closed_l, closed_c, closed_v)
+    pool, pool_rr = nearest_m15_liquidity_target(
+        liquidity, len(closed_c) - 1, side, entry, risk, rr_low, rr_high
+    )
+    if pool is not None and pool_rr is not None and rr_low <= pool_rr <= rr_high:
+        target = float(pool)
+        target_source = "VOLUME_LIQUIDITY"
+        target_rr = float(pool_rr)
+        liquidity_pool_price = float(pool)
+        liquidity_pool_rr = float(pool_rr)
+    if not (np.isfinite(target) and target > 0):
+        return reject("INVALID_TARGET")
+
+    bubble_price = float(ema1[-2]) if len(ema1) >= 2 and np.isfinite(ema1[-2]) else float(mc[-1])
+    if diagnostics is not None:
+        diagnostics["reason"] = "OK"
+    return {
+        "strategy": STRATEGY_NAME,
+        "strategy_version": STRATEGY_VERSION,
+        "signal_mode": "CONFIRMED_M15_NEXT_OPEN",
+        "symbol": str(symbol).upper(),
+        "timeframe": "M15",
+        "ema_timeframe": "H4",
+        "signal": "BLUE" if side > 0 else "RED",
+        "direction": direction,
+        "signal_index": len(closed_c) - 1,
+        "signal_open_time_ms": signal_open_ms,
+        "signal_close_time_ms": signal_close_ms,
+        "bubble_visual_time_ms": signal_open_ms,
+        "bubble_price": bubble_price,
+        "signal_atr": None,
+        "close_price": float(closed_c[-1]),
+        "signal_close_price": float(closed_c[-1]),
+        "entry_price": entry,
+        "limit_price": entry,
+        "limit_price_source": "NEXT_M15_OPEN",
+        "entry_candle_open_time_ms": entry_open_ms,
+        "entry_candle_close_time_ms": entry_close_ms,
+        "reference_sl": stop,
+        "stop_loss": stop,
+        "take_profit": target,
+        "take_profit_source": target_source,
+        "take_profit_rr": target_rr,
+        "rr_min": rr_low,
+        "rr_max": rr_high,
+        "liquidity_pool_price": liquidity_pool_price,
+        "liquidity_pool_rr": liquidity_pool_rr,
+        "liquidity_pool_timeframe": "M15" if liquidity_pool_price is not None else None,
+        "liquidity_timeframes": ["M15"],
+        "initial_risk": risk,
+        "rr_target": rr_low,
+        "supertrend_line": stop,
+        "supertrend_direction": int(st_direction[-1]) if len(st_direction) else 0,
+        "supertrend_atr_length": st_length,
+        "supertrend_factor": st_factor,
+        "ema_filter_length": [H4_H1_EMA_FAST, H4_H1_EMA_SLOW],
+        "ema_filter_mode": "DUAL",
+        "ema_filter_value": h4_fast,
+        "ema_filter_slow_value": h4_slow,
+        "ema_reference_close": float(hc[h4_index]),
+        "ema_filter_passed": True,
+        "ema_filter_ready": True,
+        "ema_h4_open_time_ms": int(ht[h4_index]),
+        "btc_ema_filter_length": [H4_H1_EMA_FAST, H4_H1_EMA_SLOW],
+        "btc_ema_fast_value": btc_fast,
+        "btc_ema_slow_value": btc_slow,
+        "btc_ema_filter_passed": True,
+        "btc_ema_filter_ready": True,
+        "btc_ema_filter_reason": "OK",
+        "btc_ema_reference_close": btc_close,
+        "btc_ema_h4_open_time_ms": btc_open,
+        "m15_ema50_value": float(ema50[-1]),
+        "m15_ema100_value": float(ema100[-1]),
+        "m15_ema_distance_pct": absolute_distance,
+        "m15_ema_distance_signed_pct": signed_distance,
+        "m15_ema_distance_directional_pct": directional_distance,
+        "m15_ema_distance_threshold_pct": M15_DISTANCE_THRESHOLD_PCT,
+        "m15_ema_distance_passed": True,
+        "trend_length": length,
+        "repaint_risk": False,
+    }
+
+
+def prepare_m15_distance_state(candles: Any) -> dict[str, Any] | None:
+    """Seed incremental M15 EMA50/100 distance from completed candles."""
+    try:
+        timestamps, _o, _h, _l, closes, _v = _extract_columns(candles)
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+    if len(closes) < M15_DISTANCE_EMA_SLOW:
+        return None
+    fast = ema_sma_seeded(closes, M15_DISTANCE_EMA_FAST)
+    slow = ema_sma_seeded(closes, M15_DISTANCE_EMA_SLOW)
+    if not (np.isfinite(fast[-1]) and np.isfinite(slow[-1]) and slow[-1] != 0):
+        return None
+    return {
+        "last_candle_open_time_ms": int(timestamps[-1]),
+        "ema50": float(fast[-1]),
+        "ema100": float(slow[-1]),
+    }
+
+
+def advance_m15_distance_state(
+    state: Mapping[str, Any], *, open_time_ms: int, close_price: float,
+    interval_ms: int = 900_000,
+) -> tuple[dict[str, Any] | None, float | None, float | None]:
+    """Advance one contiguous closed M15 candle; return (state,signed,absolute)."""
+    try:
+        previous_open = int(state.get("last_candle_open_time_ms") or 0)
+        fast = float(state.get("ema50"))
+        slow = float(state.get("ema100"))
+        current_open = int(open_time_ms)
+        close = float(close_price)
+    except (TypeError, ValueError, OverflowError):
+        return None, None, None
+    if current_open <= previous_open:
+        return dict(state), None, None
+    if (
+        previous_open <= 0 or current_open != previous_open + int(interval_ms)
+        or not np.isfinite(fast) or not np.isfinite(slow) or slow == 0
+        or not np.isfinite(close) or close <= 0
+    ):
+        return None, None, None
+    af = 2.0 / (M15_DISTANCE_EMA_FAST + 1.0)
+    ass = 2.0 / (M15_DISTANCE_EMA_SLOW + 1.0)
+    fast += af * (close - fast)
+    slow += ass * (close - slow)
+    if not np.isfinite(slow) or slow == 0:
+        return None, None, None
+    signed = float((fast - slow) / slow * 100.0)
+    next_state = {
+        "last_candle_open_time_ms": current_open,
+        "ema50": float(fast),
+        "ema100": float(slow),
+    }
+    return next_state, signed, abs(signed)
+
+
+def find_m15_forced_exit(
+    candles: Any, *, direction: str, filled_at_ms: int,
+    trend_length: int = 100, threshold_pct: float = 0.075,
+) -> dict[str, Any] | None:
+    """Find the earliest confirmed M15 opposite-bubble/sideways exit after fill.
+
+    Bubble wins ties, matching backtest(2).py's forced-exit array ordering.
+    The exit price is the completed M15 candle close.
+    """
+    try:
+        ts, _o, _h, _l, close, _v = _extract_columns(candles)
+        length = normalize_trend_length(trend_length)
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+    if len(close) < max(length + 8, M15_DISTANCE_EMA_SLOW):
+        return None
+    side = 1 if str(direction).upper() == "LONG" else -1 if str(direction).upper() == "SHORT" else 0
+    if side == 0:
+        return None
+    events, _ema1, _ema2 = _backtest_volumatic_events(close, length)
+    ema_fast = ema_sma_seeded(close, M15_DISTANCE_EMA_FAST)
+    ema_slow = ema_sma_seeded(close, M15_DISTANCE_EMA_SLOW)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dist = (ema_fast - ema_slow) / ema_slow * 100.0
+    eligible = (ts + TIMEFRAME_MS["M15"]) > int(filled_at_ms)
+    valid = eligible & np.isfinite(dist)
+    opposite = valid & (events * side < 0)
+    sideways = valid & ((dist * side) < float(threshold_pct))
+    indices = np.flatnonzero(opposite | sideways)
+    if not indices.size:
+        return None
+    i = int(indices[0])
+    # Opposite bubble first for exact same-candle ties.
+    reason = "OPPOSITE_BUBBLE_M15" if opposite[i] else "SIDEWAYS_EXIT_M15"
+    return {
+        "reason": reason,
+        "open_time_ms": int(ts[i]),
+        "close_time_ms": int(ts[i] + TIMEFRAME_MS["M15"]),
+        "close_price": float(close[i]),
+        "signed_distance_pct": float(dist[i]) if np.isfinite(dist[i]) else None,
+        "absolute_distance_pct": abs(float(dist[i])) if np.isfinite(dist[i]) else None,
     }
