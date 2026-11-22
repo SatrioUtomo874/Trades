@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T13:15:56.772162+00:00",
+  "updated_at": "2026-11-22T13:16:00.188176+00:00",
   "active_trades": [
     {
       "trade_id": "PLAYUSDT-20261122-184006-C1BBD1",
@@ -840,7 +840,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "15457795340:NEW:NEW:0:0",
+      "last_ws_event_key": "15457795340:TRADE:FILLED:620:736034196",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
