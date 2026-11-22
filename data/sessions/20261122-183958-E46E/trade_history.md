@@ -222,3 +222,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-22T13:02:07.747023+00:00 | Reason: SIZE_REJECTED
+## EULUSDT SHORT — CANCELED
+- Trade ID: `EULUSDT-20261122-200228-2ACAD1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-22T13:02:38.947791+00:00 | Reason: SIZE_REJECTED
