@@ -12,7 +12,7 @@
   "rr_min": "3",
   "rr_max": "5",
   "max_active_trades": 10,
-  "margin_usdt": "0.55",
+  "margin_usdt": "1",
   "leverage": 10,
   "min_margin_enabled": false,
   "last_processed_candles": {
@@ -249,10 +249,10 @@
     "M15:HYPEUSDT": 1795328100000,
     "M15:ICNTUSDT": 1795328100000,
     "M15:ICPUSDT": 1795328100000,
-    "M15:IDOLUSDT": 1795327200000,
-    "M15:IDUSDT": 1795327200000,
-    "M15:ILVUSDT": 1795327200000,
-    "M15:IMXUSDT": 1795327200000,
+    "M15:IDOLUSDT": 1795328100000,
+    "M15:IDUSDT": 1795328100000,
+    "M15:ILVUSDT": 1795328100000,
+    "M15:IMXUSDT": 1795328100000,
     "M15:INITUSDT": 1795327200000,
     "M15:INJUSDT": 1795327200000,
     "M15:INUSDT": 1795327200000,
@@ -538,8 +538,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 233,
+  "scan_resume_cursor": 237,
   "scan_resume_boundary_ms": 1795328100000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-22T06:18:43.771425+00:00"
+  "updated_at": "2026-11-22T06:18:47.027181+00:00"
 }
