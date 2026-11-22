@@ -538,8 +538,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 350,
+  "scan_resume_cursor": 400,
   "scan_resume_boundary_ms": 1795340700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-22T09:55:45.758279+00:00"
+  "updated_at": "2026-11-22T09:55:53.521006+00:00"
 }
