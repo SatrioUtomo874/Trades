@@ -465,12 +465,20 @@
     "M15:TOSHIUSDT": 1795347900000,
     "M15:TOWNSUSDT": 1795347900000,
     "M15:TRADOORUSDT": 1795347900000,
-    "M15:TRBUSDT": 1795347900000
+    "M15:TRBUSDT": 1795347900000,
+    "M15:TREEUSDT": 1795347900000,
+    "M15:TRIAUSDT": 1795347900000,
+    "M15:TRUMPUSDT": 1795347900000,
+    "M15:TRUSTUSDT": 1795347900000,
+    "M15:TRUTHUSDT": 1795347900000,
+    "M15:TRXUSDT": 1795347900000,
+    "M15:TSTUSDT": 1795347900000,
+    "M15:TURBOUSDT": 1795347900000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 450,
+  "scan_resume_cursor": 458,
   "scan_resume_boundary_ms": 1795347900000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-22T11:50:07.096065+00:00"
+  "updated_at": "2026-11-22T11:50:19.717884+00:00"
 }
