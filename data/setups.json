@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T12:05:39.856094+00:00",
+  "updated_at": "2026-11-22T12:05:45.845322+00:00",
   "active_trades": [
     {
       "trade_id": "PLAYUSDT-20261122-184006-C1BBD1",
@@ -509,7 +509,7 @@
       "target_notional": "10",
       "actual_notional": "5.096736",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 1378815892,
       "entry_client_order_id": "VTafa38bf068b4f2e5f1185376b44e",
