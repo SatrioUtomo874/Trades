@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T18:15:11.412794+00:00",
+  "updated_at": "2026-11-22T18:15:13.098529+00:00",
   "active_trades": [
     {
       "trade_id": "POWRUSDT-20261122-210559-D3BC15",
@@ -485,10 +485,10 @@
       "ema_exit_trigger_close_ms": 1795371300000,
       "ema_exit_trigger_price": "0.7764",
       "ema_exit_reason": "OPPOSITE_BUBBLE_M15",
-      "ema_exit_client_order_id": null,
+      "ema_exit_client_order_id": "emaexit1f939e0ec5bd2f046c976d",
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
-      "ema_exit_attempts": 0,
+      "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-22T17:30:00+00:00",
       "status": "FILLED",
