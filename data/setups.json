@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T02:46:40.528778+00:00",
+  "updated_at": "2026-11-22T02:46:48.012203+00:00",
   "active_trades": [
     {
       "trade_id": "BREVUSDT-20261121-234743-A00938",
@@ -1170,8 +1170,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-22T02:46:44.045642+00:00",
+      "entry_trigger_price": "0.09051",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "3.0.0",
       "entry_reason": "Confirmed M15 Volumatic bubble + H4/H1 EMA 9/21 + M15 distance; entry = next M15 OPEN; M15 nearest liquidity TP RR 3R-5R",
