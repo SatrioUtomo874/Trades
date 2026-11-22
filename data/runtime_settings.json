@@ -370,7 +370,7 @@
     "M15:POPCATUSDT": 1795356000000,
     "M15:PORTALUSDT": 1795356000000,
     "M15:POWERUSDT": 1795356000000,
-    "M15:POWRUSDT": 1795355100000,
+    "M15:POWRUSDT": 1795356000000,
     "M15:PREDICTUSDT": 1795355100000,
     "M15:PRLUSDT": 1795355100000,
     "M15:PROMUSDT": 1795355100000,
@@ -538,8 +538,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 356,
+  "scan_resume_cursor": 357,
   "scan_resume_boundary_ms": 1795356000000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-22T14:02:36.473645+00:00"
+  "updated_at": "2026-11-22T14:03:03.786288+00:00"
 }
