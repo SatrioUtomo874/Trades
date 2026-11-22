@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T13:31:13.584144+00:00",
+  "updated_at": "2026-11-22T13:31:23.141784+00:00",
   "active_trades": [
     {
       "trade_id": "LUMIAUSDT-20261122-191554-1D8AAA",
@@ -675,7 +675,7 @@
       "tp_client_algo_id": "VTTPSDT-20261122-203048-7A4BDA",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
