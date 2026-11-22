@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T18:15:20.154173+00:00",
+  "updated_at": "2026-11-22T18:15:28.598905+00:00",
   "active_trades": [
     {
       "trade_id": "POWRUSDT-20261122-210559-D3BC15",
@@ -456,7 +456,7 @@
       "tp_algo_id": 4000002190675544,
       "sl_client_algo_id": "VTSLSDT-20261123-001544-D178D6",
       "tp_client_algo_id": "VTTPSDT-20261123-001544-D178D6",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "EXPIRED",
       "tp_algo_status": "NEW",
       "protection_state": "ACTIVE",
       "protection_error": null,
