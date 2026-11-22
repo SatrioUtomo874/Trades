@@ -310,10 +310,10 @@
     "M15:MERLUSDT": 1795348800000,
     "M15:METISUSDT": 1795348800000,
     "M15:METUSDT": 1795348800000,
-    "M15:MEUSDT": 1795347900000,
-    "M15:MEWUSDT": 1795347900000,
-    "M15:MINAUSDT": 1795347900000,
-    "M15:MIRAUSDT": 1795347900000,
+    "M15:MEUSDT": 1795348800000,
+    "M15:MEWUSDT": 1795348800000,
+    "M15:MINAUSDT": 1795348800000,
+    "M15:MIRAUSDT": 1795348800000,
     "M15:MMTUSDT": 1795347900000,
     "M15:MOCAUSDT": 1795347900000,
     "M15:MONUSDT": 1795347900000,
@@ -538,8 +538,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 296,
+  "scan_resume_cursor": 300,
   "scan_resume_boundary_ms": 1795348800000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-22T12:07:21.069765+00:00"
+  "updated_at": "2026-11-22T12:07:37.481060+00:00"
 }
