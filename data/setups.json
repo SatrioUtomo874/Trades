@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T12:03:38.753877+00:00",
+  "updated_at": "2026-11-22T12:03:39.479144+00:00",
   "active_trades": [
     {
       "trade_id": "PLAYUSDT-20261122-184006-C1BBD1",
@@ -455,7 +455,7 @@
       "tp_client_algo_id": null,
       "sl_algo_status": "NOT_PLACED",
       "tp_algo_status": "NOT_PLACED",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
