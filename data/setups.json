@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T21:45:49.623856+00:00",
+  "updated_at": "2026-11-22T21:45:52.492983+00:00",
   "active_trades": [
     {
       "trade_id": "HAEDALUSDT-20261122-213048-E5907A",
@@ -632,7 +632,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "3617041785:NEW:NEW:0:0",
+      "last_ws_event_key": "3617041785:TRADE:FILLED:349:361287268",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
