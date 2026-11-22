@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Volumatic M15 + H4 EMA filter + M15 Supertrend protection.
+"""Volumatic M15 + H4 EMA filter + static percentage SL/TP.
 
-The original ChartPrime-derived EMA-SWMA bubble logic is retained. This module
-adds the closed-candle execution model used by backtest.py: a confirmed M15
-bubble is filtered by the latest fully closed H4 EMA state, enters at the next
-M15 candle open, takes the M15 Supertrend line as SL, and starts TP at 3R before extending it
-to the farthest unmitigated Volume Liquidity Trend pool across M5/M15/H1/H4 inside the 3R-4R cap.
+The original ChartPrime-derived EMA-SWMA bubble logic is retained. A confirmed
+M15 bubble is filtered by the latest fully closed H4 EMA state and enters at the
+next M15 candle open. Live protection is static: SL = -0.5% and TP = +1.5% from
+the entry price (RR 1:3). No Supertrend or Liquidity Pool is used for SL/TP.
 No intrabar/visual-offset Mode-B signal is used by the live engine.
 
 Original indicator attribution/license notice: © ChartPrime, MPL-2.0.
@@ -56,7 +55,17 @@ LIQ_ATR_LEN = 200
 LIQ_ATR_MULT = 2.0
 LIQ_VOL_CUTOFF = 0.1
 LIQUIDITY_TIMEFRAME_MS = {"M5": 300_000, "M15": 900_000, "H1": 3_600_000, "H4": 14_400_000}
-LIQUIDITY_TIMEFRAMES = ("M15",)  # baseline TP pool source; legacy MTF helpers remain unused
+LIQUIDITY_TIMEFRAMES = ("M15",)  # legacy; unused by live SL/TP
+STATIC_SL_PCT = 0.5  # live SL distance from entry (%)
+STATIC_TP_PCT = 1.5  # live TP distance from entry (%)
+
+
+def static_sl_tp(side: int, price: float) -> tuple[float, float]:
+    """Static (SL, TP) from price; side=+1 LONG, -1 SHORT."""
+    return (
+        price * (1.0 - side * STATIC_SL_PCT / 100.0),
+        price * (1.0 + side * STATIC_TP_PCT / 100.0),
+    )
 
 
 def normalize_rr_value(value: Any, field_name: str = "RR") -> float:
@@ -1831,13 +1840,10 @@ def detect_distance_filter_signal(
     symbol: str,
     btc_h4_closed: Any | None,
     trend_length: int = 100,
-    supertrend_atr_length: int = 14,
-    supertrend_factor: float = 2.5,
-    rr_min: float = 3.0,
-    rr_max: float = 5.0,
     diagnostics: dict[str, Any] | None = None,
+    **_legacy: Any,  # supertrend_*/rr_* kwargs from older callers are ignored
 ) -> dict[str, Any] | None:
-    """Detect one confirmed M15 bubble under the backtest(2).py baseline.
+    """Detect one confirmed M15 bubble; SL/TP are static % from the entry open.
 
     H1 is intentionally excluded here so the caller can defer its H1 REST
     request until a genuine M15 + H4 + BTC + M15-distance candidate exists.
@@ -1854,15 +1860,12 @@ def detect_distance_filter_signal(
 
     try:
         length = normalize_trend_length(trend_length)
-        st_length = normalize_supertrend_atr_length(supertrend_atr_length)
-        st_factor = normalize_supertrend_factor(supertrend_factor)
-        rr_low, rr_high = normalize_rr_range(rr_min, rr_max)
         mt, mo, mh, ml, mc, mv = _extract_columns(m15_with_forming)
         ht, _ho, _hh, _hl, hc, _hv = _extract_columns(h4_closed)
     except (TypeError, ValueError, KeyError, IndexError) as exc:
         return reject(f"INVALID_INPUT:{str(exc)[:100]}")
 
-    min_m15 = max(length + 8, st_length + 1, M15_DISTANCE_EMA_SLOW + 1, 12)
+    min_m15 = max(length + 8, M15_DISTANCE_EMA_SLOW + 1, 12)
     if len(mt) < min_m15 or len(ht) < 21:
         return reject("HISTORY_TOO_SHORT")
     if len(mt) < 2:
@@ -1879,8 +1882,7 @@ def detect_distance_filter_signal(
         return reject("M15_ENTRY_WINDOW_EXPIRED")
 
     # All calculations below are based on completed M15 candles only.
-    closed_o, closed_h = mo[:-1], mh[:-1]
-    closed_l, closed_c, closed_v = ml[:-1], mc[:-1], mv[:-1]
+    closed_c = mc[:-1]
     events, ema1, _ema2 = _backtest_volumatic_events(closed_c, length)
     code = int(events[-1])
     if code == 0:
@@ -1926,35 +1928,13 @@ def detect_distance_filter_signal(
     if directional_distance < M15_DISTANCE_THRESHOLD_PCT:
         return reject("M15_EMA_DISTANCE_FILTER_BLOCKED")
 
-    st_line, st_direction = _backtest_supertrend(
-        closed_h, closed_l, closed_c, st_length, st_factor
-    )
-    stop = float(st_line[-1]) if len(st_line) else float("nan")
     entry = float(mo[-1])
-    if not (np.isfinite(stop) and np.isfinite(entry) and entry > 0):
-        return reject("SUPERTREND_INVALID")
-    if not (stop < entry if side > 0 else stop > entry):
-        return reject("SUPERTREND_NOT_PROTECTIVE")
+    if not (np.isfinite(entry) and entry > 0):
+        return reject("INVALID_ENTRY")
+    stop, target = static_sl_tp(side, entry)
     risk = abs(entry - stop)
-    if not np.isfinite(risk) or risk <= max(1e-12, entry * 1e-12):
-        return reject("INVALID_RISK")
-
-    target = entry + side * rr_low * risk
-    target_source = "RR_MIN_BASE"
-    target_rr = rr_low
-    liquidity_pool_price = None
-    liquidity_pool_rr = None
-    liquidity = _volume_liquidity_state(closed_o, closed_h, closed_l, closed_c, closed_v)
-    pool, pool_rr = nearest_m15_liquidity_target(
-        liquidity, len(closed_c) - 1, side, entry, risk, rr_low, rr_high
-    )
-    if pool is not None and pool_rr is not None and rr_low <= pool_rr <= rr_high:
-        target = float(pool)
-        target_source = "VOLUME_LIQUIDITY"
-        target_rr = float(pool_rr)
-        liquidity_pool_price = float(pool)
-        liquidity_pool_rr = float(pool_rr)
-    if not (np.isfinite(target) and target > 0):
+    target_rr = STATIC_TP_PCT / STATIC_SL_PCT
+    if not (stop > 0 and target > 0 and risk > 0):
         return reject("INVALID_TARGET")
 
     bubble_price = float(ema1[-2]) if len(ema1) >= 2 and np.isfinite(ema1[-2]) else float(mc[-1])
@@ -1985,20 +1965,16 @@ def detect_distance_filter_signal(
         "reference_sl": stop,
         "stop_loss": stop,
         "take_profit": target,
-        "take_profit_source": target_source,
+        "take_profit_source": "STATIC_PCT",
         "take_profit_rr": target_rr,
-        "rr_min": rr_low,
-        "rr_max": rr_high,
-        "liquidity_pool_price": liquidity_pool_price,
-        "liquidity_pool_rr": liquidity_pool_rr,
-        "liquidity_pool_timeframe": "M15" if liquidity_pool_price is not None else None,
-        "liquidity_timeframes": ["M15"],
+        "rr_min": target_rr,
+        "rr_max": target_rr,
+        "static_sl_pct": STATIC_SL_PCT,
+        "static_tp_pct": STATIC_TP_PCT,
+        "liquidity_pool_price": None,
+        "liquidity_pool_timeframe": None,
         "initial_risk": risk,
-        "rr_target": rr_low,
-        "supertrend_line": stop,
-        "supertrend_direction": int(st_direction[-1]) if len(st_direction) else 0,
-        "supertrend_atr_length": st_length,
-        "supertrend_factor": st_factor,
+        "rr_target": target_rr,
         "ema_filter_length": [H4_H1_EMA_FAST, H4_H1_EMA_SLOW],
         "ema_filter_mode": "DUAL",
         "ema_filter_value": h4_fast,
