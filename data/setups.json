@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T09:30:24.747069+00:00",
+  "updated_at": "2026-11-22T09:30:31.424681+00:00",
   "active_trades": [
     {
       "trade_id": "BREVUSDT-20261121-234743-A00938",
@@ -135,7 +135,7 @@
       "tp_algo_id": 4000002186229485,
       "sl_client_algo_id": "VTSLSDT-20261121-235004-476979",
       "tp_client_algo_id": "VTTPSDT-20261121-235004-476979",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "EXPIRED",
       "tp_algo_status": "NEW",
       "protection_state": "ACTIVE",
       "protection_error": null,
