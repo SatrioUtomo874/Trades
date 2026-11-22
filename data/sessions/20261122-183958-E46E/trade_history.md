@@ -168,3 +168,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-22T12:40:27.191032+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
+## XPINUSDT SHORT — CANCELED
+- Trade ID: `XPINUSDT-20261122-194044-AE29D8`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-22T12:40:59.943883+00:00 | Reason: INSUFFICIENT_AVAILABLE_BALANCE
