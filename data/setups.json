@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T18:40:21.860175+00:00",
+  "updated_at": "2026-11-22T18:40:22.843637+00:00",
   "active_trades": [
     {
       "trade_id": "POWRUSDT-20261122-210559-D3BC15",
@@ -563,10 +563,10 @@
       "tp_algo_id": 4000002190921194,
       "sl_client_algo_id": "VTSLSDT-20261123-013059-AA6AE0",
       "tp_client_algo_id": "VTTPSDT-20261123-013059-AA6AE0",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "FINISHED",
       "tp_algo_status": "EXPIRED",
-      "protection_state": "CANCEL_WAIT_API",
-      "protection_error": "SL: status tetap NEW",
+      "protection_state": "CANCELED",
+      "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": "EXCHANGE_POSITION_FLAT_WS",
       "sl_submit_ambiguous": false,
