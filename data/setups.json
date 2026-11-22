@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T14:31:45.473329+00:00",
+  "updated_at": "2026-11-22T14:31:50.298288+00:00",
   "active_trades": [
     {
       "trade_id": "POWRUSDT-20261122-210559-D3BC15",
@@ -314,8 +314,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-22T14:31:47.990574+00:00",
+      "entry_trigger_price": "0.04998",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "3.0.0",
       "entry_reason": "Confirmed M15 Volumatic bubble + H4/H1 EMA 9/21 + M15 distance; entry = next M15 OPEN; M15 nearest liquidity TP RR 3R-5R",
