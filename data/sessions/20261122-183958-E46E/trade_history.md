@@ -36,3 +36,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-22T12:10:18.665663+00:00 | Reason: SIZE_REJECTED
+## XPINUSDT SHORT — CANCELED
+- Trade ID: `XPINUSDT-20261122-191202-FEF1F9`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-22T12:12:11.798080+00:00 | Reason: SIZE_REJECTED
