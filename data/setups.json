@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T05:30:06.802972+00:00",
+  "updated_at": "2026-11-22T05:30:07.983365+00:00",
   "active_trades": [
     {
       "trade_id": "BREVUSDT-20261121-234743-A00938",
@@ -1020,10 +1020,10 @@
       "ema_exit_trigger_close_ms": 1795325400000,
       "ema_exit_trigger_price": "0.02033",
       "ema_exit_reason": "OPPOSITE_BUBBLE_M15",
-      "ema_exit_client_order_id": null,
+      "ema_exit_client_order_id": "emaexita1d16e537e3906e2a393e2",
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
-      "ema_exit_attempts": 0,
+      "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-22T03:00:00+00:00",
       "status": "FILLED",
