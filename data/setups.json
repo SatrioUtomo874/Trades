@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-22T02:47:30.157464+00:00",
+  "updated_at": "2026-11-22T02:47:36.392152+00:00",
   "active_trades": [
     {
       "trade_id": "BREVUSDT-20261121-234743-A00938",
@@ -1161,10 +1161,10 @@
       "real_error": null,
       "real_submit_ambiguous": false,
       "entry_executed_qty": "61",
-      "entry_order_status": "NEW",
-      "entry_order_terminal": false,
+      "entry_order_status": "FILLED",
+      "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "839232113:NEW:NEW:0:0",
+      "last_ws_event_key": "839232113:TRADE:FILLED:61:85816789",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
