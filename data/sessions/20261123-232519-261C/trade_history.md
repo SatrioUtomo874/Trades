@@ -6,3 +6,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-23T16:27:37.270054+00:00 | Reason: BINANCE_MARKET_REJECTED
+## ATOMUSDT LONG — CANCELED
+- Trade ID: `ATOMUSDT-20261123-232756-31D4CF`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-23T16:28:01.279279+00:00 | Reason: BINANCE_MARKET_REJECTED
