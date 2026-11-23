@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-23T03:30:46.432716+00:00",
+  "updated_at": "2026-11-23T03:30:51.010378+00:00",
   "active_trades": [
     {
       "trade_id": "HAEDALUSDT-20261122-213048-E5907A",
@@ -31,7 +31,7 @@
       "tp_algo_id": 4000002190148680,
       "sl_client_algo_id": "VTSLSDT-20261122-213048-E5907A",
       "tp_client_algo_id": "VTTPSDT-20261122-213048-E5907A",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "EXPIRED",
       "tp_algo_status": "NEW",
       "protection_state": "ACTIVE",
       "protection_error": null,
