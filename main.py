@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Volumatic v3.0.0 live engine matching the current backtest baseline.
+"""PAPER-ONLY EMA9/21 + M15 Volume Profile POC simulation engine.
 
-Entry: confirmed M15 Volumatic LEN100 event; ALT and BTC H4 EMA9/21 direction;
-ALT H1 EMA9/21 entry-only direction; signed M15 EMA50/100 distance >= 0.075%;
-entry target is the next M15 open. PAPER uses that candle open. REAL sends one
-MARKET order in that M15 window and records Binance's actual average fill.
-Protection: static M15 Supertrend ATR14 x 2.5 SL; nearest unmitigated M15
-Volume Liquidity Trend pool in RR 3R-5R, fallback 3R. PAPER checks M5 OHLC
-with backtest gap/SL-first rules. REAL protection remains on Binance. M15
-opposite-bubble/sideways forced exits wait for the final M5 bar before close.
+Analysis reproduces backtest_vp_poc.py (EMA 9/21 variant): completed M15
+EMA9/EMA21 state selects direction; 200-bar/200-level Volume Profile POC is
+the limit entry; M15 Supertrend ATR14 x2.5 is the static SL; TP is fixed at 1R.
+The limit remains valid for the immediately following M15 candle only. M5 OHLC
+replay models first-touch/gap fills and prioritizes SL when SL and TP are both
+inside one M5 candle. No Volumatic bubble, H4/H1/BTC filter, liquidity target,
+trailing SL, or trend-flip/forced exit is active for this strategy.
 
-H1 is entry-only: no H1 forced exit. The main process owns Binance REST/private
-execution, WebSocket streams, Telegram, PAPER/REAL ledger, scanner, logging,
-and GitHub persistence.
+FORCE_PAPER_ONLY is hard-locked: no signed/private Binance Futures requests,
+entry orders, Algo protection orders, or exchange-side closes are permitted.
+Binance public market data, Telegram, logs and persistence remain available.
 """
 
 import asyncio
@@ -74,11 +73,13 @@ if not isinstance(getattr(volumatic, "TIMEFRAME_MS", None), dict) or not {"M15",
     raise RuntimeError("strategy module mismatch: TIMEFRAME_MS M15/H4 tidak tersedia. Pastikan try.py dan STRATEGY_FILE satu versi.")
 if not isinstance(getattr(volumatic, "TIMEFRAME_INTERVALS", None), dict) or not {"M15", "H4"}.issubset(volumatic.TIMEFRAME_INTERVALS):
     raise RuntimeError("strategy module mismatch: TIMEFRAME_INTERVALS M15/H4 tidak tersedia.")
-if str(getattr(volumatic, "STRATEGY_VERSION", "")) != "3.0.0":
+if str(getattr(volumatic, "STRATEGY_VERSION", "")) != "4.0.0":
     raise RuntimeError(
-        "strategy module mismatch: dibutuhkan STRATEGY_VERSION 3.0.0 "
-        "dengan RR_MIN/RR_MAX configurable dan Volume Liquidity TP. Sinkronkan main.py dan strategy.py."
+        "strategy module mismatch: dibutuhkan STRATEGY_VERSION 4.0.0 "
+        "(EMA9/21 + M15 Volume Profile POC + static Supertrend SL + RR1). Sinkronkan main.py dan strategy.py."
     )
+if not callable(getattr(volumatic, "build_poc_limit_signal", None)):
+    raise RuntimeError("strategy module mismatch: build_poc_limit_signal() tidak tersedia.")
 if (
     not callable(getattr(volumatic, "normalize_trend_length", None))
     or not hasattr(volumatic, "DEFAULT_TREND_LENGTH")
@@ -141,10 +142,10 @@ if not BINANCE_EGRESS_ID:
         BINANCE_EGRESS_ID = f"proxy:{_binance_proxy_parts.hostname}:{_binance_proxy_parts.port or 0}"
     else:
         BINANCE_EGRESS_ID = "direct"
-BINANCE_TRADING_MODE = "live"
-REAL_EXECUTION_ENABLED = (os.getenv("REAL_EXECUTION_ENABLED", "1") or "1").strip().lower() not in {
-    "0", "false", "off", "no", "disabled"
-}
+# Runtime-level safety lock: this build cannot execute REAL orders.
+FORCE_PAPER_ONLY = False
+BINANCE_TRADING_MODE = "paper"
+REAL_EXECUTION_ENABLED = False  # hard lock; environment variables cannot enable private trading
 GITHUB_API = "https://api.github.com"
 # IP cooldown markers are machine/egress-IP specific. Keep them local by default;
 # enable GitHub sharing only when the process restarts behind the same public IP.
@@ -187,6 +188,8 @@ BINANCE_BAN_FALLBACK_SECONDS = 120
 REAL_PENDING_POLL_SECONDS = 5.0
 REAL_RECONCILE_INTERVAL_SECONDS = 20.0
 REAL_RECONCILE_WS_COVERED_SECONDS = 300.0  # private WS (ACCOUNT_UPDATE/ALGO_UPDATE) already reports fills/closes
+M5_MS = 300_000
+M15_MS = 900_000
 H1_MS = 3_600_000
 EMA_EXIT_INIT_RETRY_SECONDS = 30.0
 EMA_EXIT_RECONCILE_SECONDS = 20.0
@@ -853,10 +856,8 @@ class Trade:
             "entry_triggered_at": iso_utc(self.entry_triggered_at) if self.entry_triggered_at else None,
             "entry_trigger_price": decimal_to_str(self.entry_trigger_price),
             "strategy_name": volumatic.STRATEGY_NAME, "strategy_version": volumatic.STRATEGY_VERSION,
-            "entry_reason": f"Confirmed M15 Volumatic bubble + H4/H1 EMA 9/21 + M15 distance; entry = next M15 OPEN; M15 nearest liquidity TP RR 3R-5R",
-            "price_exp_reason": (
-                "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
-            ),
+            "entry_reason": "M15 EMA9/EMA21 direction + 200-bar Volume Profile POC LIMIT; static M15 Supertrend ATR14 x2.5 SL; fixed RR 1R TP",
+            "price_exp_reason": "Unfilled POC LIMIT expires at the close of the immediately following M15 candle.",
         }
 
     @classmethod
@@ -929,7 +930,11 @@ class Trade:
             has_submitted_order = bool(row.get("entry_order_id") or row.get("entry_client_order_id"))
             if not saved_real_enabled or (saved_real_state != "REAL_PREPARED" and has_submitted_order):
                 saved_entry_order_created_at = saved_created_at
-        if str(row.get("timeframe") or "M15").upper() == "M15" and not saved_real_enabled and saved_bubble_time is not None:
+        is_v4_poc_setup = str(row.get("signal") or "").upper() == "EMA9_21_VP_POC"
+        if is_v4_poc_setup:
+            # Preserve the exact one-M15-candle expiry through process restarts.
+            saved_expiry = parse_iso(row.get("expires_at")) or saved_created_at + timedelta(milliseconds=volumatic.TIMEFRAME_MS["M15"])
+        elif str(row.get("timeframe") or "M15").upper() == "M15" and not saved_real_enabled and saved_bubble_time is not None:
             saved_expiry = saved_bubble_time + timedelta(seconds=ENTRY_ORDER_TTL_SECONDS)
         else:
             saved_expiry = (
@@ -3228,7 +3233,7 @@ class BinanceRealClient:
     ) -> Any:
         if not REAL_EXECUTION_ENABLED:
             raise BinanceAPIError(
-                "REAL_EXECUTION_ENABLED=0; private Binance API dinonaktifkan oleh environment.",
+                "PAPER-ONLY hard lock; private Binance API dinonaktifkan di source.",
                 endpoint=path,
             )
         if signed and not self.configured:
@@ -3756,6 +3761,40 @@ class BinanceRealClient:
         payload = await self._request("DELETE", "/fapi/v1/algoOrder", params)
         if not isinstance(payload, dict):
             raise BinanceAPIError("Respons cancel Algo Order Binance tidak valid.", endpoint="/fapi/v1/algoOrder")
+        return payload
+
+    async def place_limit_entry(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        position_side: str,
+        client_order_id: str,
+    ) -> dict[str, Any]:
+        """Submit the strategy's one-candle POC entry as a Binance GTC LIMIT."""
+        if side not in {"BUY", "SELL"}:
+            raise ValueError("LIMIT entry side harus BUY atau SELL.")
+        if not client_order_id or len(client_order_id) > 36:
+            raise ValueError("newClientOrderId harus 1-36 karakter.")
+        if quantity <= 0 or price <= 0:
+            raise ValueError("Quantity dan price LIMIT harus positif.")
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "quantity": format_qty(quantity),
+            "price": decimal_to_str(price),
+            "newClientOrderId": client_order_id,
+            "newOrderRespType": "RESULT",
+        }
+        if position_side:
+            params["positionSide"] = position_side
+        payload = await self._request("POST", "/fapi/v1/order", params)
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons LIMIT entry Binance tidak valid.", endpoint="/fapi/v1/order")
         return payload
 
     async def place_market_entry(
@@ -5100,7 +5139,7 @@ class GitHubStore:
 
 
 # ---------------------------------------------------------------------------
-# Volumatic Trend trading engine
+# EMA9/21 + Volume Profile POC PAPER trading engine
 # ---------------------------------------------------------------------------
 class TradingEngine:
     def __init__(self, context: dict[str, Any]) -> None:
@@ -5126,20 +5165,20 @@ class TradingEngine:
         self.ws = BinanceWebSocket(self._on_price, self._on_kline)
         self.user_ws = BinanceUserDataWebSocket(self.real, self._on_user_data_event)
 
-        self.real_mode = False  # New REAL entries always require explicit /real on.
+        self.real_mode = False  # Hard-locked PAPER-only build.
         self.margin_usdt = DEFAULT_MARGIN_USDT
         self.leverage = DEFAULT_LEVERAGE
         self.min_margin_enabled = False
         self.max_active_trades = MAX_ACTIVE_TRADES
         self.timeframe = "M15"
-        self.trend_length = volumatic.DEFAULT_TREND_LENGTH
-        self.ema_filter_length: int | tuple[int, int] | None = volumatic.DEFAULT_EMA_FILTER_LENGTH
-        self.h1_enabled = True  # H1 EMA 9/21 is mandatory for entry; H1 forced exit is disabled
+        self.trend_length = 21  # display compatibility: EMA slow period
+        self.ema_filter_length: int | tuple[int, int] | None = (9, 21)
+        self.h1_enabled = False  # H1 is not used by the EMA9/21 + VP POC baseline
         self._h1_toggle_generation = 0
         self.supertrend_atr_length = 14
         self.supertrend_factor = 2.5
-        self.rr_min = Decimal("3")
-        self.rr_max = Decimal("5")
+        self.rr_min = Decimal("1")
+        self.rr_max = Decimal("1")
         self.scan_enabled = False
         # Session-only delayed scanner activation. It is deliberately not
         # persisted: every fresh /try starts with scanner OFF and no schedule.
@@ -5382,13 +5421,13 @@ class TradingEngine:
             self.timeframe = "M15"
             # These are baseline constants, not runtime tuning parameters. Ignore
             # obsolete persisted values written by older versions of the bot.
-            self.trend_length = 100
+            self.trend_length = 21
             self.ema_filter_length = (9, 21)
-            self.h1_enabled = True  # H1 EMA9/21 is mandatory for entry only.
+            self.h1_enabled = False  # no H1 entry gate in the new baseline.
             self.supertrend_atr_length = 14
             self.supertrend_factor = 2.5
-            self.rr_min = Decimal("3")
-            self.rr_max = Decimal("5")
+            self.rr_min = Decimal("1")
+            self.rr_max = Decimal("1")
             # Scanner arming is intentionally SESSION-ONLY. A fresh /try (or
             # Render restart) must never resume a previous scan automatically.
             # The only way to arm scanning is an explicit Telegram `/scan on`.
@@ -6253,9 +6292,20 @@ class TradingEngine:
                     continue
                 status = str(row.get("status") or "").upper()
                 row_strategy = str(row.get("strategy_name") or row.get("strategy") or "").upper()
-                if row_strategy != volumatic.STRATEGY_NAME:
+                row_signal = str(row.get("signal") or "").upper()
+                row_version = str(row.get("strategy_version") or "")
+                if row_strategy != volumatic.STRATEGY_NAME or row_signal != "EMA9_21_VP_POC" or row_version != "4.0.0":
                     if status in {"PENDING", "FILLED"}:
                         self.legacy_active_snapshot_count += 1
+                    continue
+                if bool(row.get("real_intent") or row.get("real_enabled") or row.get("exchange_adopted")):
+                    if status in {"PENDING", "FILLED"}:
+                        self.legacy_active_snapshot_count += 1
+                    log.critical(
+                        "[PAPER-ONLY] Active REAL/exchange trade in saved snapshot ignored: %s %s. "
+                        "This process will not manage or close it.",
+                        row.get("pair"), row.get("direction"),
+                    )
                     continue
                 try:
                     trade = Trade.from_record(row)
@@ -6288,9 +6338,7 @@ class TradingEngine:
             if self.active_trades:
                 await self.ws.start()
             await self._sync_ws_symbols()
-            for restored_trade in list(self.active_trades.values()):
-                if restored_trade.status == "FILLED" and not restored_trade.real_enabled:
-                    self._schedule_ema_exit_initialization(restored_trade)
+            # The EMA9/21 POC baseline has no EMA/bubble forced-exit worker.
             await self.reply(
                 f"✅ Snapshot lokal dimuat. Trade aktif: {len(self.active_trades)}. "
                 f"Binance REST cooldown masih {self._binance_cooldown_remaining():.0f}s; "
@@ -6301,22 +6349,16 @@ class TradingEngine:
         if self.active_trades:
             await self.ws.start()
         await self._sync_ws_symbols()
-        for restored_trade in list(self.active_trades.values()):
-            if restored_trade.status == "FILLED" and not restored_trade.real_enabled:
-                self._schedule_ema_exit_initialization(restored_trade)
+        # The EMA9/21 POC baseline has no EMA/bubble forced-exit worker.
         await self.reply(f"✅ Snapshot dimuat dan direkonsiliasi. Trade aktif: {len(self.active_trades)}.")
 
     # ----------------------------- Startup -------------------------------
     async def start(self) -> None:
         """Start a fresh in-memory engine session without restoring prior data.
 
-        /try is intentionally a clean boot: no runtime settings, history, notes,
-        active-trade snapshots, deferred commands, cooldown markers, saved
-        listenKeys, scanner cursors, or previous Autostop state are imported.
-        Exchange market data is fetched only after an explicit /scan on. A
-        lightweight public-only Binance egress preflight checks the exit IP and
-        repeated /fapi/v1/time responses. No authenticated/private endpoint is
-        called until the user explicitly sends /real on.
+        /try is intentionally a clean PAPER boot. No saved REAL state is
+        imported and FORCE_PAPER_ONLY blocks every signed/private Binance call.
+        Public market data is fetched only after explicit scanner activation.
         """
         if self._running:
             return
@@ -6343,12 +6385,14 @@ class TradingEngine:
         self.scan_schedule_activated_at = None
         self._scan_schedule_last_fired_minute = None
         self.timeframe = "M15"
-        self.trend_length = volumatic.DEFAULT_TREND_LENGTH
+        self.trend_length = 21  # compatibility/display only; active signal is EMA9/EMA21
         self.ema_filter_length = (9, 21)
-        self.h1_enabled = True
+        self.h1_enabled = False
         self._h1_toggle_generation = 0
         self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
         self.supertrend_factor = volumatic.SUPERTREND_FACTOR
+        self.rr_min = Decimal("1")
+        self.rr_max = Decimal("1")
         self.margin_usdt = DEFAULT_MARGIN_USDT
         self.leverage = DEFAULT_LEVERAGE
         self.min_margin_enabled = False
@@ -6431,32 +6475,29 @@ class TradingEngine:
         self._maintenance_task = asyncio.create_task(self._maintenance_loop(), name="volumatic-maintenance")
         self._scan_task = asyncio.create_task(self._scan_loop(), name="volumatic-scanner")
         log.info(
-            "[START] FRESH Volumatic session | scanner=OFF | timeframe=M15 | length=%s | "
+            "[START] FRESH PAPER EMA9/21 VP POC session | scanner=OFF | timeframe=M15 | length=%s | "
             "EMA=%s | permanent bans loaded=%s; no prior trade/session state imported",
             self.trend_length,
             ema_filter_label(self.ema_filter_length), len(self.banned_symbols),
         )
         await self.reply(
-            "🟢 VOLUMATIC TREND / FRESH SESSION\n\n"
-            "Runtime state : CLEAN (trade/sesi lama tidak dimuat)\n"
+            "🟢 EMA9/21 + VP POC / PAPER-ONLY SESSION\n\n"
+            "Runtime state : CLEAN (sesi PAPER baru)\n"
             f"Permanent bans: {len(self.banned_symbols)} simbol dimuat\n"
-            "Signal TF     : M15\nEMA Trend TF  : H4\n"
-            f"Trend length  : {self.trend_length} (default {volumatic.DEFAULT_TREND_LENGTH})\n"
-            f"EMA filter    : {ema_filter_label(self.ema_filter_length)}\n"
-            f"H1 entry filter: ON (EMA9/21; entry-only)\nM15 forced exit: opposite bubble / sideways distance\n"
-            f"SuperTrend    : ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
-            f"Max positions : {self.max_active_trades}\n"
+            "Signal TF     : M15\n"
+            "Direction     : EMA9 > EMA21 = LONG; EMA9 <= EMA21 = SHORT\n"
+            f"Volume Profile: {volumatic.POC_LOOKBACK} candle / {volumatic.POC_BARS} level / {volumatic.POC_VOLUME_TYPE}\n"
+            "Entry         : LIMIT POC, valid 1 candle M15; fill direplay dari M5\n"
+            "Protection    : static Supertrend M15 ATR14 x2.5; TP RR 1:1\n"
+            "Exit          : M5 SL/TP only; SL priority if both hit; no trailing/forced exit\n"
+            f"Max positions : {self.max_active_trades} (PAPER)\n"
             "Scanner       : OFF — menunggu /scan on atau /scan schedule\n"
-            "REAL          : OFF — menunggu /real on\n"
-            "Active        : 0\n"
+            "Execution     : PAPER ONLY — private Binance API dan semua order execution LOCKED\n"
             "Market WS     : OFF — aktif saat scanner dimulai\n"
-            "Private WS    : OFF — aktif setelah /real on\n"
-            "Startup I/O   : hanya tes IP keluar + Binance public API; tidak memanggil endpoint private atau mengadopsi posisi/order.\n\n"
-            "PERHATIAN: posisi dan order LIVE yang masih ada di Binance tidak diadopsi oleh sesi baru. "
-            "Periksa akun Binance sebelum mengaktifkan /real on.\n"
-            "PUBLIC EGRESS TEST: bot menguji IP keluar, kestabilan koneksi, dan Binance public API. Tes API key/IP hanya dilakukan setelah /real on."
+            "Private WS    : DISABLED\n"
+            "Data I/O      : Binance public market data only."
         )
-        self._schedule_real_egress_preflight("startup")
+        # PAPER-only build: no authenticated/private route preflight is scheduled.
 
     async def stop(self) -> None:
         """Immediately stop this in-memory engine session without touching exchange or saved data.
@@ -6633,10 +6674,10 @@ class TradingEngine:
         deferred = int(stats.get("deferred", 0))
         unknown = int(stats.get("unknown", 0))
         lines = [
-            "╔══ VOL / SCAN BATCH REPORT ══╗",
-            f"ENGINE    : M15 VOLUMATIC · H4 EMA ALT+BTC · M15 SUPERTREND · LEN{trend_length} · {ema} · ATR{supertrend_atr_length} · FACTOR{supertrend_factor:g}",
-            f"H1 ENTRY FILTER : ON (EMA9/21) · M15 FORCED EXIT",
-            f"TP RULE   : BASE RR 1:{fmt_num(rr_min, 3)} · LIQUIDITY RANGE 1:{fmt_num(rr_min, 3)}–1:{fmt_num(rr_max, 3)}",
+            "╔══ EMA9/21 VP POC SCAN BATCH ══╗",
+            "ENGINE    : PAPER ONLY · M15 EMA9/EMA21 + VP POC 200x200",
+            "PROTECTION: static M15 Supertrend ATR14 x2.5 · no trailing",
+            "TP / EXIT : fixed RR 1:1 · M5 SL/TP only · no forced close",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
             f"STATE     : {state}",
@@ -6644,12 +6685,11 @@ class TradingEngine:
             "──────────────────────────────",
             f"PASS      : {pass_start:04d}–{min(batch_end, pass_start + requested - 1):04d}  ({requested}/{pass_expected} requested)",
             f"ANALYZED  : {analyzed}  ·  SKIPPED {skipped}",
-            f"BUBBLES   : BLUE {blue}  ·  RED {red}  ·  NONE {no_signal}",
+            f"DIRECTION : LONG {blue}  ·  SHORT {red}  ·  NO SETUP {no_signal}",
             f"REJECTED  : {rejected}",
             f"EXECUTION : NEW {created}  ·  FILLED {filled}  ·  DEFERRED {deferred}  ·  UNKNOWN {unknown}",
-            f"BTC FILTER: {stats.get('btc_filter_status', 'UNKNOWN')}",
-            f"FILTER    : ALT H4 BLOCK {int(stats.get('ema_blocked', 0))}  ·  ALT H1 BLOCK {int(stats.get('h1_ema_blocked', 0))}  ·  BTC EMA BLOCK {int(stats.get('btc_ema_blocked', 0))}  ·  MAX BLOCK {int(stats.get('max_blocked', 0))}",
-            f"OTHER     : DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
+            "H4/H1/BTC FILTER: DISABLED",
+            f"OTHER     : MAX BLOCK {int(stats.get('max_blocked', 0))}  ·  DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
             f"DURATION  : {elapsed:.1f}s",
         ]
         if rejection_reasons:
@@ -6754,7 +6794,7 @@ class TradingEngine:
         self.scan_schedule_armed_at = None
 
         await self.reply(
-            "🟢 VOLUMATIC / SCHEDULE TRIGGERED\n\n"
+            "🟢 EMA9/21 POC SCAN SCHEDULE TRIGGERED\n\n"
             f"SLOT      : {hhmm} WIB\n"
             f"SELECTED  : {selected} WIB\n"
             "ACTION    : perintah /scan on dijalankan\n"
@@ -6820,99 +6860,47 @@ class TradingEngine:
                 await asyncio.sleep(5.0)
 
     async def _run_scan_cycle(self, boundary_ms: int) -> None:
+        """Scan completed M15 bars using only EMA9/21 + VP POC + static ST."""
         if self.autostop_percent is not None and self._autostop_data_hold:
             log.info("[SCAN] held by AUTOSTOP data guard; equity snapshot belum fresh.")
             return
         if self._scan_cycle_lock.locked():
             log.info("[SCAN] cycle sebelumnya masih aktif; trigger ditahan.")
             return
+
         async with self._scan_cycle_lock:
-            timeframe = "M15"
-            trend_length = self.trend_length
-            ema_filter_length = self.ema_filter_length
-            h1_enabled = self.h1_enabled
-            supertrend_atr_length = self.supertrend_atr_length
-            supertrend_factor = self.supertrend_factor
-            rr_min = self.rr_min
-            rr_max = self.rr_max
-            interval_ms = volumatic.TIMEFRAME_MS["M15"]
+            interval_ms = M15_MS
             universe = await self._universe()
             self._scanner_symbols = set(universe) if self.scan_enabled else set()
             if self.scan_enabled:
                 await self._sync_ws_symbols()
-            started = time.monotonic()
-            processed_total = errors_total = 0
+            if not universe:
+                await self.reply("╔══ EMA9/21 POC SCANNER ══╗\nUNIVERSE: 0 pair USDT Perpetual yang memenuhi filter.")
+                return
+
             if (
-                self._scan_resume_boundary_ms != boundary_ms
-                or self._scan_resume_timeframe != timeframe
-                or getattr(self, "_scan_resume_trend_length", trend_length) != trend_length
+                self._scan_resume_boundary_ms != int(boundary_ms)
+                or self._scan_resume_timeframe != "M15"
                 or self._scan_resume_cursor >= len(universe)
             ):
-                self._scan_resume_boundary_ms = boundary_ms
-                self._scan_resume_timeframe = timeframe
-                self._scan_resume_trend_length = trend_length
+                self._scan_resume_boundary_ms = int(boundary_ms)
+                self._scan_resume_timeframe = "M15"
+                self._scan_resume_trend_length = 21
                 self._scan_resume_cursor = 0
-            if not universe:
-                await self.reply("╔══ VOL / SCANNER ══╗\nUNIVERSE : 0 symbols\nACTION : tidak ada pair USDT Perpetual yang memenuhi filter.")
-                return
 
-            log.info(
-                "[SCAN] MTF cycle start | signal_tf=M15 | ema_tf=H4 | length=%s | ema=%s | ST_ATR=%s | ST_FACTOR=%s | pairs=%s | batch_size=%s | cursor=%s",
-                trend_length, ema_filter_label(ema_filter_length), supertrend_atr_length, supertrend_factor, len(universe),
-                SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
-            )
-            # BTC H4 EMA9/21 is fetched once per scan cycle and is a mandatory
-            # direction gate. All values come from completed H4 candles.
-            ema_filter_length = (9, 21)
-            h1_enabled = True
-            btc_h4_closed = None
-            btc_filter_status = "H4 EMA9/21 BTC DATA UNAVAILABLE"
-            try:
-                btc_h4_closed = await self.rest.get_klines(
-                    BTC_EMA_FILTER_SYMBOL, "4h",
-                    max(120, self._h4_ema_history_limit((9, 21))),
-                    volumatic.TIMEFRAME_MS["H4"], force_refresh=False,
-                )
-                if btc_h4_closed is None or len(btc_h4_closed) < 21:
-                    raise RuntimeError("Riwayat H4 BTC tidak cukup untuk EMA21.")
-                btc_filter_status = f"EMA9/EMA21 DATA READY ({len(btc_h4_closed)} H4)"
-                log.info(
-                    "[BTC EMA] H4 reference loaded once | symbol=%s | periods=9/21 | candles=%s",
-                    BTC_EMA_FILTER_SYMBOL, len(btc_h4_closed),
-                )
-            except BinanceRateLimitError as exc:
-                self._scan_interrupted_by_cooldown = True
-                self._scan_trigger_now = True
-                await self._notify_binance_cooldown(
-                    exc, source="BTC H4 EMA REFERENCE", symbol=BTC_EMA_FILTER_SYMBOL
-                )
-                await self.reply(
-                    "⚠️ VOL / SCANNER PAUSED BEFORE BATCH\n"
-                    f"CAUSE     : BTC H4 reference tertahan REST cooldown ({self._short_duration(self._binance_cooldown_remaining())})\n"
-                    f"CURSOR    : coin #{self._scan_resume_cursor + 1:04d} belum diproses pada siklus ini\n"
-                    "RESUME    : otomatis setelah cooldown; tidak ada candle H4 lama yang dipakai sebagai fallback."
-                )
-                return
-            except Exception as exc:
-                btc_h4_closed = None
-                btc_filter_status = f"DATA UNAVAILABLE: {str(exc)[:90]}"
-                log.exception("[BTC EMA] mandatory BTC H4 filter unavailable; all new entries fail closed.")
-
-            await self._expire_due_pending()
+            started = time.monotonic()
+            processed_total = errors_total = 0
             offset = self._scan_resume_cursor
-            protection_paused = False
+            interrupted = False
+            log.info(
+                "[SCAN] EMA9/21 + VP POC start | TF=M15 | POC=%s/%s | ST=ATR14 x2.5 | TP=1R | pairs=%s | batch=%s | cursor=%s",
+                volumatic.POC_LOOKBACK, volumatic.POC_BARS, len(universe),
+                SCAN_MAX_PAIRS_PER_CYCLE, offset,
+            )
+            await self._expire_due_pending()
+
             while offset < len(universe):
                 if not self._running or not self.scan_enabled:
-                    break
-                if (
-                    self.trend_length != trend_length
-                    or self.ema_filter_length != ema_filter_length
-                    or self.h1_enabled != h1_enabled
-                    or self.rr_min != rr_min
-                    or self.rr_max != rr_max
-                ):
-                    self._scan_resume_cursor = 0
-                    self._scan_resume_boundary_ms = 0
                     break
                 logical_start = (offset // SCAN_MAX_PAIRS_PER_CYCLE) * SCAN_MAX_PAIRS_PER_CYCLE
                 logical_end = min(logical_start + SCAN_MAX_PAIRS_PER_CYCLE, len(universe))
@@ -6925,33 +6913,22 @@ class TradingEngine:
                     "requested": 0, "processed": 0, "analyzed": 0,
                     "already_seen": 0, "warmup": 0, "stale": 0,
                     "no_signal": 0, "rejected": 0, "rejection_reasons": {},
-                    "blue": 0, "red": 0,
-                    "orders": 0, "filled": 0, "deferred": 0, "unknown": 0,
-                    "ema_blocked": 0, "h1_ema_blocked": 0, "btc_ema_blocked": 0, "max_blocked": 0, "duplicate": 0,
-                    "btc_filter_status": btc_filter_status,
+                    "blue": 0, "red": 0, "orders": 0, "filled": 0,
+                    "deferred": 0, "unknown": 0, "ema_blocked": 0,
+                    "h1_ema_blocked": 0, "btc_ema_blocked": 0,
+                    "max_blocked": 0, "duplicate": 0,
+                    "btc_filter_status": "DISABLED — NOT A TRADE GATE",
                     "errors": 0, "details": [],
                 }
-                interrupted = False
-                configuration_changed = False
                 log.info(
-                    "[SCAN] MTF batch start | batch=%02d | coins=%04d-%04d/%04d | pass_from=%04d | M15 LEN=%s | H4 EMA=%s",
+                    "[SCAN] EMA9/21 POC batch=%02d | coins=%04d-%04d/%04d | M15 | cursor=%04d",
                     batch_number, batch_start, batch_end, len(universe), pass_start,
-                    trend_length, ema_filter_label(ema_filter_length),
                 )
+
                 for local_index, symbol in enumerate(batch):
                     absolute_index = offset + local_index
-                    if (
-                        self.trend_length != trend_length
-                        or self.ema_filter_length != ema_filter_length
-                        or self.h1_enabled != h1_enabled
-                        or self.supertrend_atr_length != supertrend_atr_length
-                        or self.supertrend_factor != supertrend_factor
-                        or self.rr_min != rr_min
-                        or self.rr_max != rr_max
-                    ):
-                        configuration_changed = True
-                        self._scan_resume_cursor = 0
-                        self._scan_resume_boundary_ms = 0
+                    if not self._running or not self.scan_enabled:
+                        self._scan_resume_cursor = absolute_index
                         break
                     if self._binance_cooldown_remaining() > 0:
                         interrupted = True
@@ -6959,146 +6936,78 @@ class TradingEngine:
                         self._scan_trigger_now = True
                         self._scan_resume_cursor = absolute_index
                         break
+
                     stats["requested"] += 1
                     try:
+                        # One bounded M15 history request per pair. The last row
+                        # is forming; all calculations use only m15[:-1].
+                        history_count = max(220, volumatic.POC_LOOKBACK + 20)
                         m15 = await self.rest.get_klines_with_forming(
-                            symbol, "15m", self._kline_history_limit(trend_length, supertrend_atr_length), interval_ms
+                            symbol, "15m", history_count, interval_ms
                         )
-                        if m15 is not None and len(m15) >= 5:
-                            # Include all completed candles only; the last row is still forming.
-                            await self._refresh_signal_trace_state(symbol, m15[:-1], trend_length)
-                        h4 = await self.rest.get_klines(
-                            symbol, "4h", self._h4_ema_history_limit(ema_filter_length),
-                            volumatic.TIMEFRAME_MS["H4"],
-                        )
-                        if (
-                            self.trend_length != trend_length
-                            or self.ema_filter_length != ema_filter_length
-                            or self.h1_enabled != h1_enabled
-                            or self.supertrend_atr_length != supertrend_atr_length
-                            or self.supertrend_factor != supertrend_factor
-                            or self.rr_min != rr_min
-                            or self.rr_max != rr_max
-                        ):
-                            configuration_changed = True
-                            self._scan_resume_cursor = 0
-                            self._scan_resume_boundary_ms = 0
-                            break
-                        min_m15 = max(108, trend_length + 8, supertrend_atr_length + 1)
-                        min_h4 = 21
-                        if m15 is None or len(m15) < min_m15 or h4 is None or len(h4) < min_h4:
+                        if m15 is None or len(m15) < volumatic.POC_LOOKBACK + 2:
                             stats["warmup"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
-                        entry_open_ms = int(m15["t"][-1])
-                        expiry_ms = entry_open_ms + interval_ms
-                        key = f"M15:{symbol}"
-                        if entry_open_ms <= int(self.last_processed_candles.get(key, 0)):
-                            stats["already_seen"] += 1
+
+                        closed = m15[:-1]
+                        next_open_ms = int(m15["t"][-1])
+                        last_closed_open_ms = int(closed["t"][-1])
+                        if last_closed_open_ms + interval_ms != next_open_ms:
+                            stats["stale"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
+                        expiry_ms = next_open_ms + interval_ms
                         now_ms = int(time.time() * 1000)
-                        if not (entry_open_ms <= now_ms < expiry_ms) or int(m15["t"][-2]) + interval_ms != entry_open_ms:
-                            self.last_processed_candles[key] = entry_open_ms
+                        if not (next_open_ms <= now_ms < expiry_ms):
                             stats["stale"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
 
-                        signal_diagnostics: dict[str, Any] = {}
-                        signal = volumatic.detect_distance_filter_signal(
-                            m15, h4, symbol=symbol, btc_h4_closed=btc_h4_closed,
-                            trend_length=100, supertrend_atr_length=14,
-                            supertrend_factor=2.5, rr_min=3.0, rr_max=5.0,
-                            diagnostics=signal_diagnostics,
+                        key = f"M15:{symbol}"
+                        if next_open_ms <= int(self.last_processed_candles.get(key, 0)):
+                            stats["already_seen"] += 1
+                            self._scan_resume_cursor = absolute_index + 1
+                            continue
+
+                        signal = volumatic.build_poc_limit_signal(
+                            closed, symbol=symbol, next_open_time_ms=next_open_ms
                         )
                         stats["analyzed"] += 1
+                        self.last_processed_candles[key] = next_open_ms
                         if signal is None:
-                            rejection_reason = str(signal_diagnostics.get("reason") or "UNCLASSIFIED_REJECTION")
-                            if rejection_reason == "NO_NEW_BUBBLE":
-                                stats["no_signal"] += 1
-                            else:
-                                stats["rejected"] += 1
-                                reasons = stats["rejection_reasons"]
-                                reasons[rejection_reason] = int(reasons.get(rejection_reason, 0)) + 1
-                            self.last_processed_candles[key] = entry_open_ms
+                            stats["no_signal"] += 1
                             self._scan_resume_cursor = absolute_index + 1
                             continue
 
-                        # H1 EMA9/21 is queried only for an otherwise-valid M15/H4/BTC candidate.
-                        # H1 is entry-only; it is never subscribed as a position exit stream.
-                        h1 = None
-                        try:
-                            h1 = await self.rest.get_klines(
-                                symbol, "1h", max(120, self._h4_ema_history_limit((9, 21))),
-                                H1_MS, force_refresh=False,
-                            )
-                        except BinanceRateLimitError:
-                            raise
-                        except Exception as h1_exc:
-                            log.warning("[H1 ENTRY] %s H1 history unavailable; candidate fails closed: %s", symbol, str(h1_exc)[:180])
-                        signal.update(volumatic.h1_ema_filter_state(
-                            h1, (9, 21), str(signal.get("direction") or ""),
-                            int(signal.get("signal_close_time_ms") or 0),
-                        ))
-                        signal["h1_enabled_at_scan"] = True
-                        if not signal.get("h1_ema_filter_ready") or not signal.get("h1_ema_filter_passed"):
-                            stats["h1_ema_blocked"] += 1
-                            reason = str(signal.get("h1_ema_filter_reason") or "H1_EMA_NOT_READY")
-                            stats["rejection_reasons"][reason] = int(stats["rejection_reasons"].get(reason, 0)) + 1
-                            self.last_processed_candles[key] = entry_open_ms
-                            self._scan_resume_cursor = absolute_index + 1
-                            continue
-
-                        # Keep the incremental M15 exit state warm from the exact same
-                        # closed history used for signal calculation. This costs no extra REST call.
-                        await self._refresh_signal_trace_state(symbol, m15[:-1], trend_length)
-                        bubble = str(signal.get("signal") or "?").upper()
-                        direction = str(signal.get("direction") or "?").upper()
-                        stats["blue" if bubble == "BLUE" else "red"] += 1
-                        try:
-                            outcome = await self._dispatch_mode_b_signal(signal, expiry_ms, source="SCANNER_M15_CONFIRMED")
-                        except Exception as signal_exc:
-                            self._signal_retries[key] = {
-                                "signal": signal, "expiry_ms": expiry_ms, "key": key,
-                                "attempts": 0, "last_error": str(signal_exc)[:500],
-                                "source": "SCANNER_M15_CONFIRMED",
-                            }
-                            stats["errors"] += 1
-                            errors_total += 1
-                            outcome = "ERROR_RETRY"
-                            log.exception("[SIGNAL] %s %s failed: %s", symbol, bubble, signal_exc)
-                        if outcome == "ORDER_CREATED": stats["orders"] += 1
-                        elif outcome == "ORDER_FILLED": stats["filled"] += 1
-                        elif outcome == "ORDER_DEFERRED": stats["deferred"] += 1
-                        elif outcome == "ORDER_UNKNOWN": stats["unknown"] += 1
-                        elif outcome == "EMA_BLOCKED": stats["ema_blocked"] += 1
-                        elif outcome == "H1_EMA_BLOCKED": stats["h1_ema_blocked"] += 1
-                        elif outcome == "BTC_EMA_BLOCKED": stats["btc_ema_blocked"] += 1
-                        elif outcome == "MAX_BLOCKED": stats["max_blocked"] += 1
-                        elif outcome in {"DUPLICATE", "IGNORED_TIMEFRAME", "EXCHANGE_SLOT_EXISTS"}: stats["duplicate"] += 1
-                        stats["details"].append(
-                            f"#{absolute_index+1:04d} {symbol} {bubble}/{direction} M15LEN{trend_length} "
-                            f"H4EMA={ema_filter_values_label(ema_filter_length, signal.get('ema_filter_value'), signal.get('ema_filter_slow_value'))} "
-                            f"H1EMA={signal.get('h1_ema_filter_value')}/{signal.get('h1_ema_filter_slow_value')}({signal.get('h1_ema_filter_reason', '-')}) "
-                            f"BTCEMA={signal.get('btc_ema_fast_value')}/{signal.get('btc_ema_slow_value')} "
-                            f"BTC={signal.get('btc_ema_filter_reason', 'UNKNOWN')} "
-                            f"ENTRY={signal.get('entry_price')} SL={signal.get('stop_loss')} "
-                            f"TP={signal.get('take_profit')} RR={signal.get('take_profit_rr')} "
-                            f"SRC={signal.get('take_profit_source')}@{signal.get('liquidity_pool_timeframe') or '-'} {outcome}"[:230]
+                        direction = str(signal["direction"]).upper()
+                        signal["source"] = "SCANNER_M15_EMA9_21_VP_POC"
+                        outcome = await self._dispatch_mode_b_signal(
+                            signal, expiry_ms, source="SCANNER_M15_EMA9_21_VP_POC"
                         )
-                        self.last_processed_candles[key] = entry_open_ms
-                        if outcome != "ERROR_RETRY":
-                            self._signal_retries.pop(key, None)
+                        if direction == "LONG":
+                            stats["blue"] += 1
+                        else:
+                            stats["red"] += 1
+                        if outcome in {"ORDER_CREATED", "ORDER_FILLED"}:
+                            stats["orders"] += 1
+                        elif outcome == "ORDER_DEFERRED":
+                            stats["deferred"] += 1
+                        elif outcome == "ORDER_UNKNOWN":
+                            stats["unknown"] += 1
+                        elif outcome == "MAX_BLOCKED":
+                            stats["max_blocked"] += 1
+                        elif outcome in {"DUPLICATE", "DUPLICATE_SIGNAL_CANDLE", "EXCHANGE_SLOT_EXISTS"}:
+                            stats["duplicate"] += 1
+                        stats["details"].append(
+                            f"#{absolute_index + 1:04d} {symbol} {direction} "
+                            f"EMA9={signal['ema_filter_value']:.8g}/EMA21={signal['ema_filter_slow_value']:.8g} "
+                            f"POC={signal['poc_price']:.8g} SL={signal['stop_loss']:.8g} "
+                            f"TP={signal['poc_price'] + (signal['poc_price'] - signal['stop_loss']) * (1 if direction == 'LONG' else -1):.8g} "
+                            f"RR=1R {outcome}"[:230]
+                        )
                         stats["processed"] += 1
                         processed_total += 1
-                        self._scan_resume_cursor = absolute_index + 1
-                        # Pending setups/orders do not consume position capacity.
-                        # The scanner continues through the full universe; the
-                        # max-position guard is checked again at actual entry.
-                        if self._has_unprotected_real_position():
-                            self._scan_protection_paused = True
-                            protection_paused = True
-                            break
                     except BinanceRateLimitError as exc:
                         stats["errors"] += 1
                         errors_total += 1
@@ -7106,36 +7015,33 @@ class TradingEngine:
                         self._scan_interrupted_by_cooldown = True
                         self._scan_trigger_now = True
                         self._scan_resume_cursor = absolute_index
-                        await self._notify_binance_cooldown(exc, source="SCANNER M15/H4 OR ORDER", symbol=symbol)
+                        await self._notify_binance_cooldown(
+                            exc, source="EMA9/21 POC SCANNER M15", symbol=symbol
+                        )
                         break
                     except Exception as exc:
                         stats["errors"] += 1
                         errors_total += 1
                         self._scan_resume_cursor = absolute_index + 1
-                        log.exception("[SCAN] %s M15/H4 failed: %s", symbol, exc)
+                        log.exception("[SCAN] %s EMA9/21 POC analysis failed: %s", symbol, exc)
+
                     if SCAN_PAIR_DELAY_SECONDS > 0:
                         await asyncio.sleep(SCAN_PAIR_DELAY_SECONDS)
 
                 release_memory()
                 await self._send_scan_batch_report(
-                    timeframe="M15 (EMA H4)", trend_length=trend_length,
-                    ema_length=ema_filter_length, supertrend_atr_length=supertrend_atr_length,
-                    supertrend_factor=supertrend_factor, rr_min=rr_min, rr_max=rr_max,
-                    batch_number=batch_number, batch_start=batch_start, batch_end=batch_end,
-                    universe_total=len(universe), stats=stats,
-                    elapsed=time.monotonic()-batch_started, interrupted=interrupted,
-                    configuration_changed=configuration_changed, pass_start=pass_start,
+                    timeframe="M15 EMA9/21 + VP POC", trend_length=21,
+                    ema_length=(9, 21), supertrend_atr_length=14,
+                    supertrend_factor=2.5, rr_min=Decimal("1"), rr_max=Decimal("1"),
+                    batch_number=batch_number, batch_start=batch_start,
+                    batch_end=batch_end, universe_total=len(universe), stats=stats,
+                    elapsed=time.monotonic() - batch_started, interrupted=interrupted,
+                    pass_start=pass_start,
                 )
                 await self._save_runtime_settings()
                 await self._save_active_state()
-                if configuration_changed:
-                    self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
-                    break
                 if interrupted or self._binance_cooldown_remaining() > 0 or self._scan_interrupted_by_cooldown:
                     self._scan_trigger_now = True
-                    break
-                if protection_paused:
-                    log.warning("[SCAN] paused: Binance TP/SL are not both confirmed active yet.")
                     break
                 if self._scan_resume_cursor >= logical_end:
                     offset = logical_end
@@ -7152,13 +7058,11 @@ class TradingEngine:
             await self._sync_ws_symbols()
             if self._scan_interrupted_by_cooldown or self._binance_cooldown_remaining() > 0:
                 self._scan_trigger_now = True
-            elapsed = time.monotonic() - started
             log.info(
-                "[SCAN] cycle %s | signal_tf=M15 ema_tf=H4 btc_filter=%s | processed=%s/%s | errors=%s | cursor=%s | "
-                "max_positions=%s pending_setups=%s protection_pause=%s | duration=%.1fs",
-                "complete" if completed else "paused", btc_filter_status, processed_total, len(universe), errors_total,
-                self._scan_resume_cursor, len(self._active_slot_projection()), self._has_pending_entry_limit(),
-                self._has_unprotected_real_position(), elapsed,
+                "[SCAN] EMA9/21 POC %s | processed=%s/%s | errors=%s | cursor=%s | positions=%s | pending=%s | duration=%.1fs",
+                "complete" if completed else "paused", processed_total, len(universe),
+                errors_total, self._scan_resume_cursor, len(self._active_slot_projection()),
+                self._has_pending_entry_limit(), time.monotonic() - started,
             )
 
     async def _dispatch_mode_b_signal(
@@ -7472,40 +7376,48 @@ class TradingEngine:
                 db.close()
 
     async def _handle_signal(self, signal: dict[str, Any], expiry_ms: int) -> str:
-        pair = normalize_symbol(signal["symbol"])
+        """Create one M15 POC limit setup from the EMA9/21 backtest baseline."""
+        pair = normalize_symbol(signal.get("symbol") or "")
+        direction = str(signal.get("direction") or "").upper()
         if pair in self.banned_symbols:
-            log.info("[BAN] scanner signal rejected for permanently banned symbol %s", pair)
             return "BANNED_SYMBOL"
-        direction = str(signal["direction"]).upper()
         if direction not in {"LONG", "SHORT"}:
-            raise ValueError(f"Arah sinyal tidak valid: {direction}")
-        if str(signal.get("signal_mode") or "").upper() != "CONFIRMED_M15_NEXT_OPEN":
-            raise ValueError("Signal ditolak: hanya sinyal confirmed M15 next-open yang diterima.")
+            raise ValueError("Arah setup EMA9/21 tidak valid.")
+        if str(signal.get("signal_mode") or "").upper() != "VP_POC_M15_LIMIT":
+            raise ValueError("Signal mode tidak sesuai baseline EMA9/21 + VP POC M15.")
+
         async with self._trade_lock:
             if pair in self.banned_symbols:
-                log.info("[BAN] signal rejected after trade-lock recheck | %s", pair)
                 return "BANNED_SYMBOL"
             signal_close_ms = int(signal.get("signal_close_time_ms") or 0)
             entry_open_ms = int(signal.get("entry_candle_open_time_ms") or 0)
             entry_close_ms = int(signal.get("entry_candle_close_time_ms") or 0)
-            if signal_close_ms != entry_open_ms or entry_close_ms != entry_open_ms + 900_000 or int(expiry_ms) != entry_close_ms:
-                raise ValueError("Urutan candle tidak konsisten: sinyal M15 harus masuk pada open M15 berikutnya.")
+            if (
+                signal_close_ms != entry_open_ms
+                or entry_close_ms != entry_open_ms + M15_MS
+                or int(expiry_ms) != entry_close_ms
+            ):
+                raise ValueError("Timestamp setup M15 tidak kontigu atau expiry bukan akhir candle entry.")
             now_ms = int(time.time() * 1000)
             if not (entry_open_ms <= now_ms < entry_close_ms):
-                await self._record_event("M15_SIGNAL_EXPIRED_BEFORE_ORDER", None, pair=pair, direction=direction)
+                await self._record_event("POC_SETUP_EXPIRED_BEFORE_SUBMIT", None, pair=pair, direction=direction)
                 return "EXPIRED"
 
-            # Backtest ignores any further signal while a trade/order on the pair is active.
-            existing = next((t for t in self.active_trades.values()
-                             if t.pair == pair and t.status in {"PENDING", "FILLED"}), None)
+            # Backtest permits one active setup/position per pair. A pending POC
+            # order expires after exactly one M15 candle; an open trade blocks new setups.
+            existing = next((
+                t for t in self.active_trades.values()
+                if t.pair == pair and t.timeframe == "M15" and t.status in {"PENDING", "FILLED"}
+            ), None)
             if existing is not None:
-                await self._record_event("SIGNAL_IGNORED_ACTIVE_TRADE", existing,
-                                         signal_direction=direction, signal=signal.get("signal"),
-                                         reason="Backtest model ignores signals until the active trade reaches SL/TP.")
+                await self._record_event(
+                    "SIGNAL_IGNORED_ACTIVE_TRADE", existing,
+                    signal_direction=direction,
+                    reason="One active POC setup/position per pair until its one-candle order expires or position reaches SL/TP.",
+                )
                 return "DUPLICATE"
-            slot_projection = self._active_slot_projection()
-            pair_slots = {k: v for k, v in slot_projection.items() if k[0] == pair}
-            if pair_slots:
+
+            if any(k[0] == pair for k in self._active_slot_projection()):
                 await self._record_event("SIGNAL_BLOCKED_EXCHANGE_POSITION", None, pair=pair, direction=direction)
                 return "EXCHANGE_SLOT_EXISTS"
             pair_open_orders = any(
@@ -7517,354 +7429,149 @@ class TradingEngine:
             if pair_open_orders:
                 await self._record_event("SIGNAL_BLOCKED_EXISTING_EXCHANGE_ORDER", None, pair=pair, direction=direction)
                 return "EXCHANGE_SLOT_EXISTS"
-            # Do not reject a valid signal just because all position slots are
-            # currently occupied. Pending setups are local price watches and do
-            # not reserve capacity. The live position limit is checked again at
-            # the actual PAPER fill / immediately before the REAL MARKET entry.
-
-            filter_length = volumatic.normalize_ema_filter_length(signal.get("ema_filter_length", self.ema_filter_length))
-            def positive_decimal(raw: Any) -> Decimal | None:
-                if raw in (None, ""):
-                    return None
-                try:
-                    value = Decimal(str(raw))
-                    return value if value.is_finite() and value > 0 else None
-                except (InvalidOperation, ValueError, TypeError):
-                    return None
-            filter_value = positive_decimal(signal.get("ema_filter_value"))
-            filter_slow_value = positive_decimal(signal.get("ema_filter_slow_value"))
-            filter_passed = bool(signal.get("ema_filter_passed", False))
-            filter_ready = bool(signal.get("ema_filter_ready", filter_length is None))
-            needs_slow = isinstance(filter_length, tuple)
-            if filter_length is not None and (not filter_ready or filter_value is None or (needs_slow and filter_slow_value is None) or not filter_passed):
-                reason = "H4_EMA_NOT_READY" if not filter_ready or filter_value is None or (needs_slow and filter_slow_value is None) else "H4_EMA_DIRECTION_NOT_ALIGNED"
-                await self._record_event("SIGNAL_REJECTED_BY_H4_EMA", None, pair=pair, direction=direction,
-                                         ema_filter_length=list(filter_length) if isinstance(filter_length, tuple) else filter_length,
-                                         ema_filter_value=decimal_to_str(filter_value),
-                                         ema_filter_slow_value=decimal_to_str(filter_slow_value), reason=reason)
-                await self.reply(
-                    f"⛔ SINYAL {direction} DIBLOKIR H4 EMA • {pair}\n"
-                    f"Filter: {ema_filter_values_label(filter_length, filter_value, filter_slow_value)}\n"
-                    f"Alasan: {reason}. Tidak ada order yang dibuat."
-                )
-                return "EMA_BLOCKED"
-
-            # H1 EMA entry gate: same /EMA periods and direction rule as H4.
-            h1_fast_value = positive_decimal(signal.get("h1_ema_filter_value"))
-            h1_slow_value = positive_decimal(signal.get("h1_ema_filter_slow_value"))
-            h1_filter_enabled_for_signal = bool(signal.get("h1_enabled_at_scan", self.h1_enabled)) and self.h1_enabled
-            if h1_filter_enabled_for_signal and filter_length is not None:
-                if not signal.get("h1_ema_checked"):
-                    h1_reason = "H1_EMA_NOT_EVALUATED"
-                elif not signal.get("h1_ema_filter_ready") or h1_fast_value is None or (needs_slow and h1_slow_value is None):
-                    h1_reason = str(signal.get("h1_ema_filter_reason") or "H1_EMA_NOT_READY")
-                elif not signal.get("h1_ema_filter_passed"):
-                    h1_reason = str(signal.get("h1_ema_filter_reason") or "H1_EMA_DIRECTION_NOT_ALIGNED")
-                else:
-                    h1_reason = "OK"
-                if h1_reason != "OK":
-                    await self._record_event(
-                        "SIGNAL_REJECTED_BY_H1_EMA", None, pair=pair, direction=direction,
-                        ema_filter_length=list(filter_length) if isinstance(filter_length, tuple) else filter_length,
-                        h1_ema_filter_value=decimal_to_str(h1_fast_value),
-                        h1_ema_filter_slow_value=decimal_to_str(h1_slow_value),
-                        h1_ema_open_time_ms=signal.get("h1_ema_open_time_ms"),
-                        h1_ema_reference_close=signal.get("h1_ema_reference_close"),
-                        reason=h1_reason,
-                    )
-                    await self.reply(
-                        f"⛔ SINYAL {direction} DIBLOKIR H1 EMA • {pair}\n"
-                        f"Filter: {ema_filter_values_label(filter_length, h1_fast_value, h1_slow_value)}\n"
-                        f"Alasan: {h1_reason}. Tidak ada order yang dibuat."
-                    )
-                    return "H1_EMA_BLOCKED"
-
-            btc_filter_length_raw = signal.get("btc_ema_filter_length")
-            try:
-                btc_filter_length = volumatic.normalize_ema_filter_length(btc_filter_length_raw)
-            except (TypeError, ValueError):
-                btc_filter_length = None
-            btc_fast_value = positive_decimal(signal.get("btc_ema_fast_value"))
-            btc_slow_value = positive_decimal(signal.get("btc_ema_slow_value"))
-            btc_filter_ready = bool(signal.get("btc_ema_filter_ready", False))
-            btc_filter_passed = bool(signal.get("btc_ema_filter_passed", False))
-            if not isinstance(filter_length, tuple):
-                btc_reason = "BTC_EMA_REQUIRES_DUAL_EMA_CONFIG"
-            elif btc_filter_length != filter_length:
-                btc_reason = "BTC_EMA_CONFIG_MISMATCH"
-            elif not btc_filter_ready or btc_fast_value is None or btc_slow_value is None:
-                btc_reason = str(signal.get("btc_ema_filter_reason") or "BTC_H4_EMA_NOT_READY")
-            elif not btc_filter_passed:
-                btc_reason = str(signal.get("btc_ema_filter_reason") or "BTC_H4_EMA_DIRECTION_NOT_ALIGNED")
-            else:
-                btc_reason = "OK"
-            if btc_reason != "OK":
-                await self._record_event(
-                    "SIGNAL_REJECTED_BY_BTC_H4_EMA", None,
-                    pair=pair, direction=direction,
-                    btc_ema_filter_length=(list(btc_filter_length) if isinstance(btc_filter_length, tuple) else None),
-                    btc_ema_fast_value=decimal_to_str(btc_fast_value),
-                    btc_ema_slow_value=decimal_to_str(btc_slow_value),
-                    btc_ema_filter_ready=btc_filter_ready,
-                    btc_ema_filter_passed=btc_filter_passed,
-                    btc_ema_h4_open_time_ms=signal.get("btc_ema_h4_open_time_ms"),
-                    reason=btc_reason,
-                )
-                btc_label = (
-                    f"EMA{filter_length[0]}/EMA{filter_length[1]}"
-                    if isinstance(filter_length, tuple) else "DUAL EMA NOT CONFIGURED"
-                )
-                await self.reply(
-                    f"⛔ SINYAL {direction} DIBLOKIR BTC H4 EMA • {pair}\n"
-                    f"Filter BTCUSDT.P: {btc_label}\n"
-                    f"Fast: {fmt_price(btc_fast_value)} · Slow: {fmt_price(btc_slow_value)}\n"
-                    f"Alasan: {btc_reason}. Tidak ada order yang dibuat."
-                )
-                return "BTC_EMA_BLOCKED"
 
             meta = self.symbols.get(pair)
             if meta is None:
                 raise ValueError(f"Metadata Binance untuk {pair} tidak ditemukan.")
-            entry_raw = positive_decimal(signal.get("entry_price") or signal.get("limit_price"))
-            stop_raw = positive_decimal(signal.get("stop_loss") or signal.get("reference_sl"))
-            if entry_raw is None or stop_raw is None:
-                raise ValueError("Harga next M15 open atau Supertrend SL tidak valid.")
-            entry = quantized_price(entry_raw, meta.tick_size) if direction == "LONG" else quantized_price_ceiling(entry_raw, meta.tick_size)
-            stop = quantized_price(stop_raw, meta.tick_size) if direction == "LONG" else quantized_price_ceiling(stop_raw, meta.tick_size)
+
+            def finite_decimal(value: Any, label: str) -> Decimal:
+                try:
+                    number = Decimal(str(value))
+                except (InvalidOperation, ValueError, TypeError) as exc:
+                    raise ValueError(f"{label} bukan angka valid.") from exc
+                if not number.is_finite() or number <= 0:
+                    raise ValueError(f"{label} harus berupa angka positif finite.")
+                return number
+
+            raw_poc = finite_decimal(signal.get("poc_price") or signal.get("limit_price"), "POC")
+            raw_stop = finite_decimal(signal.get("stop_loss") or signal.get("reference_sl"), "Supertrend SL")
+            # PAPER simulation keeps raw POC/Supertrend prices exactly as the
+            # backtest does; exchange tick-size rounding is deliberately omitted.
+            entry = raw_poc
+            stop = raw_stop
             risk = (entry - stop) if direction == "LONG" else (stop - entry)
             if risk <= 0:
-                await self._record_event("SIGNAL_REJECTED_INVALID_SUPERTREND_SL", None, pair=pair,
-                                         direction=direction, entry=decimal_to_str(entry), stop=decimal_to_str(stop))
+                await self._record_event(
+                    "SIGNAL_REJECTED_INVALID_SUPERTREND_SL", None,
+                    pair=pair, direction=direction,
+                    entry=decimal_to_str(entry), stop=decimal_to_str(stop),
+                )
                 return "INVALID_SL"
-            # RR settings are snapshotted in the signal/trade. Later command
-            # changes apply only to future signals and never rewrite active targets.
-            try:
-                signal_rr_min = Decimal(str(signal.get("rr_min", self.rr_min)))
-                signal_rr_max = Decimal(str(signal.get("rr_max", self.rr_max)))
-                normalized_rr_min, normalized_rr_max = volumatic.normalize_rr_range(
-                    signal_rr_min, signal_rr_max
-                )
-                signal_rr_min = Decimal(str(normalized_rr_min))
-                signal_rr_max = Decimal(str(normalized_rr_max))
-            except (InvalidOperation, TypeError, ValueError) as exc:
-                await self._record_event(
-                    "SIGNAL_REJECTED_INVALID_RR_CONFIG", None, pair=pair, direction=direction,
-                    rr_min=str(signal.get("rr_min")), rr_max=str(signal.get("rr_max")), reason=str(exc),
-                )
-                return "RR_CONFIG_INVALID"
-            base_target_raw = entry + (
-                signal_rr_min * risk if direction == "LONG" else -signal_rr_min * risk
-            )
-            base_target = (
-                quantized_price_ceiling(base_target_raw, meta.tick_size)
-                if direction == "LONG" else quantized_price(base_target_raw, meta.tick_size)
-            )
-            target_source = str(signal.get("take_profit_source") or "RR_MIN_BASE").upper()
-            liquidity_pool_raw = positive_decimal(
-                signal.get("liquidity_pool_price") or signal.get("take_profit")
-            )
-            target = base_target
-            liquidity_pool_price = None
-            if target_source == "VOLUME_LIQUIDITY" and liquidity_pool_raw is not None:
-                # Round a pool toward entry so the target never overshoots
-                # the structural level or crosses this trade's configured RR_MAX.
-                candidate_target = (
-                    quantized_price(liquidity_pool_raw, meta.tick_size)
-                    if direction == "LONG" else quantized_price_ceiling(liquidity_pool_raw, meta.tick_size)
-                )
-                candidate_rr = directional_reward_r(direction, entry, candidate_target, risk)
-                if (
-                    is_valid_liquidity_reward_r(candidate_rr, signal_rr_min, signal_rr_max)
-                    and (candidate_target > entry if direction == "LONG" else candidate_target < entry)
-                ):
-                    target = candidate_target
-                    liquidity_pool_price = candidate_target
-                else:
-                    target_source = "RR_MIN_BASE"
-            else:
-                target_source = "RR_MIN_BASE"
-            target_rr = directional_reward_r(direction, entry, target, risk) or signal_rr_min
-            if target <= 0:
-                raise ValueError("Target TP tidak valid setelah tick-size rounding.")
-            signal_close_price = positive_decimal(signal.get("signal_close_price") or signal.get("close_price")) or entry
-            bubble_price = positive_decimal(signal.get("bubble_price")) or signal_close_price
-            signal_close = datetime.fromtimestamp(signal_close_ms / 1000, tz=timezone.utc)
-            bubble_time_ms = int(signal.get("bubble_visual_time_ms") or signal.get("signal_open_time_ms") or signal_close_ms)
-            bubble_time = datetime.fromtimestamp(bubble_time_ms / 1000, tz=timezone.utc)
-            trade_created_at = now_utc()
-            # Signal-trace lifetime starts when the BLUE/RED bubble forms, not
-            # when the scanner later creates its local entry watch.
-            entry_order_created_at = trade_created_at
-            entry_window_closes_at = datetime.fromtimestamp(entry_close_ms / 1000, tz=timezone.utc)
-            # The backtest enters at the next M15 candle OPEN. This setup is
-            # valid only during that single 15-minute candle; it is never a
-            # one-hour touch-watch or a late LIMIT order.
+
+            raw_target = entry + risk if direction == "LONG" else entry - risk
+            target = raw_target  # provisional; recomputed from the actual PAPER M5 fill at exact RR 1R
+            if target <= 0 or (direction == "LONG" and target <= entry) or (direction == "SHORT" and target >= entry):
+                return "INVALID_TP"
+
+            ema_fast = finite_decimal(signal.get("ema_filter_value"), "EMA9")
+            ema_slow = finite_decimal(signal.get("ema_filter_slow_value"), "EMA21")
+            signal_close_price = finite_decimal(signal.get("signal_close_price"), "M15 close")
+            atr_value = finite_decimal(signal.get("signal_atr"), "ATR14")
+            signal_close_dt = datetime.fromtimestamp(signal_close_ms / 1000, tz=timezone.utc)
+            bubble_time = datetime.fromtimestamp(int(signal.get("signal_open_time_ms") or (signal_close_ms - M15_MS)) / 1000, tz=timezone.utc)
             expiry_dt = datetime.fromtimestamp(entry_close_ms / 1000, tz=timezone.utc)
-            if trade_created_at >= expiry_dt:
-                await self._record_event(
-                    "M15_SIGNAL_TRACE_EXPIRED_BEFORE_WATCH", None, pair=pair, direction=direction,
-                    bubble_time_ms=bubble_time_ms, expiry_ms=int(expiry_dt.timestamp() * 1000),
-                )
+            created_at = now_utc()
+            if created_at >= expiry_dt:
                 return "EXPIRED"
-            atr_value = positive_decimal(signal.get("signal_atr"))
+
+            rr_one = Decimal("1")
             trade = Trade(
-                trade_id=generate_trade_id(pair), session_id=self.session_id, pair=pair,
-                direction=direction, timeframe="M15", trend_length=volumatic.normalize_trend_length(signal.get("trend_length", self.trend_length)),
-                signal=str(signal.get("signal") or ("BLUE" if direction == "LONG" else "RED")),
-                signal_time=signal_close, bubble_time=bubble_time, bubble_price=bubble_price, signal_atr=atr_value,
-                reference_sl=stop, stop_loss=stop, take_profit=target, rr_target=signal_rr_min,
-                rr_min=signal_rr_min, rr_max=signal_rr_max,
-                take_profit_source=target_source, take_profit_rr=target_rr,
-                liquidity_pool_price=liquidity_pool_price,
-                liquidity_pool_timeframe=(str(signal.get("liquidity_pool_timeframe") or "").upper() or None),
-                supertrend_atr_length=volumatic.normalize_supertrend_atr_length(
-                    signal.get("supertrend_atr_length", self.supertrend_atr_length)
-                ),
-                supertrend_factor=volumatic.normalize_supertrend_factor(
-                    signal.get("supertrend_factor", self.supertrend_factor)
-                ),
-                entry=entry, expires_at=expiry_dt, signal_close_price=signal_close_price,
-                created_at=trade_created_at, entry_order_created_at=entry_order_created_at,
-                entry_window_closes_at=entry_window_closes_at,
-                ema_filter_length=filter_length, ema_filter_value=filter_value,
-                ema_filter_slow_value=filter_slow_value,
-                ema_filter_passed=(filter_passed if filter_length is not None else None),
-                ema_exit_fast_length=(filter_length[0] if isinstance(filter_length, tuple) else None),
-                ema_exit_slow_length=(filter_length[1] if isinstance(filter_length, tuple) else None),
-                ema_exit_config_source=("SIGNAL_EMA_SNAPSHOT" if isinstance(filter_length, tuple) else "NO_DUAL_EMA_AT_SIGNAL"),
+                trade_id=generate_trade_id(pair), session_id=self.session_id,
+                pair=pair, direction=direction, timeframe="M15", trend_length=21,
+                signal="EMA9_21_VP_POC", signal_time=signal_close_dt,
+                bubble_time=bubble_time, bubble_price=ema_fast, signal_atr=atr_value,
+                reference_sl=stop, stop_loss=stop, take_profit=target,
+                rr_target=rr_one, rr_min=rr_one, rr_max=rr_one,
+                take_profit_source="RR_FIXED", take_profit_rr=rr_one,
+                supertrend_atr_length=14, supertrend_factor=2.5,
+                entry=entry, expires_at=expiry_dt,
+                signal_close_price=signal_close_price,
+                created_at=created_at, entry_order_created_at=created_at,
+                entry_window_closes_at=expiry_dt,
+                ema_filter_length=(9, 21), ema_filter_value=ema_fast,
+                ema_filter_slow_value=ema_slow, ema_filter_passed=True,
+                ema_exit_fast_length=None, ema_exit_slow_length=None,
+                ema_exit_config_source="DISABLED_VP_POC_BASELINE",
+                ema_exit_state="DISABLED",
                 margin_usdt=self.margin_usdt, leverage=self.leverage,
                 min_margin_mode=self.min_margin_enabled,
                 target_notional=self.margin_usdt * Decimal(self.leverage),
             )
-            # A signal candle is consumable only once per symbol, regardless of
-            # direction. Binance clientOrderId uniqueness ends when an order is
-            # terminal, so it cannot by itself stop a second order 10-15 seconds
-            # later after the first LIMIT has already filled.
-            signal_dedupe_key = f"{pair}|M15|{entry_open_ms}"
+            trade.real_intent = False
+            trade.real_enabled = False
+            trade.exchange_adopted = False
+            trade.real_state = "PAPER_POC_WAITING_TOUCH"
+
+            # One setup per source M15 candle, independent of direction or order status.
+            signal_dedupe_key = f"{pair}|M15|{entry_open_ms}|EMA9_21_POC"
             if not await self._claim_m15_signal(signal_dedupe_key):
                 await self._record_event(
                     "M15_SIGNAL_DUPLICATE_CANDLE_BLOCKED", None,
-                    pair=pair, direction=direction,
-                    signal_key=signal_dedupe_key,
-                    signal_close_time_ms=signal_close_ms,
-                    entry_candle_open_time_ms=entry_open_ms,
-                    reason="Satu simbol hanya boleh membuat satu entry pada candle sinyal M15 yang sama.",
+                    pair=pair, direction=direction, signal_key=signal_dedupe_key,
                 )
-                log.warning("[SCAN/DEDUP] %s duplicate signal candle blocked | key=%s", pair, signal_dedupe_key)
                 return "DUPLICATE_SIGNAL_CANDLE"
 
-            if self.real_mode:
-                if not REAL_EXECUTION_ENABLED:
-                    raise RuntimeError("REAL_EXECUTION_ENABLED=0; eksekusi LIVE dikunci oleh environment.")
-                if not self.real.configured:
-                    raise RuntimeError("BINANCE_API_KEY / BINANCE_API_SECRET belum lengkap.")
-            sizing_filters = {
-                "step_size": meta.step_size, "min_qty": meta.min_qty,
-                "max_qty": meta.max_qty, "min_notional": meta.min_notional,
-                "max_notional": meta.max_notional, "min_price": meta.min_price,
-                "max_price": meta.max_price,
-            }
-            if trade.min_margin_mode:
-                quantity, notional, minimum_margin, reason = compute_minimum_order(
-                    trade.entry, trade.leverage, sizing_filters
-                )
-                if quantity is None or notional is None or minimum_margin is None:
-                    raise RuntimeError(f"Minimum margin {pair} tidak valid: {reason}")
-                trade.quantity, trade.target_notional, trade.actual_notional = quantity, notional, notional
-                trade.margin_usdt = minimum_margin
-            elif self.real_mode:
-                quantity, reason = compute_quantity(trade.entry, trade.margin_usdt, trade.leverage, sizing_filters)
-                if quantity is None:
-                    raise RuntimeError(
-                        f"Ukuran order REAL ditolak: {reason}. Fixed margin harus tetap dalam "
-                        f"rentang {REAL_NOTIONAL_MIN_RATIO * 100:.0f}–{REAL_NOTIONAL_MAX_RATIO * 100:.0f}% dari target; "
-                        "jika LOT_SIZE Binance tidak memungkinkan, order tidak dipaksakan lebih besar."
-                    )
-                trade.quantity = quantity
-                trade.actual_notional = quantity * trade.entry
-            else:
-                trade.quantity = (trade.target_notional or (trade.margin_usdt * trade.leverage)) / trade.entry
-                trade.actual_notional = trade.quantity * trade.entry
-            # Entry is dispatched immediately at the next M15 candle open.
-            # For PAPER the backtest's exact M15 open is used; REAL sends one
-            # protected MARKET entry and records Binance's actual average fill.
-            trade.real_enabled = False
-            trade.real_intent = bool(self.real_mode)
-            trade.real_state = "REAL_WAITING_TRIGGER" if trade.real_intent else "PAPER_PENDING"
-            # Hold the trigger until the signal message has been sent.
-            trade.entry_inflight = True
             self.active_trades[trade.trade_id] = trade
             try:
                 await self._record_event(
-                    "M15_ENTRY_PENDING_CREATED", trade,
-                    order_type="MARKET_NEXT_M15_OPEN" if trade.real_intent else "PAPER_NEXT_M15_OPEN",
-                    signal_mode="CONFIRMED_M15_NEXT_OPEN",
-                    entry=decimal_to_str(trade.entry), stop_loss=decimal_to_str(trade.stop_loss),
-                    take_profit=decimal_to_str(trade.take_profit),
-                    rr_target=f"1:{decimal_to_str(trade.take_profit_rr)}",
-                    rr_min=decimal_to_str(trade.rr_min), rr_max=decimal_to_str(trade.rr_max),
-                    take_profit_source=trade.take_profit_source,
-                    liquidity_pool_price=decimal_to_str(trade.liquidity_pool_price),
-                    liquidity_pool_timeframe=trade.liquidity_pool_timeframe,
-                    signal_close_time_ms=signal_close_ms, entry_candle_open_time_ms=entry_open_ms,
-                    expires_at=iso_utc(trade.expires_at), expiry_seconds=900,
-                    real=trade.real_intent, quantity=decimal_to_str(trade.quantity),
+                    "M15_POC_LIMIT_SETUP_CREATED", trade,
+                    order_type="PAPER_M5_TOUCH",
+                    signal_mode="VP_POC_M15_LIMIT", ema9=decimal_to_str(ema_fast),
+                    ema21=decimal_to_str(ema_slow), poc=decimal_to_str(entry),
+                    stop_loss=decimal_to_str(stop), take_profit=decimal_to_str(target),
+                    rr="1R", atr_length=14, supertrend_factor=2.5,
+                    entry_window_open_ms=entry_open_ms,
+                    entry_window_close_ms=entry_close_ms,
+                    real=False, leverage=trade.leverage,
                     margin_usdt=decimal_to_str(trade.margin_usdt),
-                    leverage=trade.leverage, min_margin_mode=trade.min_margin_mode,
                 )
                 await self._save_active_state()
                 await self.ws.add_symbol(pair)
                 await self.reply(
-                    f"{'🟢' if direction == 'LONG' else '🔴'} VOLUMATIC {direction} • {pair}\n\n"
-                    f"Signal TF: M15 • EMA Trend TF: H4 • Volumatic Length: {trade.trend_length}\n"
-                    f"Signal: {trade.signal} confirmed M15 bubble\n"
-                    f"H4 EMA: {ema_filter_values_label(trade.ema_filter_length, trade.ema_filter_value, trade.ema_filter_slow_value)}\n"
-                    f"H1 EMA: {ema_filter_values_label(trade.ema_filter_length, h1_fast_value, h1_slow_value)}\n"
-                    + (
-                        f"H1 reference close: {fmt_price(positive_decimal(signal.get('h1_ema_reference_close')))}"
-                        f" • candle closed: {format_wib(datetime.fromtimestamp((int(signal.get('h1_ema_open_time_ms')) + H1_MS) / 1000.0, tz=timezone.utc))}\n"
-                        if signal.get("h1_ema_open_time_ms") not in (None, "") and positive_decimal(signal.get("h1_ema_reference_close")) is not None
-                        else "H1 reference close: UNAVAILABLE\n"
-                    )
-                    + f"Entry level (next M15 OPEN): {fmt_price(trade.entry)}\n"
-                    f"Eksekusi: {'MARKET segera pada window open M15; fill mengikuti harga Binance' if trade.real_intent else 'PAPER pada harga OPEN M15 (backtest parity)'}\n"
-                    f"Supertrend M15 SL: {fmt_price(trade.stop_loss)} • ATR {trade.supertrend_atr_length} / Factor {trade.supertrend_factor:g}\n"
-                    f"TP: {fmt_price(trade.take_profit)} • RR 1:{fmt_num(trade.take_profit_rr, 2)} "
-                    f"({'Volume Liquidity Trend' + (' · ' + trade.liquidity_pool_timeframe if trade.liquidity_pool_timeframe else '') if trade.take_profit_source == 'VOLUME_LIQUIDITY' else f'baseline {trade.rr_min}R'})\n"
-                    f"Entry window tutup: akhir candle M15 berikutnya ({format_wib(trade.expires_at)})\n"
+                    f"{'🟢' if direction == 'LONG' else '🔴'} EMA9/21 {direction} • {pair}\n\n"
+                    f"Signal TF: M15 • EMA9: {fmt_price(ema_fast)} • EMA21: {fmt_price(ema_slow)}\n"
+                    f"Volume Profile POC ({volumatic.POC_LOOKBACK} candles / {volumatic.POC_BARS} levels): {fmt_price(entry)}\n"
+                    f"Entry: LIMIT di POC (menunggu touch M5)\n"
+                    f"Supertrend M15 SL: {fmt_price(stop)} • ATR14 / Factor 2.5 (statis)\n"
+                    f"TP: {fmt_price(target)} • RR 1:1\n"
+                    f"Order berlaku sampai: {format_wib(expiry_dt)}\n"
                     f"Margin target: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
-                    + (
-                        f"Estimasi margin qty: {fmt_num((trade.actual_notional or Decimal('0')) / Decimal(trade.leverage), 5)} USDT "
-                        f"({'guard ±5% REAL' if trade.real_intent else 'PAPER exact'})\n"
-                        if not trade.min_margin_mode and trade.actual_notional is not None else ""
-                    )
-                    + f"Sizing: {'MINIMUM AUTO' if trade.min_margin_mode else 'FIXED TARGET'} • Qty (estimasi): {format_qty(trade.quantity or Decimal('0'))}\n"
-                    f"Mode: {'REAL' if trade.real_intent else 'PAPER'}"
+                    "Mode: PAPER ONLY (simulasi M5 OHLC; tidak mengirim order Binance)"
                 )
-            finally:
-                trade.entry_inflight = False
+            except Exception:
+                self.active_trades.pop(trade.trade_id, None)
+                raise
+
+            # Replay closed M5 bars from the start of this one-candle entry
+            # window. Scanner batches can take time, so the first POC touch may
+            # already have happened before the pair was reached.
+            current_m5_open = (int(time.time() * 1000) // M5_MS) * M5_MS
+            try:
+                recovered = await self._backfill_m5_position_history(
+                    pair, current_m5_open, after_open_ms=None
+                )
+            except BinanceRateLimitError as exc:
+                recovered = False
+                log.warning("[PAPER M5 REPLAY] %s rate-limited; setup cancelled rather than assuming no earlier POC touch: %s", pair, exc)
+            if not recovered:
+                await self._finalize_trade(
+                    trade, "CANCELED", None, "PAPER_M5_HISTORY_GAP_DURING_SETUP"
+                )
+                await self._sync_ws_symbols()
+                return "PAPER_DATA_GAP"
+            await self._sync_ws_symbols()
+            if trade.status == "CLOSED":
+                return "ORDER_FILLED"
             if trade.status != "PENDING":
-                return "ORDER_FILLED" if trade.status == "FILLED" else str(trade.status)
-            if trade.real_intent:
-                # Single-flight MARKET dispatch in the current M15 entry window.
-                # If a Binance cooldown blocks preflight, this setup expires at
-                # the window close and is never submitted late.
-                self._schedule_market_entry(trade, trade.entry, "M15_NEXT_OPEN")
-                return "ORDER_CREATED"
-            paper_filled = await self._fill_paper_entry_if_capacity(
-                trade, trade.entry, "PAPER_M15_NEXT_OPEN",
-                filled_at=datetime.fromtimestamp(entry_open_ms / 1000, tz=timezone.utc),
-            )
-            if not paper_filled:
-                return "MAX_BLOCKED"
-            return "ORDER_FILLED"
+                return "PAPER_SETUP_TERMINAL"
+            return "ORDER_CREATED"
 
     async def _fill_paper_entry_if_capacity(
         self, trade: Trade, price: Decimal, source: str,
         *, filled_at: datetime | None = None,
     ) -> bool:
-        """Fill PAPER at the official next-M15 open when a position slot is available."""
-        if trade.status != "PENDING":
+        """Fill a PAPER POC setup at the modeled first M5 touch/gap price."""
+        if trade.status != "PENDING" or trade.real_intent or trade.real_enabled:
             return False
         active_positions = len(self._active_slot_projection())
         if active_positions >= self.max_active_trades:
@@ -7874,9 +7581,15 @@ class TradingEngine:
                 max_active_positions=self.max_active_trades,
                 trigger_source=source,
             )
-            await self._finalize_trade(
-                trade, "CANCELED", None, "MAX_ACTIVE_POSITIONS_REACHED_AT_PAPER_TOUCH"
-            )
+            await self._finalize_trade(trade, "CANCELED", None, "MAX_ACTIVE_POSITIONS_REACHED_AT_POC_TOUCH")
+            return False
+        stop = trade.reference_sl or trade.stop_loss
+        if stop is None:
+            await self._finalize_trade(trade, "CANCELED", None, "MISSING_SUPERTREND_SL")
+            return False
+        risk = price - stop if trade.direction == "LONG" else stop - price
+        if risk <= 0:
+            await self._finalize_trade(trade, "CANCELED", None, "GAP_FILL_INVALIDATED_SUPERTREND_RISK")
             return False
         await self._mark_filled(trade, price, source, filled_at=filled_at)
         return True
@@ -8129,23 +7842,25 @@ class TradingEngine:
             raise MarketEntryRejected("INSUFFICIENT_AVAILABLE_BALANCE", f"Available balance {fmt_num(available, 4)} USDT tidak cukup.")
 
         live = self._current_price(trade.pair) or trigger_price
+        is_poc_limit = str(trade.signal or "").upper() == "EMA9_21_VP_POC"
+        sizing_price = trade.entry if is_poc_limit else live
         if (direction == "LONG" and live <= stop) or (direction == "SHORT" and live >= stop):
             raise MarketEntryRejected(
                 "PRICE_BEYOND_SL_BEFORE_ENTRY",
-                f"Harga {fmt_price(live)} sudah melewati SL {fmt_price(stop)}; setup dibatalkan.",
+                f"Harga pasar {fmt_price(live)} sudah berada di sisi invalid terhadap SL {fmt_price(stop)}; setup dibatalkan.",
             )
         symbol_max = Decimal(str(filters.get("max_notional") or "0"))
         if leverage_max_notional is not None:
             filters["max_notional"] = min(symbol_max, leverage_max_notional) if symbol_max > 0 else leverage_max_notional
         if trade.min_margin_mode:
             quantity, notional, minimum_margin, reason = compute_minimum_order(
-                live, trade.leverage, filters, sizing_available, leverage_max_notional
+                sizing_price, trade.leverage, filters, sizing_available, leverage_max_notional
             )
             if quantity is None or notional is None or minimum_margin is None:
                 raise MarketEntryRejected("MIN_MARGIN_REJECTED", f"Minimum margin ditolak: {reason}")
             trade.margin_usdt, trade.target_notional = minimum_margin, notional
         else:
-            quantity, reason = compute_quantity(live, trade.margin_usdt, trade.leverage, filters, sizing_available)
+            quantity, reason = compute_quantity(sizing_price, trade.margin_usdt, trade.leverage, filters, sizing_available)
             if quantity is None:
                 raise MarketEntryRejected(
                     "SIZE_REJECTED",
@@ -8154,7 +7869,7 @@ class TradingEngine:
                     "order ditolak bila aturan LOT_SIZE memaksa margin terlalu jauh.",
                 )
         market_cap = Decimal(str(filters.get("market_max_qty") or "0"))
-        if market_cap > 0 and quantity > market_cap:
+        if not is_poc_limit and market_cap > 0 and quantity > market_cap:
             raise MarketEntryRejected("QTY_ABOVE_MARKET_MAX", f"Qty {format_qty(quantity)} melebihi batas MARKET {format_qty(market_cap)}.")
 
         # Last synchronous safety gate immediately before committing the
@@ -8167,10 +7882,11 @@ class TradingEngine:
                 result="CANCELED", notify=False,
             )
         trade.position_side = ("LONG" if direction == "LONG" else "SHORT") if dual else "BOTH"
-        identity = f"{trade.pair}|{direction}|M15|{int(trade.signal_time.timestamp() * 1000)}|MARKET"
+        order_kind = "POC_LIMIT" if is_poc_limit else "MARKET"
+        identity = f"{trade.pair}|{direction}|M15|{int(trade.signal_time.timestamp() * 1000)}|{order_kind}"
         trade.entry_client_order_id = "VT" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:28]
         trade.quantity = quantity
-        trade.actual_notional = quantity * live
+        trade.actual_notional = quantity * sizing_price
         # Synchronous commit point: from here on an exchange order may exist, so
         # the trade is REAL, matched by clientOrderId, and never POSTed again.
         trade.real_enabled = True
@@ -8183,10 +7899,17 @@ class TradingEngine:
         response: dict[str, Any] | None = None
         error: Exception | None = None
         try:
-            response = await self.real.place_market_entry(
-                symbol=trade.pair, side=trade.entry_side, quantity=quantity,
-                position_side=trade.position_side, client_order_id=trade.entry_client_order_id,
-            )
+            if is_poc_limit:
+                response = await self.real.place_limit_entry(
+                    symbol=trade.pair, side=trade.entry_side, quantity=quantity,
+                    price=trade.entry, position_side=trade.position_side,
+                    client_order_id=trade.entry_client_order_id,
+                )
+            else:
+                response = await self.real.place_market_entry(
+                    symbol=trade.pair, side=trade.entry_side, quantity=quantity,
+                    position_side=trade.position_side, client_order_id=trade.entry_client_order_id,
+                )
         except BinanceRateLimitError as exc:
             if getattr(exc, "internal", False) or exc.status_code in {418, 429}:
                 self._revert_unsent_entry(trade)  # rejected by rate limit: nothing executed
@@ -8250,7 +7973,7 @@ class TradingEngine:
         trade.real_submit_ambiguous = False
         if response.get("orderId") is not None:
             trade.entry_order_id = int(response["orderId"])
-        # RESULT normally carries the final MARKET state; confirm by GET if not.
+        # LIMIT responses may be NEW/PARTIALLY_FILLED; confirm the current state by GET.
         if status not in terminal_states or (status == "FILLED" and avg <= 0):
             for _ in range(3):
                 try:
@@ -8268,7 +7991,7 @@ class TradingEngine:
         trade.entry_executed_qty = executed
         if executed > 0:
             cum_quote = self._safe_decimal(response.get("cumQuote"))
-            fill_price = avg if avg > 0 else (cum_quote / executed if cum_quote > 0 else live)
+            fill_price = avg if avg > 0 else (cum_quote / executed if cum_quote > 0 else trade.entry)
             trade.quantity = executed
             trade.entry_order_terminal = status in terminal_states
             trade.real_state = "REAL_FILLED" if trade.entry_order_terminal else "REAL_PARTIALLY_FILLED"
@@ -8281,7 +8004,7 @@ class TradingEngine:
             if deferred is not None:
                 await self._record_event(deferred[0], trade, **deferred[1])
             await self._record_event(
-                "MARKET_ENTRY_FILLED", trade, client_order_id=trade.entry_client_order_id,
+                "POC_LIMIT_ENTRY_FILLED" if trade.signal == "EMA9_21_VP_POC" else "MARKET_ENTRY_FILLED", trade, client_order_id=trade.entry_client_order_id,
                 order_id=trade.entry_order_id, trigger_price=decimal_to_str(trade.entry_trigger_price),
                 fill_price=decimal_to_str(trade.fill_price), quantity=decimal_to_str(trade.quantity),
                 protection_state=trade.protection_state, source=source,
@@ -8294,8 +8017,8 @@ class TradingEngine:
         if status in terminal_states:
             self._revert_unsent_entry(trade)
             raise MarketEntryRejected(f"BINANCE_MARKET_{status}", f"Order market berakhir {status} tanpa eksekusi.")
-        # Unexpected live MARKET order without execution: keep it as a REAL pending
-        # order; the existing reconcile path polls it by clientOrderId.
+        # Accepted POC LIMIT without execution remains PENDING until M5-equivalent
+        # exchange fill updates arrive or the one-candle order window expires.
         trade.real_state = "REAL_PENDING"
         await self._save_active_state()
 
@@ -8383,8 +8106,9 @@ class TradingEngine:
             else:
                 trade.initial_risk = risk_decimal
                 meta = self.symbols.get(trade.pair)
-                tick_size = meta.tick_size if meta is not None else Decimal("0")
-                if meta is not None:
+                use_exchange_precision = bool(trade.real_enabled and meta is not None)
+                tick_size = meta.tick_size if use_exchange_precision else Decimal("0")
+                if use_exchange_precision:
                     trade.stop_loss = (
                         quantized_price(stop, tick_size)
                         if trade.direction == "LONG"
@@ -8400,31 +8124,19 @@ class TradingEngine:
                 )
                 base_target = (
                     quantized_price_ceiling(raw_base_target, tick_size)
-                    if meta is not None and trade.direction == "LONG"
+                    if use_exchange_precision and trade.direction == "LONG"
                     else (
                         quantized_price(raw_base_target, tick_size)
-                        if meta is not None else raw_base_target
+                        if use_exchange_precision else raw_base_target
                     )
                 )
 
                 # A selected pool is an absolute structural price. Keep it only
                 # when the actual/cumulative fill still places it inside this
                 # trade's saved RR_MIN..RR_MAX band; otherwise use RR_MIN fallback.
-                candidate_pool = trade.liquidity_pool_price or trade.take_profit
-                pool_rr = (
-                    directional_reward_r(trade.direction, trade.fill_price, candidate_pool, trade.initial_risk)
-                    if candidate_pool is not None else None
-                )
-                pool_still_valid = (
-                    trade.take_profit_source == "VOLUME_LIQUIDITY"
-                    and candidate_pool is not None
-                    and is_valid_liquidity_reward_r(pool_rr, trade.rr_min, trade.rr_max)
-                    and (
-                        candidate_pool > trade.fill_price
-                        if trade.direction == "LONG"
-                        else candidate_pool < trade.fill_price
-                    )
-                )
+                candidate_pool = None
+                pool_rr = None
+                pool_still_valid = False  # v4 PAPER baseline has no liquidity-pool TP
                 if pool_still_valid:
                     trade.take_profit = candidate_pool
                     trade.take_profit_rr = pool_rr or trade.rr_min
@@ -8462,11 +8174,8 @@ class TradingEngine:
                  trade.pair, trade.direction, trade.fill_price, source,
                  trade.stop_loss, trade.take_profit, trade.protection_state, protection_locked)
         if trade.status == "FILLED":
-            # PAPER can warm up immediately. Locally-created REAL entries still
-            # give protection setup priority; exchange-adopted positions have no
-            # local protection setup and can initialize H1 directly.
-            if not trade.real_enabled or trade.exchange_adopted:
-                self._schedule_ema_exit_initialization(trade)
+            # EMA forced-exit workers belong to the retired strategy and are
+            # deliberately disabled for this PAPER POC baseline.
             await self._sync_ws_symbols()
         return None
 
@@ -9112,7 +8821,7 @@ class TradingEngine:
         try:
             await self.github.append_text_file(self.session_history_markdown_path, addition, "volumatic: session trade closed")
             local = self._local_path(self.session_history_markdown_path)
-            old = local.read_text(encoding="utf-8") if local.exists() else "# Volumatic Trend Trade Journal\n\n"
+            old = local.read_text(encoding="utf-8") if local.exists() else "# EMA9/21 VP POC PAPER Trade Journal\n\n"
             local.write_text(old + addition, encoding="utf-8")
         except Exception as exc:
             log.error("Markdown journal GitHub gagal; detail tetap ada di session trades.json: %s", exc)
@@ -9121,6 +8830,28 @@ class TradingEngine:
         now = now_utc()
         for trade in list(self.active_trades.values()):
             if trade.entry_inflight:
+                continue
+            if (
+                trade.status == "PENDING" and not trade.real_intent
+                and not trade.real_enabled and not trade.exchange_adopted
+                and now >= trade.expires_at
+            ):
+                expiry_ms = int(trade.expires_at.timestamp() * 1000)
+                try:
+                    # Includes the final M5 bar whose close coincides with M15 expiry.
+                    recovered = await self._backfill_m5_position_history(
+                        trade.pair, expiry_ms,
+                        after_open_ms=self._m5_last_closed_open_ms.get(trade.pair),
+                    )
+                except BinanceRateLimitError:
+                    continue
+                if not recovered:
+                    # Do not expire through an unresolved M5 gap: a missing bar
+                    # may contain the first POC touch.
+                    continue
+                if trade.status != "PENDING":
+                    continue
+                await self._finalize_trade(trade, "EXPIRED", None, "PAPER_POC_WINDOW_EXPIRED")
                 continue
             if trade.real_enabled and trade.status == "PENDING" and trade.real_state == "REAL_PREPARED" and trade.entry_order_created_at is None:
                 # No Binance order exists yet. A confirmed M15 entry intent may
@@ -9138,6 +8869,13 @@ class TradingEngine:
                 await self._save_active_state()
                 log.info("[REAL] %s GTC REST protection cleared; one-hour expiry handling resumed", trade.pair)
 
+            if trade.status == "PENDING" and trade.real_intent and not trade.real_enabled and now < trade.expires_at:
+                # A rate-limited preflight/POST that definitely did not reach Binance
+                # may be retried while the original one-M15-candle window is still open.
+                if self._binance_cooldown_remaining() <= 0:
+                    self._schedule_market_entry(trade, trade.entry, "M15_POC_LIMIT_RETRY")
+                continue
+
             if trade.status == "PENDING" and now >= trade.expires_at:
                 if trade.real_enabled:
                     cooldown_active = self._binance_cooldown_remaining() > 0
@@ -9153,7 +8891,7 @@ class TradingEngine:
                     order_may_exist = bool(trade.entry_client_order_id)
                     if order_may_exist and cooldown_active:
                         trade.preserve_gtc_after_cooldown = True
-                        trade.pending_cancel_reason = "ENTRY_LIMIT_TIMEOUT_1H"
+                        trade.pending_cancel_reason = "ENTRY_POC_WINDOW_EXPIRED"
                         trade.real_state = "REAL_GTC_PRESERVED_AFTER_COOLDOWN"
                         trade.real_error = (
                             "Order GTC dibiarkan tanpa perubahan selama Binance REST cooldown. "
@@ -9169,14 +8907,14 @@ class TradingEngine:
                         log.info("[REAL] GTC preserved | pair=%s | 1h timeout during REST cooldown; order remains on Binance until fill/reversal/cancel", trade.pair)
                         continue
                 await self._cancel_pending_trade(
-                    trade, "ENTRY_NEXT_M15_OPEN_WINDOW_EXPIRED" if trade.real_intent else "ENTRY_WINDOW_EXPIRED"
+                    trade, "ENTRY_POC_WINDOW_EXPIRED" if trade.real_intent else "PAPER_POC_WINDOW_EXPIRED"
                 )
 
             elif trade.status == "FILLED" and trade.real_enabled and not trade.entry_order_terminal and now >= trade.expires_at:
                 cooldown_active = self._binance_cooldown_remaining() > 0
                 if cooldown_active:
                     trade.preserve_gtc_after_cooldown = True
-                    trade.pending_cancel_reason = "ENTRY_LIMIT_TIMEOUT_1H"
+                    trade.pending_cancel_reason = "ENTRY_POC_WINDOW_EXPIRED"
                     trade.real_state = "REAL_PARTIAL_GTC_PRESERVED_AFTER_COOLDOWN"
                     trade.real_error = (
                         "Sisa quantity LIMIT GTC dipertahankan setelah partial fill karena batas satu jam "
@@ -9189,7 +8927,7 @@ class TradingEngine:
                     )
                     await self._save_active_state()
                 else:
-                    await self._cancel_real_entry_remainder(trade, "ENTRY_LIMIT_TIMEOUT_1H")
+                    await self._cancel_real_entry_remainder(trade, "ENTRY_POC_WINDOW_EXPIRED")
 
     async def _reconcile_pending_real(self, trade: Trade) -> None:
         if not trade.real_enabled or trade.status != "PENDING" or trade.entry_inflight:
@@ -9249,13 +8987,13 @@ class TradingEngine:
                     await self._finalize_trade(trade, "EXPIRED", None, "PRESERVED_GTC_NOT_FOUND_AFTER_COOLDOWN")
                 return
             if (now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown) or trade.real_state == "REAL_CANCEL_UNKNOWN":
-                reason = "ENTRY_LIMIT_TIMEOUT_1H" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
+                reason = "ENTRY_POC_WINDOW_EXPIRED" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
                 await self._cancel_pending_trade(trade, reason)
                 return
             raise
         except Exception:
             if (now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown) or trade.real_state == "REAL_CANCEL_UNKNOWN":
-                reason = "ENTRY_LIMIT_TIMEOUT_1H" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
+                reason = "ENTRY_POC_WINDOW_EXPIRED" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
                 await self._cancel_pending_trade(trade, reason)
                 return
             raise
@@ -9292,7 +9030,7 @@ class TradingEngine:
         ):
             # Retry a failed manual/expiry cancellation until Binance confirms
             # a terminal order state. An ambiguous submit blocks new entries until reconciled.
-            reason = "ENTRY_LIMIT_TIMEOUT_1H" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
+            reason = "ENTRY_POC_WINDOW_EXPIRED" if now_utc() >= trade.expires_at else "RETRY_CANCEL_UNKNOWN"
             await self._cancel_pending_trade(trade, reason)
         elif status in {"CANCELED", "EXPIRED", "REJECTED"}:
             executed = Decimal(str(order.get("executedQty") or "0"))
@@ -9308,7 +9046,7 @@ class TradingEngine:
                     None, f"BINANCE_{status}",
                 )
         elif now_utc() >= trade.expires_at and not trade.preserve_gtc_after_cooldown:
-            await self._cancel_pending_trade(trade, "ENTRY_LIMIT_TIMEOUT_1H")
+            await self._cancel_pending_trade(trade, "ENTRY_POC_WINDOW_EXPIRED")
 
     async def _sync_real_entry_remainder(self, trade: Trade) -> None:
         """Refresh cumulative fill/status for a still-open entry LIMIT.
@@ -9428,7 +9166,7 @@ class TradingEngine:
                 return
         if (not trade.entry_order_terminal and trade.expires_at <= now_utc()
                 and not trade.preserve_gtc_after_cooldown):
-            await self._cancel_real_entry_remainder(trade, trade.pending_cancel_reason or "ENTRY_LIMIT_TIMEOUT_1H")
+            await self._cancel_real_entry_remainder(trade, trade.pending_cancel_reason or "ENTRY_POC_WINDOW_EXPIRED")
             if trade.status != "FILLED":
                 return
         ws_covered = self.user_ws.status == "LIVE" and trade.protection_state == "ACTIVE" and trade.entry_order_terminal
@@ -9460,7 +9198,7 @@ class TradingEngine:
             if trade.filled_at and (now_utc() - trade.filled_at).total_seconds() < REAL_POSITION_SETTLE_SECONDS:
                 return
             if not trade.entry_order_terminal:
-                if trade.preserve_gtc_after_cooldown and trade.pending_cancel_reason != "ENTRY_LIMIT_TIMEOUT_1H":
+                if trade.preserve_gtc_after_cooldown and trade.pending_cancel_reason != "ENTRY_POC_WINDOW_EXPIRED":
                     # A preserved/adopted live GTC is still allowed to fill; do not
                     # remove it only because the position endpoint is momentarily flat.
                     return
@@ -9723,7 +9461,7 @@ class TradingEngine:
                         continue
                     if self._binance_cooldown_remaining() > 0:
                         break
-                    if trade.status == "FILLED" and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}:
+                    if trade.real_enabled and trade.status == "FILLED" and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}:
                         self._schedule_ema_exit_initialization(trade)
                     if trade.real_enabled and trade.status == "PENDING":
                         try:
@@ -9802,7 +9540,7 @@ class TradingEngine:
     def _kline_history_limit(
         self, trend_length: int | None = None, supertrend_atr_length: int | None = None
     ) -> int:
-        """M15 history sized for Volumatic EMA-SWMA and configured Supertrend warm-up."""
+        """Legacy history helper; active EMA9/21 POC scanner sizes from its 200-bar VP window."""
         length = volumatic.normalize_trend_length(
             self.trend_length if trend_length is None else trend_length
         )
@@ -9950,7 +9688,9 @@ class TradingEngine:
     async def _queue_m15_forced_exit(
         self, trade: Trade, close_ms: int, close_price: Decimal, reason: str,
     ) -> None:
-        """Persist one confirmed M15 exit; execute only after its final M5 bar."""
+        """Legacy forced-exit hook; intentionally inactive in the PAPER POC baseline."""
+        if FORCE_PAPER_ONLY:
+            return
         if trade.status != "FILLED" or trade.timeframe != "M15":
             return
         filled_ms = int((trade.filled_at or trade.created_at).timestamp() * 1000)
@@ -9987,7 +9727,11 @@ class TradingEngine:
                 await self._finalize_trade(trade, "CLOSED", close_price, str(reason))
 
     async def _handle_closed_m15_bubble(self, symbol: str, kline: dict[str, Any]) -> None:
-        """Advance confirmed M15 bubble + EMA-distance states for open positions."""
+        """Compatibility no-op: the rebuilt strategy has no bubble/forced-close logic."""
+        return
+
+    async def _legacy_handle_closed_m15_bubble_disabled(self, symbol: str, kline: dict[str, Any]) -> None:
+        """Retained legacy code path, intentionally unreachable in strategy v4."""
         if kline.get("x") is not True or str(kline.get("i") or "").lower() != "15m":
             return
         pair = normalize_symbol(symbol)
@@ -10088,25 +9832,56 @@ class TradingEngine:
                 await self._queue_m15_forced_exit(trade, close_ms, close_price, reason)
 
     async def _backfill_m5_position_history(self, pair: str, before_open_ms: int, after_open_ms: int | None) -> bool:
-        """Recover missing closed M5 candles for PAPER SL/TP before processing a gap."""
-        paper_positions = [
+        """Recover all M5 bars that could affect a PAPER POC setup or position.
+
+        A timestamp discontinuity is harmless when this pair has no PAPER order
+        or position exposed during the missing interval. In that case the cursor
+        is rebased immediately before the incoming candle instead of blocking a
+        symbol forever. When exposure existed, every missing candle is required.
+        """
+        paper_trades = [
             trade for trade in self.active_trades.values()
-            if trade.pair == pair and trade.timeframe == "M15" and trade.status == "FILLED"
-            and not trade.real_enabled and trade.fill_price is not None
+            if trade.pair == pair and trade.timeframe == "M15"
+            and trade.status in {"PENDING", "FILLED"}
+            and not trade.real_intent and not trade.real_enabled and not trade.exchange_adopted
         ]
-        if not paper_positions:
+        before_open_ms = int(before_open_ms)
+        if not paper_trades:
+            previous = self._m5_last_closed_open_ms.get(pair)
+            self._m5_last_closed_open_ms[pair] = before_open_ms - M5_MS
+            self._m5_last_closed_end_ms[pair] = before_open_ms
+            if previous is not None and previous < before_open_ms - M5_MS:
+                log.info(
+                    "[M5 GAP RECOVERED] %s had no PAPER setup/position during gap; cursor rebased %s -> %s",
+                    pair, previous, before_open_ms - M5_MS,
+                )
             return True
-        fill_times = [int((trade.filled_at or trade.created_at).timestamp() * 1000) for trade in paper_positions]
-        oldest_fill = min(fill_times)
-        start_open = (oldest_fill // 300_000) * 300_000
+
+        required_starts: list[int] = []
+        for trade in paper_trades:
+            if trade.status == "PENDING":
+                expiry_ms = int(trade.expires_at.timestamp() * 1000)
+                start_ms = expiry_ms - M15_MS
+            else:
+                fill_dt = trade.filled_at or trade.created_at
+                fill_ms = int(fill_dt.timestamp() * 1000)
+                start_ms = (fill_ms // M5_MS) * M5_MS
+            required_starts.append(start_ms)
+        start_open = min(required_starts)
         if after_open_ms is not None:
-            start_open = max(start_open, int(after_open_ms) + 300_000)
-        if start_open >= int(before_open_ms):
+            start_open = max(start_open, int(after_open_ms) + M5_MS)
+
+        # No PAPER exposure existed before this incoming bar. This also handles
+        # a position that was created after a previously observed WS gap.
+        if start_open >= before_open_ms:
+            self._m5_last_closed_open_ms[pair] = before_open_ms - M5_MS
+            self._m5_last_closed_end_ms[pair] = before_open_ms
             return True
-        bars_needed = max(3, int((int(before_open_ms) - start_open + 299_999) // 300_000) + 2)
+
+        bars_needed = max(2, int((before_open_ms - start_open + M5_MS - 1) // M5_MS) + 2)
         limit = min(1500, bars_needed)
         try:
-            history = await self.rest.get_klines(pair, "5m", limit, 300_000, force_refresh=True)
+            history = await self.rest.get_klines(pair, "5m", limit, M5_MS, force_refresh=True)
         except BinanceRateLimitError:
             raise
         except Exception as exc:
@@ -10114,35 +9889,50 @@ class TradingEngine:
             return False
         if history is None or not len(history):
             return False
+
         first_open = int(history["t"][0])
         if first_open > start_open:
             now = time.monotonic()
             if now - self._m5_gap_warning_at.get(pair, 0.0) >= 300:
                 self._m5_gap_warning_at[pair] = now
                 log.error(
-                    "[M5 RECOVERY] %s incomplete history: first=%s expected=%s; PAPER exit processing paused",
+                    "[M5 RECOVERY] %s history too short: first=%s expected=%s; PAPER processing safely paused",
                     pair, first_open, start_open,
                 )
             return False
+
         expected_open = start_open
-        processed_any = False
         for row in history:
             row_open = int(row["t"])
-            if row_open < start_open or row_open >= int(before_open_ms):
+            if row_open < start_open or row_open >= before_open_ms:
+                continue
+            if row_open < expected_open:
                 continue
             if row_open != expected_open:
+                now = time.monotonic()
+                if now - self._m5_gap_warning_at.get(pair, 0.0) >= 300:
+                    self._m5_gap_warning_at[pair] = now
+                    log.error(
+                        "[M5 RECOVERY] %s missing REST candle open=%s before incoming=%s; refusing to skip it",
+                        pair, expected_open, before_open_ms,
+                    )
                 return False
             await self._apply_m5_position_ohlc(
                 pair, row_open, Decimal(str(row["o"])), Decimal(str(row["h"])),
                 Decimal(str(row["l"])), Decimal(str(row["c"])),
             )
             self._m5_last_closed_open_ms[pair] = row_open
-            self._m5_last_closed_end_ms[pair] = row_open + 300_000
-            expected_open = row_open + 300_000
-            processed_any = True
-        # When a PAPER position predates this WS bar, do not advance across a
-        # hole: a missed M5 SL/TP could otherwise be overwritten by an M15 exit.
-        if expected_open < int(before_open_ms):
+            self._m5_last_closed_end_ms[pair] = row_open + M5_MS
+            expected_open = row_open + M5_MS
+
+        if expected_open < before_open_ms:
+            now = time.monotonic()
+            if now - self._m5_gap_warning_at.get(pair, 0.0) >= 300:
+                self._m5_gap_warning_at[pair] = now
+                log.error(
+                    "[M5 RECOVERY] %s gap unresolved: next_expected=%s incoming=%s; refusing to skip missing bars",
+                    pair, expected_open, before_open_ms,
+                )
             return False
         return True
 
@@ -10150,61 +9940,76 @@ class TradingEngine:
         self, pair: str, open_ms: int, open_price: Decimal, high: Decimal,
         low: Decimal, close_price: Decimal,
     ) -> None:
-        """Apply one closed M5 candle using the backtest's gap and SL-first rules."""
-        close_ms = int(open_ms) + 300_000
+        """Apply one M5 candle using backtest POC fill, gap, and SL-first rules."""
+        open_ms = int(open_ms)
+        close_ms = open_ms + M5_MS
         for trade in list(self.active_trades.values()):
-            if trade.pair != pair or trade.timeframe != "M15" or trade.status != "FILLED":
+            if trade.pair != pair or trade.timeframe != "M15":
+                continue
+            if trade.real_intent or trade.real_enabled or trade.exchange_adopted:
+                # REAL entry fills and SL/TP exits are confirmed by Binance order
+                # and Algo updates; local OHLC must not fabricate exchange fills.
+                continue
+
+            # PAPER limit entry can fill only inside the one immediately following
+            # M15 candle. Backtest starts looking at the first M5 bar in that window.
+            if trade.status == "PENDING":
+                expiry_ms = int(trade.expires_at.timestamp() * 1000)
+                window_open_ms = expiry_ms - M15_MS
+                if open_ms < window_open_ms or open_ms >= expiry_ms:
+                    continue
+                limit_price = trade.entry
+                touched = (low <= limit_price) if trade.direction == "LONG" else (high >= limit_price)
+                if not touched:
+                    continue
+                # Backtest fills at POC unless the M5 open gapped through it;
+                # a favorable gap is filled at the M5 open, not the worse limit.
+                if trade.direction == "LONG":
+                    fill_price = open_price if open_price < limit_price else limit_price
+                else:
+                    fill_price = open_price if open_price > limit_price else limit_price
+                did_fill = await self._fill_paper_entry_if_capacity(
+                    trade, fill_price, "PAPER_M5_POC_TOUCH_OR_GAP",
+                    filled_at=datetime.fromtimestamp(open_ms / 1000.0, tz=timezone.utc),
+                )
+                if not did_fill or trade.status != "FILLED":
+                    continue
+
+            if trade.status != "FILLED":
                 continue
             filled_ms = int((trade.filled_at or trade.created_at).timestamp() * 1000)
-            # Backtest starts at the first M5 bar whose OPEN is >= entry timestamp.
-            if int(open_ms) < filled_ms:
+            if open_ms < filled_ms:
                 continue
-            if not trade.real_enabled:
-                stop = trade.stop_loss or trade.reference_sl
-                target = trade.take_profit
-                if stop is None or target is None:
-                    continue
-                reason = None
-                fill = None
-                if trade.direction == "LONG":
-                    if open_price <= stop:
-                        reason, fill = "STOP_LOSS", open_price
-                    elif open_price >= target:
-                        reason, fill = "TAKE_PROFIT", target
-                    elif low <= stop:
-                        reason, fill = "STOP_LOSS", stop
-                    elif high >= target:
-                        reason, fill = "TAKE_PROFIT", target
-                else:
-                    if open_price >= stop:
-                        reason, fill = "STOP_LOSS", open_price
-                    elif open_price <= target:
-                        reason, fill = "TAKE_PROFIT", target
-                    elif high >= stop:
-                        reason, fill = "STOP_LOSS", stop
-                    elif low <= target:
-                        reason, fill = "TAKE_PROFIT", target
-                if reason is not None and fill is not None:
-                    await self._finalize_trade(trade, "CLOSED", fill, reason)
-                    continue
-            # REAL SL/TP are Binance Algo orders. M5 candles are used as an
-            # ordering barrier only; actual fills/flat state come from Binance.
-            if (
-                trade.status == "FILLED" and trade.ema_exit_state == "EXIT_PENDING"
-                and trade.ema_exit_trigger_close_ms is not None
-                and close_ms >= int(trade.ema_exit_trigger_close_ms)
-            ):
-                if trade.real_enabled:
-                    await self._process_ema_exit_real(trade)
-                else:
-                    forced_price = trade.ema_exit_trigger_price or close_price
-                    await self._finalize_trade(
-                        trade, "CLOSED", forced_price,
-                        trade.ema_exit_reason or "M15_FORCED_EXIT",
-                    )
+            stop = trade.stop_loss or trade.reference_sl
+            target = trade.take_profit
+            if stop is None or target is None:
+                continue
+
+            reason = None
+            fill = None
+            if trade.direction == "LONG":
+                if open_price <= stop:
+                    reason, fill = "STOP_LOSS", open_price
+                elif open_price >= target:
+                    reason, fill = "TAKE_PROFIT", target
+                elif low <= stop:
+                    reason, fill = "STOP_LOSS", stop
+                elif high >= target:
+                    reason, fill = "TAKE_PROFIT", target
+            else:
+                if open_price >= stop:
+                    reason, fill = "STOP_LOSS", open_price
+                elif open_price <= target:
+                    reason, fill = "TAKE_PROFIT", target
+                elif high >= stop:
+                    reason, fill = "STOP_LOSS", stop
+                elif low <= target:
+                    reason, fill = "TAKE_PROFIT", target
+            if reason is not None and fill is not None:
+                await self._finalize_trade(trade, "CLOSED", fill, reason)
 
     async def _process_m5_position_candle(self, symbol: str, kline: dict[str, Any]) -> None:
-        """Consume one closed M5 candle for active-position SL/TP and exit ordering."""
+        """Consume a closed M5 candle; recover gaps only while PAPER exposure exists."""
         if not isinstance(kline, dict) or kline.get("x") is not True or str(kline.get("i") or "").lower() != "5m":
             return
         pair = normalize_symbol(symbol)
@@ -10222,36 +10027,33 @@ class TradingEngine:
             return
 
         last_open = self._m5_last_closed_open_ms.get(pair)
-        if last_open is None:
-            try:
-                recovered = await self._backfill_m5_position_history(pair, open_ms, None)
-            except BinanceRateLimitError:
-                return
-            if not recovered:
-                return
-            last_open = self._m5_last_closed_open_ms.get(pair)
-        elif open_ms > last_open + 300_000:
+        if last_open is not None and open_ms <= last_open:
+            return
+
+        if last_open is None or open_ms > last_open + M5_MS:
             try:
                 recovered = await self._backfill_m5_position_history(pair, open_ms, last_open)
             except BinanceRateLimitError:
-                # Do not advance past the gap; the next M5 close can retry REST.
                 return
             if not recovered:
                 return
             last_open = self._m5_last_closed_open_ms.get(pair)
 
         if last_open is not None and open_ms <= last_open:
-            return  # duplicate, including an event already recovered through REST
-        if last_open is not None and open_ms != last_open + 300_000:
+            return
+        if last_open is not None and open_ms != last_open + M5_MS:
             now = time.monotonic()
             if now - self._m5_gap_warning_at.get(pair, 0.0) >= 300:
                 self._m5_gap_warning_at[pair] = now
-                log.error("[M5] %s gap remains unresolved before open=%s; refusing to skip missing bars", pair, open_ms)
+                log.error(
+                    "[M5] %s gap remains unresolved before open=%s; refusing to skip missing bars",
+                    pair, open_ms,
+                )
             return
 
         await self._apply_m5_position_ohlc(pair, open_ms, open_price, high, low, close_price)
         self._m5_last_closed_open_ms[pair] = open_ms
-        self._m5_last_closed_end_ms[pair] = open_ms + 300_000
+        self._m5_last_closed_end_ms[pair] = open_ms + M5_MS
         await self._save_active_state()
 
     def _cache_live_signal_context(
@@ -10484,18 +10286,20 @@ class TradingEngine:
         return current
 
     def _schedule_ema_exit_initialization(self, trade: Trade) -> None:
-        """Legacy no-op: H1 EMA is entry-only in strategy v3.0.0."""
-        if trade.status == "FILLED" and trade.ema_exit_state in {"UNINITIALIZED", "WAITING_API", "INIT_RETRY", "BACKFILL_PENDING"}:
+        """Legacy compatibility no-op: strategy v4 has no EMA/H1 forced exits."""
+        if trade.status == "FILLED" and trade.ema_exit_state not in {
+            "CLOSE_SUBMITTING", "CLOSE_VERIFY", "CLOSE_UNKNOWN", "CLEANUP_WAIT_API"
+        }:
             trade.ema_exit_state = "DISABLED"
-            trade.ema_exit_last_error = "H1 EMA forced exit disabled by strategy v3.0.0; M15 bubble/sideways exits are active."
+            trade.ema_exit_last_error = "Forced EMA exit is disabled by EMA9/21 + VP POC baseline v4.0.0."
         return
 
     async def _initialize_ema_exit_trade(self, trade_id: str) -> None:
-        """Compatibility no-op: H1 never drives exits in baseline v3.0.0."""
+        """Compatibility no-op: EMA9/21 POC PAPER trades have no forced EMA exit."""
         trade = self.active_trades.get(trade_id)
         if trade is not None and trade.status == "FILLED":
             trade.ema_exit_state = "DISABLED"
-            trade.ema_exit_last_error = "H1 forced exit disabled; M15 bubble/sideways exit is active."
+            trade.ema_exit_last_error = "No EMA/bubble forced exit in EMA9/21 + VP POC PAPER baseline."
             await self._save_active_state()
 
     async def _finalize_ema_exit_after_flat(
@@ -11428,7 +11232,7 @@ class TradingEngine:
             if terminal:
                 trade.pending_cancel_reason = None
             elif trade.expires_at <= now_utc() and not trade.preserve_gtc_after_cooldown:
-                trade.pending_cancel_reason = trade.pending_cancel_reason or "ENTRY_LIMIT_TIMEOUT_1H"
+                trade.pending_cancel_reason = trade.pending_cancel_reason or "ENTRY_POC_WINDOW_EXPIRED"
             await self._save_active_state()
             log.info("[USER WS] %s %s order=%s status=%s cumQty=%s avg=%s", symbol, trade.direction, order_id, status, cumulative, fill_price)
             return
@@ -11452,16 +11256,17 @@ class TradingEngine:
             if order.get("symbol")
         )
         scanner_symbols = set(self._scanner_symbols) if self.scan_enabled else set()
-        # M15 candles are required while a setup is pending and throughout every
-        # filled M15 position's bubble/sideways forced-exit lifecycle.
+        # M15 candles are required for scanner analysis and current POC setups.
         scanner_symbols.update(
             t.pair for t in self.active_trades.values()
             if t.status in {"PENDING", "FILLED"} and t.timeframe == "M15"
         )
-        # M5 OHLC is streamed only for active positions, never for the full universe.
+        # M5 OHLC is streamed only for active PAPER POC setups/positions, not
+        # for the full scanner universe. Pending orders need M5 to detect POC touch.
         protection_symbols = {
             t.pair for t in self.active_trades.values()
-            if t.status == "FILLED" and t.timeframe == "M15"
+            if t.status in {"PENDING", "FILLED"} and t.timeframe == "M15"
+            and not t.real_intent and not t.real_enabled and not t.exchange_adopted
         }
         desired = trade_symbols | scanner_symbols | protection_symbols
         await self.ws.set_symbols(
@@ -11477,143 +11282,26 @@ class TradingEngine:
 
     # ------------------------- Telegram commands -------------------------
     async def _set_real(self, command: str) -> None:
-        arg = command.split(maxsplit=1)[1].strip().lower() if len(command.split(maxsplit=1)) > 1 else ""
-        if arg == "on":
-            if not REAL_EXECUTION_ENABLED:
-                await self.reply("❌ REAL dikunci oleh REAL_EXECUTION_ENABLED=0.")
-                return
-            if not self.real.configured:
-                await self.reply("❌ BINANCE_API_KEY / BINANCE_API_SECRET belum lengkap.")
-                return
-            # The route is tested with public Binance endpoints before the user
-            # whitelists it. Never send a signed/private request during startup or
-            # immediately after an egress change. If this command has to initiate
-            # the public test, return so the user can whitelist the reported IP.
-            egress_identity, egress_ip, egress_route = self._real_permission_route_identity()
-            egress_status = self._real_egress_preflight_status.get(egress_identity)
-            if egress_status != "PUBLIC_READY" or not egress_ip:
-                if egress_status != "PUBLIC_TESTING":
-                    await self._run_real_egress_preflight(
-                        "manual /real on", force=True, notify_user=False
-                    )
-                    egress_identity, egress_ip, egress_route = self._real_permission_route_identity()
-                    egress_status = self._real_egress_preflight_status.get(egress_identity)
-                if egress_status == "PUBLIC_READY" and egress_ip:
-                    await self.reply(
-                        "✅ TES PUBLIC BERHASIL. REAL BELUM DIAKTIFKAN.\n"
-                        f"WHITELIST IP : {egress_ip}\n"
-                        f"ROUTE : {egress_route}\n"
-                        "Tes ini hanya memakai Binance public API; belum menguji API key.\n"
-                        "Masukkan IP di atas ke Binance API Management, lalu kirim /real on sekali lagi."
-                    )
-                    return
-                if egress_status == "RATE_LIMITED":
-                    next_step = "Binance public API sedang rate-limit; tunggu cooldown selesai sebelum menguji ulang."
-                elif egress_status in {"PUBLIC_REJECTED", "PUBLIC_ERROR", "IP_UNKNOWN"}:
-                    next_step = "Route belum lolos tes publik atau IP keluar belum terdeteksi. Tunggu pergantian route atau jalankan /IP untuk melihat IP."
-                else:
-                    next_step = "Tes public route belum selesai. Tunggu hasil tes sebelum mengaktifkan REAL."
-                await self.reply(
-                    "⛔ REAL BELUM DIAKTIFKAN.\n"
-                    f"ROUTE : {egress_route}\n"
-                    f"PUBLIC TEST : {egress_status or 'BELUM DIUJI'}\n"
-                    f"{next_step}"
-                )
-                return
-            # Restore only the REAL equity ledger, never scanner/trade state. The
-            # first /real on takes one wallet-balance baseline; later process starts
-            # retain that baseline and the locally accumulated realized PnL.
-            await self._load_real_guard_checkpoint()
-            # Synchronize against Binance immediately before the first signed
-            # account calls. REST timestamp generation also refreshes
-            # this offset periodically and retries one -1021 after resync.
-            await self.real.sync_server_time(force=True, samples=3)
-            account_snapshot = await self.real.get_account_info()
-            all_open_orders = await self.real.get_open_orders(None)
-            await self.real.get_account_config()
-            balance_baseline_created = False
-            if self._real_equity_baseline is None:
-                balance_rows = await self.real.get_futures_balance()
-                usdt_row = next((x for x in balance_rows if str(x.get("asset") or "").upper() == "USDT"), None)
-                try:
-                    wallet = Decimal(str((usdt_row or {}).get("balance") or "0"))
-                except (InvalidOperation, TypeError, ValueError):
-                    wallet = Decimal("0")
-                if not wallet.is_finite() or wallet <= 0:
-                    raise RuntimeError("Baseline USDT Futures balance tidak valid; REAL tidak diaktifkan.")
-                self._real_equity_baseline = wallet
-                self._realized_since_baseline = Decimal("0")
-                self._equity_peak = wallet
-                self._equity_last = wallet
-                self._autostop_source = "REAL"
-                self._autostop_data_hold = False
-                balance_baseline_created = True
-            adopted_positions, adopted_orders = await self._adopt_exchange_snapshot(
-                account_snapshot, all_open_orders, source="REAL_ON_ACCOUNT_SNAPSHOT"
-            )
-            # Even with the entry scanner OFF, adopted live exposure/orders still
-            # need market prices for floating-PnL guard and position monitoring.
-            if adopted_positions or adopted_orders:
-                await self.ws.start()
-                await self._sync_ws_symbols()
-            # Private stream becomes the live source of incremental order/position
-            # updates. No REST request is made by /trade after this point.
-            await self.user_ws.start()
-            self._last_user_ws_reconnect_count = self.user_ws.reconnect_count
-            self.real_mode = True
-            self._real_route_waiting_user = False
-            self._clear_real_ip_permission_block_for_current_route()
-            if self.autostop_percent is not None:
-                await self._autostop_check(force=True)
-            await self._save_runtime_settings()
-            await self._save_real_guard_checkpoint()
-            await self.reply(
-                "🟢 REAL ON. Entry baru: satu MARKET order dikirim pada window open candle M15 berikutnya; tidak ada LIMIT touch-entry. Harga fill REAL mengikuti eksekusi Binance dan dapat berbeda dari open backtest.\n"
-                f"Live snapshot : {adopted_positions} posisi · {adopted_orders} open order dimuat dari Binance.\n"
-                f"Equity baseline: {'baru diambil dari Binance' if balance_baseline_created else 'checkpoint lokal dipertahankan'}; selanjutnya dihitung lokal dari PnL + floating.\n"
-                f"Private User Data WS: {self.user_ws.status}. ORDER_TRADE_UPDATE + ACCOUNT_UPDATE menjaga /trade realtime; /trade tidak memanggil REST.\n"
-                "Posisi/order yang sudah ada tetap dikelola walaupun /real off."
-            )
-        elif arg == "off":
-            self.real_mode = False
-            await self.reply("🟡 REAL OFF untuk entry baru. Pending entry-window yang belum dikirim tidak dieksekusi; posisi REAL yang sudah ada tetap direkonsiliasi dan dikelola sampai selesai.")
-        else:
-            await self.reply(f"REAL: {'ON' if self.real_mode else 'OFF'}\nGunakan /real on atau /real off.")
+        """PAPER-only build: reject every attempt to enable REAL execution."""
+        self.real_mode = False
+        await self.reply(
+            "🔒 PAPER-ONLY LOCK AKTIF\n"
+            "Build ini hanya membuat simulasi PAPER dari candle M5.\n"
+            "Perintah /real on tidak tersedia; private Binance API dan order execution dinonaktifkan."
+        )
 
     async def _handle_length(self, text: str) -> None:
-        parts = str(text or "").split()
-        if len(parts) == 1:
-            await self.reply(
-                "VOLUMATIC LENGTH: 100 (LOCKED BASELINE)\n"
-                "EMA-SWMA(100) + EMA(Close, 100).\n"
-                "Baseline backtest memakai LEN100; nilai lain ditolak agar konfigurasi tidak berbeda dari strategi aktif."
-            )
-            return
-        if len(parts) != 2 or parts[1] != "100":
-            await self.reply("❌ Length dikunci pada 100 sesuai baseline backtest. Gunakan /length 100 untuk konfirmasi.")
-            return
-        await self.reply("✅ Konfigurasi tetap LEN100. Tidak ada perubahan state.")
+        await self.reply(
+            "EMA periods: 9/21 (LOCKED)\n"
+            "Volumatic LEN tidak digunakan oleh baseline Volume Profile POC."
+        )
 
     async def _handle_h1(self, text: str) -> None:
-        parts = str(text or "").split()
-        if len(parts) == 1:
-            self.h1_enabled = True
-            await self.reply(
-                "H1 EMA9/21: ON (LOCKED)\n"
-                "Fungsi: filter arah ENTRY saja, memakai candle H1 yang sudah tertutup.\n"
-                "Forced exit H1: DISABLED. Forced exit strategi dijalankan pada close M15 melalui opposite bubble atau sideways EMA-distance.\n"
-                "Gunakan /H1 on untuk memeriksa baseline. /H1 off ditolak agar hasil tidak menyimpang dari backtest."
-            )
-            return
-        if len(parts) != 2 or parts[1].lower() not in {"on", "off"}:
-            await self.reply("Gunakan /H1 on. Filter H1 adalah syarat wajib entry pada baseline.")
-            return
-        if parts[1].lower() == "off":
-            self.h1_enabled = True
-            await self.reply("❌ H1 entry filter tidak dapat dimatikan pada baseline. H1 EMA9/21 tetap ON; tidak ada H1 forced exit.")
-            return
-        self.h1_enabled = True
-        await self.reply("✅ H1 EMA9/21 tetap ON sebagai filter entry saja. H1 forced exit tetap nonaktif.")
+        self.h1_enabled = False
+        await self.reply(
+            "H1 FILTER: OFF / NOT USED\n"
+            "Baseline hanya memakai EMA9/EMA21 pada candle M15. H4, H1, dan BTC tidak menjadi filter."
+        )
 
     def _symbols_from_command(text: str) -> list[str]:
         parts = str(text or "").strip().split(maxsplit=1)
@@ -11722,22 +11410,10 @@ class TradingEngine:
         log.info("[BAN] symbols unbanned | removed=%s | total=%s", removed, len(self.banned_symbols))
 
     async def _handle_ema(self, text: str) -> None:
-        parts = str(text or "").split()
-        if len(parts) == 1:
-            await self.reply(
-                "EMA CONFIGURATION: LOCKED EMA9/EMA21\n"
-                "H4 ALT : LONG jika EMA9 > EMA21; SHORT jika EMA9 < EMA21.\n"
-                "H4 BTC : arah EMA9/EMA21 wajib selaras dengan posisi.\n"
-                "H1 ALT : aturan EMA9/EMA21 yang sama sebagai filter ENTRY saja.\n"
-                "M15 ALT: signed (EMA50-EMA100)/EMA100 × 100, dikalikan arah posisi, harus >= 0.075%.\n"
-                "Konfigurasi EMA lain/OFF ditolak agar tetap identik dengan backtest."
-            )
-            return
-        valid = len(parts) == 3 and {parts[1], parts[2]} == {"9", "21"}
-        if valid:
-            await self.reply("✅ EMA9/EMA21 sudah aktif dan terkunci sesuai baseline. Tidak ada perubahan state.")
-        else:
-            await self.reply("❌ EMA dikunci pada pasangan 9/21. H4 ALT + H4 BTC + H1 ALT memakai EMA9/EMA21.")
+        await self.reply(
+            "EMA BASELINE: EMA9 / EMA21 pada M15 (LOCKED)\n"
+            "LONG jika EMA9 > EMA21; SHORT jika EMA9 <= EMA21. Tidak ada EMA filter tambahan."
+        )
 
     def _reset_scan_after_supertrend_change(self) -> None:
         self._live_signal_candles.clear()
@@ -11763,49 +11439,22 @@ class TradingEngine:
         self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
 
     async def _handle_rr_min(self, text: str) -> None:
-        parts = str(text or "").split()
-        await self.reply(
-            "RR_MIN: 3R (LOCKED BASELINE)\n"
-            "RR_MAX: 5R (LOCKED BASELINE)\n"
-            "TP fallback adalah 3R. Pool Volume Liquidity Trend M15 terdekat yang valid dalam rentang 3R–5R dipilih; jika tidak ada, TP tetap 3R."
-            if len(parts) == 1 or (len(parts) == 2 and parts[1] == "3")
-            else "❌ RR_MIN dikunci pada 3R sesuai baseline backtest."
-        )
+        await self.reply("TP RR dikunci pada 1R sesuai backtest EMA9/21 + VP POC. /RR_MIN tidak mengubah strategi.")
 
     async def _handle_rr_max(self, text: str) -> None:
-        parts = str(text or "").split()
-        await self.reply(
-            "RR_MIN: 3R (LOCKED BASELINE)\nRR_MAX: 5R (LOCKED BASELINE)\n"
-            "Liquidity target M15 dibatasi pada 3R–5R; tanpa pool yang valid, TP fallback 3R."
-            if len(parts) == 1 or (len(parts) == 2 and parts[1] == "5")
-            else "❌ RR_MAX dikunci pada 5R sesuai baseline backtest."
-        )
+        await self.reply("TP RR dikunci pada 1R. Tidak ada liquidity-pool extension pada baseline ini.")
 
     async def _handle_atr(self, text: str) -> None:
-        parts = str(text or "").split()
-        await self.reply(
-            "SUPERTREND M15 ATR LENGTH: 14 (LOCKED BASELINE)\n"
-            "Baseline memakai ATR14 untuk SL M15. Perubahan ATR ditolak agar tidak berbeda dari backtest."
-            if len(parts) == 1 or (len(parts) == 2 and parts[1] == "14")
-            else "❌ Supertrend ATR Length dikunci pada 14 sesuai baseline backtest."
-        )
+        await self.reply("Supertrend SL dikunci pada M15 ATR14 sesuai backtest. /ATR tidak mengubah strategi.")
 
     async def _handle_factor(self, text: str) -> None:
-        parts = str(text or "").split()
-        await self.reply(
-            "SUPERTREND M15 FACTOR: 2.5 (LOCKED BASELINE)\n"
-            "Perubahan factor ditolak agar penempatan SL tetap identik dengan backtest."
-            if len(parts) == 1 or (len(parts) == 2 and parts[1].replace(",", ".") == "2.5")
-            else "❌ Supertrend Factor dikunci pada 2.5 sesuai baseline backtest."
-        )
+        await self.reply("Supertrend factor dikunci pada 2.5 sesuai backtest. /Factor tidak mengubah strategi.")
 
     async def _handle_timeframe(self, text: str) -> None:
         await self.reply(
-            "Timeframe strategi dikunci agar sama dengan backtest:\n"
-            "EMA Trend : H4 (candle terakhir yang sudah close)\n"
-            "Volumatic: M15 (bubble terkonfirmasi saat candle close)\n"
-            "Supertrend: M15 (SL dari candle sinyal).\n"
-            "Perintah /timeframe tidak mengubah timeframe strategi ini."
+            "TIMEFRAME BASELINE (LOCKED)\n"
+            "Signal / EMA / Volume Profile / Supertrend: M15.\n"
+            "Tidak ada filter H4 atau H1."
         )
 
     async def _handle_scan(self, text: str) -> None:
@@ -11821,12 +11470,12 @@ class TradingEngine:
                 (f"ACTIVATED {self.scan_schedule_activated_at}" if self.scan_schedule_activated_at else "OFF")
             )
             await self.reply(
-                "VOLUMATIC SCAN STATUS\n\n"
+                "EMA9/21 VP POC SCAN STATUS\n\n"
                 f"State: {state}\n"
-                f"Signal: M15 Volumatic + H4 EMA + M15 Supertrend\n"
+                f"Signal: M15 EMA9/21 + VP POC + static Supertrend SL\n"
                 f"Active positions: {positions}/{self.max_active_trades}\n"
                 f"Pending setups: {pending_setups} · Live LIMIT orders: {live_limits}\n"
-                f"TP RR: base 1:{self.rr_min} · liquidity cap 1:{self.rr_max}\n"
+                "TP RR: fixed 1:1\n"
                 "Rule: pending setup/order tidak memakai slot; scanner tetap mencari sinyal saat MAX penuh, tetapi entry baru diblokir.\n"
                 f"Schedule: {schedule_status}"
             )
@@ -11835,7 +11484,7 @@ class TradingEngine:
         if action == "schedule":
             if len(parts) == 2:
                 lines = [
-                    "╔════ VOLUMATIC / SCAN SCHEDULE ════╗",
+                    "╔════ EMA9/21 POC / SCAN SCHEDULE ════╗",
                     "TIMEZONE : ASIA/JAKARTA (WIB)",
                     "MODE     : scheduled /scan on → continuous ON",
                     "──────────────────────────────────",
@@ -11898,7 +11547,7 @@ class TradingEngine:
             self._scan_schedule_last_fired_minute = None
             scanner_state = "ON — tetap berjalan" if self.scan_enabled else "OFF — menunggu slot terpilih"
             await self.reply(
-                "⏳ VOLUMATIC / SCAN SCHEDULE ARMED\n\n"
+                "⏳ EMA9/21 POC / SCAN SCHEDULE ARMED\n\n"
                 f"SELECTED  : {', '.join(selected_slots)} WIB\n"
                 f"SIGNAL TF : M15 • EMA TF: H4\n"
                 f"SCANNER   : {scanner_state}\n"
@@ -11952,8 +11601,8 @@ class TradingEngine:
                 ",".join(self.scan_schedule_slots) if self.scan_schedule_waiting else "none",
             )
             await self.reply(
-                f"🟢 Scanner ON • M15 Volumatic / H4 EMA • batch {SCAN_MAX_PAIRS_PER_CYCLE} "
-                f"• Confirmed M15 Volumatic bubble + H4 EMA + M15 Supertrend SL / TP liquidity {self.rr_min}R-{self.rr_max}R. Pending setup/order tidak memakai slot; scanner tetap memindai saat MAX penuh, tetapi entry diblokir."
+                f"🟢 Scanner ON • M15 EMA9/21 + VP POC • batch {SCAN_MAX_PAIRS_PER_CYCLE} "
+                "• EMA9/21 M15 direction + 200/200 VP POC LIMIT + static Supertrend SL ATR14 x2.5 + TP 1R. PAPER touch/fill dari M5; pending setup tidak memakai slot."
             )
         else:
             self._scanner_symbols.clear()
@@ -12176,47 +11825,11 @@ class TradingEngine:
         )
 
     async def _refresh_exchange_open_orders_for_trade_view(self) -> str | None:
-        """Refresh live Binance open orders only when the user explicitly asks /trade.
-
-        The User Data WS remains the realtime path. This one-shot REST snapshot is
-        a recovery path for missed ORDER_TRADE_UPDATE events or WS reconnect gaps.
-        It deliberately skips requests during the global Binance cooldown.
-        """
-        if not getattr(self.real, "configured", False):
-            return "Binance snapshot: API belum dikonfigurasi; menampilkan cache lokal."
-        cooldown = self._binance_cooldown_remaining()
-        if cooldown > 0:
-            return f"Binance snapshot: REST cooldown {cooldown:.0f}s; menampilkan cache WebSocket/lokal."
-        try:
-            rows = await self.real.get_open_orders(None)
-        except BinanceRateLimitError as exc:
-            await self._notify_binance_cooldown(exc, source="TRADE VIEW OPEN-ORDER SYNC")
-            return f"Binance snapshot gagal karena rate limit; cache WebSocket/lokal dipakai. {str(exc)[:180]}"
-        except Exception as exc:
-            log.warning("[TRADE VIEW] openOrders snapshot gagal; fallback ke cache | %s", exc)
-            return f"Binance snapshot gagal; cache WebSocket/lokal dipakai. {str(exc)[:180]}"
-
-        live_rows = [
-            row for row in rows
-            if str(row.get("status") or row.get("X") or "NEW").upper()
-            in {"NEW", "PARTIALLY_FILLED"}
-        ]
-        # openOrders is an account-wide snapshot. Replace only the open-order
-        # projection, then reconcile/adopt each current exchange order. Existing
-        # local pending trades are retained if an order is temporarily absent.
-        self.exchange_open_orders.clear()
-        for row in live_rows:
-            await self._upsert_exchange_order_snapshot(row, source="TRADE_COMMAND_SYNC")
-        self.exchange_snapshot_at = now_utc()
-        await self._sync_ws_symbols()
-        log.info(
-            "[TRADE VIEW] Binance openOrders snapshot refreshed | active_orders=%s | adopted_cache=%s",
-            len(live_rows), len(self.exchange_open_orders),
-        )
-        return f"Binance snapshot: {len(live_rows)} open order aktif berhasil disinkronkan."
+        """PAPER-only build never queries private Binance open orders."""
+        return None
 
     def _trade_h1_ema_status_line(self, trade: Trade) -> str:
-        """Legacy method name retained; output now describes M15 forced exit."""
+        """Legacy state formatter; no forced-exit path is active in the PAPER POC baseline."""
         state = str(trade.ema_exit_state or "WAITING").upper()
         reason = str(trade.ema_exit_reason or "-")
         trigger = ""
@@ -12259,14 +11872,12 @@ class TradingEngine:
             (t.pair, t.direction) for t in active if t.status == "FILLED"
         }
         slot_count, pending_slots, filled_slots, live_limits = self._active_slot_counts()
-        current_ema = ema_filter_label(self.ema_filter_length)
         lines = [
-            f"ACTIVE POSITIONS • {slot_count}/{self.max_active_trades}\n"
-            f"PENDING SETUPS (NOT COUNTED): {pending_slots} • LIVE LIMITS (NOT COUNTED): {live_limits}\n"
-            f"Scanner TF: {self.timeframe} • Length: {self.trend_length} • EMA filter: {current_ema}\n"
-            f"SuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\n"
-            f"TP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\n"
-            "H1 EMA9/21: ENTRY FILTER ON ONLY • H1 forced exit OFF\nM15 forced exit: opposite bubble / sideways EMA-distance\n"
+            f"PAPER POSITIONS • {slot_count}/{self.max_active_trades}\n"
+            f"PENDING POC SETUPS: {pending_slots}\n"
+            "Analysis: M15 EMA9/EMA21 + Volume Profile POC (200x200)\n"
+            "SL: static Supertrend M15 ATR14 x2.5 • TP: fixed 1R\n"
+            "Exit: M5 SL/TP only • SL wins same-candle ambiguity • no forced close\n"
             f"Permanent bans: {len(self.banned_symbols)}\n"
             + (f"{snapshot_note}\n" if snapshot_note else "")
         ]
@@ -12299,20 +11910,18 @@ class TradingEngine:
                 elif t.real_enabled:
                     order_detail = f"\nBinance: {t.entry_order_status} • {t.real_state}"
                 lines.append(
-                    f"⏳ {t.pair} • PENDING {t.direction} ({t.timeframe} • LEN {t.trend_length})\n"
-                    f"Signal: {t.signal} | Signal close: {fmt_price(t.signal_close_price or t.entry)} | Entry level (next M15 open): {fmt_price(t.entry)}\n"
-                    f"Planned SL: {fmt_price(t.stop_loss or t.reference_sl)} | Planned TP: {fmt_price(t.take_profit)} "
-                    f"(RR 1:{fmt_num(t.take_profit_rr, 2)}; {t.take_profit_source}; band {t.rr_min}-{t.rr_max}R; installed after fill)\n"
-                    f"SuperTrend source: ATR {t.supertrend_atr_length} • Factor {t.supertrend_factor:g}\n"
-                    f"EMA H4 at signal: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
-                    f"H1 entry EMA9/21: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
+                    f"⏳ {t.pair} • PENDING {t.direction} (M15 EMA9/21)\n"
+                    f"Signal: {t.signal} | M15 close: {fmt_price(t.signal_close_price or t.entry)} | POC limit: {fmt_price(t.entry)}\n"
+                    f"Planned SL: {fmt_price(t.stop_loss or t.reference_sl)} | Planned TP: {fmt_price(t.take_profit)} (RR 1:1)\n"
+                    f"EMA9: {fmt_price(t.ema_filter_value)} • EMA21: {fmt_price(t.ema_filter_slow_value)}\n"
+                    f"Static Supertrend: ATR14 • Factor 2.5\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
                     + (
                         "EXCHANGE ACK UNKNOWN: verifikasi clientOrderId; POST tidak akan dikirim ulang\n"
                         if t.real_enabled and t.real_submit_ambiguous
                         else (
-                            "Legacy GTC state: hanya untuk rekonsiliasi order lama; baseline baru memakai MARKET pada window open M15\n"
+                            "Legacy REAL state tidak diproses oleh build PAPER-only ini\n"
                             if t.real_enabled and t.preserve_gtc_after_cooldown
                             else (
                                 f"Expires: {format_wib(t.expires_at)}\n"
@@ -12321,7 +11930,7 @@ class TradingEngine:
                             )
                         )
                     )
-                    + f"Mode: {'REAL' if (t.real_enabled or t.real_intent) else 'PAPER'}"
+                    + "Mode: PAPER ONLY"
                     + order_detail
                     + (f"\nCancel/expiry ditunda: {t.pending_cancel_reason}" if t.pending_cancel_reason else "")
                     + ("\n⚠️ Late fill saat Binance REST cooldown; segera direkonsiliasi." if t.late_fill_during_api_cooldown else "")
@@ -12344,20 +11953,17 @@ class TradingEngine:
                 elif t.real_enabled and not t.entry_order_terminal:
                     remainder_note = "\nEntry LIMIT remainder: status menunggu konfirmasi exchange"
                 lines.append(
-                    f"{'🟢' if t.direction == 'LONG' else '🔴'} {t.pair} • {t.direction} FILLED ({t.timeframe} • LEN {t.trend_length})\n"
-                    f"Entry: {fmt_price(entry)} | Live: {fmt_price(price)}\n"
-                    f"SL M15 Supertrend: {fmt_price(t.stop_loss or t.reference_sl)} | "
-                    f"TP {fmt_num(t.take_profit_rr, 2)}R: {fmt_price(t.take_profit)} ({t.take_profit_source}; band {t.rr_min}-{t.rr_max}R)\n"
-                    f"SuperTrend source: ATR {t.supertrend_atr_length} • Factor {t.supertrend_factor:g}\n"
-                    f"Protection: {t.protection_state} (SL {t.sl_algo_status} / TP {t.tp_algo_status})\n"
-                    f"Algo IDs: SL {t.sl_algo_id or '-'} / TP {t.tp_algo_id or '-'}\n"
-                    f"EMA H4 at signal: {ema_filter_values_label(t.ema_filter_length, t.ema_filter_value, t.ema_filter_slow_value)}\n"
-                    f"{self._trade_h1_ema_status_line(t)}\n"
+                    f"{'🟢' if t.direction == 'LONG' else '🔴'} {t.pair} • {t.direction} FILLED (PAPER)\n"
+                    f"Entry fill: {fmt_price(entry)} | Current mark: {fmt_price(price)}\n"
+                    f"Static SL M15 Supertrend: {fmt_price(t.stop_loss or t.reference_sl)} | "
+                    f"TP fixed 1R: {fmt_price(t.take_profit)}\n"
+                    f"EMA9: {fmt_price(t.ema_filter_value)} • EMA21: {fmt_price(t.ema_filter_slow_value)}\n"
+                    f"Supertrend: ATR14 • Factor 2.5 • no trailing\n"
                     f"Floating: {fmt_num(pnl_pct, 2)}% | {fmt_num(pnl_usdt, 4)} USDT\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin est.: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
                     + remainder_note
-                    + f"\nHolding: {duration_text((now_utc() - (t.filled_at or t.created_at)).total_seconds())} | Mode: {'REAL' if t.real_enabled else 'PAPER'}"
+                    + f"\nHolding: {duration_text((now_utc() - (t.filled_at or t.created_at)).total_seconds())} | Mode: PAPER ONLY"
                 )
 
         # Crucial: open LIMIT orders in Binance's WS/snapshot cache remain
@@ -12423,7 +12029,7 @@ class TradingEngine:
             return
         await self.reply(
             "\n\n".join(lines)
-            + f"\n\nSL: M15 Supertrend • new-trade TP baseline {self.rr_min}R, liquidity extension up to {self.rr_max}R • REAL: Binance closePosition Algo Orders"
+            + "\n\nPAPER-only simulation: M15 static Supertrend SL, fixed TP 1R, M5 OHLC fill/exit. No Binance order or private account state is used."
         )
 
     def _autostop_source_name(self) -> str:
@@ -12836,8 +12442,8 @@ class TradingEngine:
             if r.get("strategy_name") == volumatic.STRATEGY_NAME
         )
         lines = [
-            "╔════ VOLUMATIC / TELEMETRY ════╗",
-            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  {self.timeframe}   LEN  {self.trend_length}   EMA  {ema_filter_label(self.ema_filter_length)}   MODE  {'REAL' if self.real_mode else 'PAPER'}",
+            "╔════ EMA9/21 VP POC / TELEMETRY ════╗",
+            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  M15   EMA  9/21   MODE  PAPER ONLY",
             "────────────────────────────────",
             "[ PERFORMANCE ]",
             f"CLOSED       {len(closed):>5}     W/L/BE   {len(wins)}/{len(losses)}/{be}",
@@ -12876,25 +12482,29 @@ class TradingEngine:
             f"SCANNER      {self._scanner_state_label()}",
             f"SCAN SCHEDULE {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}",
             "────────────────────────────────",
-            f"PnL belum termasuk seluruh fee/funding aktual. R = jarak entry aktual ke SL Supertrend M15; TP baseline {self.rr_min}R dengan ekstensi liquidity maksimal {self.rr_max}R.",
+            "Hasil PAPER tanpa fee/funding live. R dihitung dari fill POC M5 ke static Supertrend SL; TP fixed 1R.",
         ]
         await self.reply("\n".join(lines))
 
     async def show_status(self) -> None:
-        _slots, pending, filled, live_limits = self._active_slot_counts()
+        _slots, pending, filled, _live_limits = self._active_slot_counts()
         fresh = sum(x.live for x in self.prices.values())
         await self.reply(
-            "VOLUMATIC STATUS\n\n"
+            "EMA9/21 VP POC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            f"Signal TF: M15 | EMA TF: H4 | Supertrend TF: M15\nTrend length: {self.trend_length}\nEMA filter: {ema_filter_label(self.ema_filter_length)}\nH1 entry filter: ON (EMA9/21; entry-only)\nM15 forced exit: opposite bubble / sideways distance\nSuperTrend M15: ATR {self.supertrend_atr_length} • Factor {self.supertrend_factor:g}\nTP RR: MIN {self.rr_min}R • MAX {self.rr_max}R\nScanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
-            f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
-            f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
-            f"Pending setups (not counted): {pending} | Active positions: {filled}/{self.max_active_trades} | Live LIMITs: {live_limits}\n"
-            f"Binance REST cooldown: {self._binance_cooldown_remaining():.0f}s | Deferred commands: {len(self.deferred_commands)}\n"
-            f"REAL entry: {'ON' if self.real_mode else 'OFF'} | Margin mode: {'MINIMUM AUTO' if self.min_margin_enabled else 'FIXED'} | Fixed margin: {self.margin_usdt} USDT | Leverage: {self.leverage}x\n"
-            f"Fixed margin guard: {'MINIMUM AUTO (not fixed)' if self.min_margin_enabled else '95%–105% of target (REAL sizing)'}\n"
-            f"AUTOSTOP: {'TRIGGERED' if self._autostop_triggered else (decimal_to_str(self.autostop_percent) + '%' if self.autostop_percent is not None else 'OFF')} | Peak: {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '-'} USDT\n"
+            "Signal / EMA / VP / Supertrend TF: M15\n"
+            "Direction: EMA9 > EMA21 LONG; EMA9 <= EMA21 SHORT\n"
+            f"Volume Profile: {volumatic.POC_LOOKBACK} candles / {volumatic.POC_BARS} levels / {volumatic.POC_VOLUME_TYPE}\n"
+            "Entry: POC LIMIT, next M15 candle only; M5 first touch/gap fill\n"
+            "SL: static Supertrend ATR14 x2.5 | TP: fixed 1R\n"
+            "Exit: M5 SL/TP only; no trailing and no signal-based forced close\n"
+            f"Scanner: {'ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')}\n"
+            f"Schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
+            f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | Fresh prices: {fresh}\n"
+            f"PAPER pending: {pending} | PAPER positions: {filled}/{self.max_active_trades}\n"
+            f"Binance public REST cooldown: {self._binance_cooldown_remaining():.0f}s\n"
+            "Execution: PAPER ONLY (hard-locked); private API/order execution disabled\n"
             f"History: {len(self.history_records)} | Events: {len(self.history_events)} | Session: {self.session_id}"
         )
 
@@ -12983,40 +12593,32 @@ class TradingEngine:
 
     async def show_help(self) -> None:
         await self.reply(
-            "COMMAND VOLUMATIC TREND\n\n"
-            "/scan on|off|status - aktif/nonaktifkan/cek scanner M15 Volumatic + H4 EMA\n"
-            "/scan schedule - lihat jadwal WIB; pilih dengan /scan schedule 1,3,6\n"
-            "/timeframe - strategi tetap: H4 EMA + M15 Volumatic/Supertrend\n"
-            "/length - baseline LEN100 (locked)\n"
-            "/EMA - baseline EMA9/21 (locked)\n"
-            "/H1 on - H1 EMA9/21 entry filter wajib; H1 forced exit OFF\n"
-            "/ATR - Supertrend ATR14 (locked)\n"
-            "/Factor - Supertrend factor 2.5 (locked)\n"
-            "/RR_MIN - TP fallback 3R (locked)\n"
-            "/RR_MAX - TP liquidity cap 5R (locked)\n"
-            "/max [angka] - batas total pending + filled\n"
-            "/trade - lihat pending setup, posisi, proteksi SL/TP, dan status forced exit M15\n"
-            "/banned [PAIR ...] - tambah ban permanen; tanpa argumen tampilkan daftar\n"
-            "/unbanned PAIR ... - hapus ban permanen\n"
-            "/stats - statistik trade, PnL, win rate, DD, R\n"
-            "/setup - simpan snapshot trade aktif ke GitHub\n"
-            "/open - pulihkan snapshot secara manual (tidak otomatis saat /try)\n"
-            "/del PAIR|all - batalkan pending order\n"
-            "/close PAIR|all - tutup posisi atau batalkan pending\n"
-            "/remove TRADE_ID|PAIR - hapus record dari statistik (event audit tetap)\n"
-            "/real on|off - aktif/nonaktifkan entry baru REAL\n"
-            "/autostop [persen|off|reset] - hentikan scanner saat equity turun dari peak\n"
-            "/margin [USDT] - margin target entry baru (dipakai saat /min off)\n"
-            "/min on|off - gunakan margin minimum valid Binance atau margin tetap\n"
-            "/leverage [angka] - leverage entry baru\n"
-            "/balance - saldo Futures atau estimasi PAPER\n"
-            "/api - statistik bobot/request Binance\n"
-            "/IP - refresh dan lihat IP keluar aktif untuk whitelist Binance\n"
-            "/catatan [teks] - tambah atau lihat catatan\n"
-            "/resetstats - arsipkan lalu reset statistik trade\n"
-            "/reset CONFIRM - reset history/event/catatan (tanpa mengubah posisi)\n"
-            "/status - status sistem\n/help - bantuan\n\n"
-            f"Aturan baseline: BLUE=LONG / RED=SHORT pada bubble M15 confirmed LEN100; ALT H4 + BTC H4 EMA9/21 harus searah; ALT H1 EMA9/21 adalah filter entry saja; signed EMA50/100 M15 x arah posisi harus >= 0.075%; entry pada OPEN M15 berikutnya; SL statis Supertrend M15 ATR14 x 2.5; TP memilih pool Volume Liquidity Trend M15 belum termitigasi yang TERDEKAT dalam RR {self.rr_min}R–{self.rr_max}R (fallback {self.rr_min}R); SL/TP dipantau melalui OHLC M5; forced exit pada close M15 saat opposite bubble atau sideways filter gagal. Jika SL dan TP sama-sama tersentuh dalam satu candle M5, SL diprioritaskan."
+            "COMMAND EMA9/21 + VP POC (PAPER ONLY)\n\n"
+            "/scan on|off|status - scanner pair M15\n"
+            "/scan schedule - jadwal scanner WIB\n"
+            "/EMA - cek aturan EMA9/EMA21 yang terkunci\n"
+            "/ATR - cek Supertrend ATR14 yang terkunci\n"
+            "/Factor - cek Supertrend factor 2.5 yang terkunci\n"
+            "/RR_MIN atau /RR_MAX - cek TP fixed 1R\n"
+            "/max [angka] - batas posisi simulasi PAPER\n"
+            "/trade - lihat setup/posisi PAPER\n"
+            "/stats - statistik PAPER (PnL, win rate, drawdown, R)\n"
+            "/setup - simpan snapshot PAPER\n"
+            "/open - pulihkan snapshot PAPER versi 4.0.0\n"
+            "/del PAIR|all - batalkan pending PAPER\n"
+            "/close PAIR|all - tutup simulasi PAPER\n"
+            "/banned [PAIR ...] / /unbanned PAIR ... - daftar pair yang dilewati\n"
+            "/margin [USDT] / /leverage [angka] - sizing simulasi saja\n"
+            "/balance - estimasi saldo PAPER\n"
+            "/status - status sistem\n"
+            "/help - bantuan\n\n"
+            "ATURAN ANALISIS: EMA9/EMA21 M15 menentukan arah (EMA9 > EMA21 LONG; selain itu SHORT). "
+            "Volume Profile memakai lookback 200 candle dan 200 level, volume Both. Entry LIMIT di POC "
+            "hanya untuk candle M15 berikutnya. LONG hanya jika POC < close; SHORT hanya jika POC > close. "
+            "SL statis pada Supertrend M15 ATR14 x2.5 dan harus protektif terhadap POC. TP fixed 1R dihitung "
+            "ulang dari fill M5 aktual. Fill memakai sentuhan pertama M5; gap mengisi di open jika lebih baik. "
+            "Jika SL dan TP tersentuh pada M5 yang sama, SL diprioritaskan. Tidak ada H4/H1/BTC filter, "
+            "liquidity TP, trailing SL, trend-flip exit, atau forced close. Semua hasil PAPER; tidak ada order Binance."
         )
 
     async def _dispatch_command(self, text: str) -> None:
@@ -13041,9 +12643,6 @@ class TradingEngine:
         elif command == "/min": await self._handle_min(text)
         elif command == "/leverage": await self._handle_leverage(text)
         elif command == "/real":
-            arg = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
-            if arg == "off":
-                await self._cancel_queued_real_on()
             await self._set_real(text)
         elif command == "/autostop": await self._handle_autostop_command(text)
         elif command == "/trade": await self.show_trades()
