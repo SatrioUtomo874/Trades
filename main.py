@@ -11320,7 +11320,7 @@ class TradingEngine:
             "⛔ Build ini PAPER-ONLY. Perintah /real tidak dapat mengaktifkan "
             "order live. Pengujian quantity hanya berjalan di simulasi."
         )
-        return
+        
         parts = str(command or "").split(maxsplit=1)
         arg = parts[1].strip().lower() if len(parts) > 1 else ""
         if arg == "on":
