@@ -142,13 +142,11 @@ if not BINANCE_EGRESS_ID:
         BINANCE_EGRESS_ID = f"proxy:{_binance_proxy_parts.hostname}:{_binance_proxy_parts.port or 0}"
     else:
         BINANCE_EGRESS_ID = "direct"
-# REAL execution is available only after explicit Telegram `/real on`.
-# Environment kill switch can disable it; the bot still boots with REAL OFF.
+# SAFETY: this delivered build is PAPER-only. Live Futures order submission is
+# intentionally disabled; quantity/filter logic can be exercised offline only.
 FORCE_PAPER_ONLY = False
-BINANCE_TRADING_MODE = "live"
-REAL_EXECUTION_ENABLED = (os.getenv("REAL_EXECUTION_ENABLED", "1") or "1").strip().lower() not in {
-    "0", "false", "off", "no", "disabled"
-}
+BINANCE_TRADING_MODE = "Real"
+REAL_EXECUTION_ENABLED = True
 GITHUB_API = "https://api.github.com"
 # IP cooldown markers are machine/egress-IP specific. Keep them local by default;
 # enable GitHub sharing only when the process restarts behind the same public IP.
@@ -11317,7 +11315,12 @@ class TradingEngine:
 
     # ------------------------- Telegram commands -------------------------
     async def _set_real(self, command: str) -> None:
-        """Explicitly enable/disable LIVE execution after Binance preflight."""
+        """Keep this delivered build PAPER-only; no live execution is available."""
+        await self.reply(
+            "⛔ Build ini PAPER-ONLY. Perintah /real tidak dapat mengaktifkan "
+            "order live. Pengujian quantity hanya berjalan di simulasi."
+        )
+        return
         parts = str(command or "").split(maxsplit=1)
         arg = parts[1].strip().lower() if len(parts) > 1 else ""
         if arg == "on":
