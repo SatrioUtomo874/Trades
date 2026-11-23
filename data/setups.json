@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-23T03:30:27.829346+00:00",
+  "updated_at": "2026-11-23T03:30:29.820355+00:00",
   "active_trades": [
     {
       "trade_id": "HAEDALUSDT-20261122-213048-E5907A",
@@ -60,10 +60,10 @@
       "ema_exit_trigger_close_ms": 1795404600000,
       "ema_exit_trigger_price": "0.0176",
       "ema_exit_reason": "OPPOSITE_BUBBLE_M15",
-      "ema_exit_client_order_id": null,
+      "ema_exit_client_order_id": "emaexited7e794b8e68d4ea202346",
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
-      "ema_exit_attempts": 0,
+      "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-22T14:45:00+00:00",
       "status": "FILLED",
