@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-23T06:45:11.878015+00:00",
+  "updated_at": "2026-11-23T06:45:15.223318+00:00",
   "active_trades": [
     {
       "trade_id": "ONGUSDT-20261122-213135-7CB725",
@@ -51,7 +51,7 @@
       "ema_exit_fast_length": 9,
       "ema_exit_slow_length": 21,
       "ema_exit_config_source": "SIGNAL_EMA_SNAPSHOT",
-      "ema_exit_state": "CLOSE_SUBMITTING",
+      "ema_exit_state": "CLOSE_VERIFY",
       "ema_exit_last_open_ms": 0,
       "ema_exit_last_fast": null,
       "ema_exit_last_slow": null,
@@ -61,8 +61,8 @@
       "ema_exit_trigger_price": "0.05024",
       "ema_exit_reason": "OPPOSITE_BUBBLE_M15",
       "ema_exit_client_order_id": "emaexit6871a3c657d7716b5a5dbe",
-      "ema_exit_order_id": null,
-      "ema_exit_order_status": "NOT_SUBMITTED",
+      "ema_exit_order_id": 3396109739,
+      "ema_exit_order_status": "FILLED",
       "ema_exit_attempts": 1,
       "ema_exit_last_error": null,
       "expires_at": "2026-11-22T14:45:00+00:00",
