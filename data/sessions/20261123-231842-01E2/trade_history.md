@@ -12,3 +12,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-23T16:20:05.246831+00:00 | Reason: BINANCE_MARKET_REJECTED
+## ALGOUSDT LONG — CANCELED
+- Trade ID: `ALGOUSDT-20261123-232024-11E087`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-23T16:20:31.249744+00:00 | Reason: BINANCE_MARKET_REJECTED
