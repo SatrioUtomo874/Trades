@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "3.0.0",
-  "updated_at": "2026-11-23T06:45:15.223318+00:00",
+  "updated_at": "2026-11-23T06:45:22.076562+00:00",
   "active_trades": [
     {
       "trade_id": "ONGUSDT-20261122-213135-7CB725",
@@ -31,7 +31,7 @@
       "tp_algo_id": 4000002190152084,
       "sl_client_algo_id": "VTSLSDT-20261122-213135-7CB725",
       "tp_client_algo_id": "VTTPSDT-20261122-213135-7CB725",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "EXPIRED",
       "tp_algo_status": "NEW",
       "protection_state": "ACTIVE",
       "protection_error": null,
