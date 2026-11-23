@@ -12,3 +12,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-23T16:28:01.279279+00:00 | Reason: BINANCE_MARKET_REJECTED
+## BEAMXUSDT SHORT — CANCELED
+- Trade ID: `BEAMXUSDT-20261123-232835-D62E33`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-23T16:28:41.287632+00:00 | Reason: BINANCE_MARKET_REJECTED
