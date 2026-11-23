@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""EMA9/21 + M15 Volume Profile POC trading engine (PAPER + optional REAL).
+"""EMA9/21 + M15 Volume Profile POC engine (PAPER-ONLY build).
 
 Analysis reproduces backtest_vp_poc.py (EMA 9/21 variant): completed M15
 EMA9/EMA21 state selects direction; 200-bar/200-level Volume Profile POC is
-the limit entry; M15 Supertrend ATR14 x2.5 is the static SL; TP is fixed at 1R.
-The limit remains valid for the immediately following M15 candle only. M5 OHLC
-replay models first-touch/gap fills and prioritizes SL when SL and TP are both
-inside one M5 candle. No Volumatic bubble, H4/H1/BTC filter, liquidity target,
-trailing SL, or trend-flip/forced exit is active for this strategy.
+the modeled limit entry; M15 Supertrend ATR14 x2.5 is the static SL; TP is fixed
+at 1R. The simulated limit remains valid for the immediately following M15
+candle only. M5 OHLC replay models first-touch/gap fills and prioritizes SL when
+SL and TP are both inside one M5 candle.
 
-The engine boots with REAL OFF. An explicit Telegram `/real on` performs
-route/IP and account preflight before enabling Binance USD-M Futures execution.
-PAPER remains the default when REAL has not been explicitly enabled.
+No live order, signed/private account request, or private user-data stream is
+available in this build. `/precisioncheck` reads public exchange filters only.
 """
 
 import asyncio
@@ -142,10 +140,10 @@ if not BINANCE_EGRESS_ID:
         BINANCE_EGRESS_ID = f"proxy:{_binance_proxy_parts.hostname}:{_binance_proxy_parts.port or 0}"
     else:
         BINANCE_EGRESS_ID = "direct"
-# SAFETY: this delivered build is PAPER-only. Live Futures order submission is
-# intentionally disabled; quantity/filter logic can be exercised offline only.
+# SAFETY: this build is permanently PAPER-only. Keep the hard guard here,
+# even if an environment file accidentally contains REAL_EXECUTION_ENABLED=1.
 FORCE_PAPER_ONLY = False
-BINANCE_TRADING_MODE = "Real"
+BINANCE_TRADING_MODE = "Paper"
 REAL_EXECUTION_ENABLED = True
 GITHUB_API = "https://api.github.com"
 # IP cooldown markers are machine/egress-IP specific. Keep them local by default;
@@ -461,6 +459,47 @@ def round_step_up(value: Decimal, step: Decimal) -> Decimal:
     return value if step <= 0 else (value / step).to_integral_value(rounding=ROUND_CEILING) * step
 
 
+def floor_to_filter_grid(
+    value: Decimal, step: Decimal, minimum: Decimal = Decimal("0")
+) -> Decimal:
+    """Floor a value to an exchange filter grid anchored at minQty/minPrice."""
+    value, step, anchor = Decimal(str(value)), Decimal(str(step)), Decimal(str(minimum))
+    if not all(x.is_finite() for x in (value, step, anchor)) or step <= 0:
+        raise ValueError("Nilai grid atau stepSize tidak valid.")
+    if value < anchor:
+        return anchor
+    return anchor + ((value - anchor) / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+
+def ceil_to_filter_grid(
+    value: Decimal, step: Decimal, minimum: Decimal = Decimal("0")
+) -> Decimal:
+    """Ceil a value to an exchange filter grid anchored at minQty/minPrice."""
+    value, step, anchor = Decimal(str(value)), Decimal(str(step)), Decimal(str(minimum))
+    if not all(x.is_finite() for x in (value, step, anchor)) or step <= 0:
+        raise ValueError("Nilai grid atau stepSize tidak valid.")
+    if value <= anchor:
+        return anchor
+    return anchor + ((value - anchor) / step).to_integral_value(rounding=ROUND_CEILING) * step
+
+
+def format_price_for_tick(
+    price: Decimal, tick_size: Decimal, min_price: Decimal = Decimal("0")
+) -> str:
+    """Validate and format a price at the exact decimal scale of PRICE_FILTER."""
+    value, tick, anchor = Decimal(str(price)), Decimal(str(tick_size)), Decimal(str(min_price))
+    if not all(x.is_finite() for x in (value, tick, anchor)) or value <= 0 or tick <= 0:
+        raise ValueError("Harga atau tickSize tidak valid.")
+    if (value - anchor) % tick != 0:
+        raise ValueError("Harga tidak berada pada grid PRICE_FILTER.")
+    places = max(decimal_places(tick), decimal_places(anchor))
+    quantum = Decimal(1).scaleb(-places)
+    rendered = value.quantize(quantum)
+    if rendered != value:
+        raise ValueError("Harga memerlukan digit desimal di luar skala tickSize.")
+    return f"{rendered:.{places}f}"
+
+
 def compute_minimum_order(
     entry: Decimal,
     leverage: int,
@@ -468,11 +507,10 @@ def compute_minimum_order(
     available_balance: Decimal | None = None,
     leverage_max_notional: Decimal | None = None,
 ) -> tuple[Decimal | None, Decimal | None, Decimal | None, str]:
-    """Find the smallest exchange-valid LIMIT quantity and its initial margin.
+    """Find the minimum filter-aligned quantity for offline sizing validation.
 
-    The minimum is derived from Binance LOT_SIZE (minQty/stepSize) and
-    MIN_NOTIONAL/NOTIONAL filters. Leverage changes margin, not minimum
-    order notional. No arbitrary percentage buffer is added to the quantity.
+    This calculator does not submit an order in the PAPER-ONLY build. The
+    minimum is derived from LOT_SIZE (minQty/stepSize) and notional filters.
     """
     try:
         price = Decimal(str(entry))
@@ -490,24 +528,25 @@ def compute_minimum_order(
     values = (price, lev, step, min_qty, max_qty, min_notional, max_notional, min_price, max_price)
     if not all(v.is_finite() for v in values):
         return None, None, None, "NON_FINITE_FILTER"
-    if price <= 0 or lev < 1 or lev != lev.to_integral_value() or step <= 0:
+    if (price <= 0 or lev < 1 or lev != lev.to_integral_value() or step <= 0
+            or min_qty < 0 or max_qty < 0 or min_notional < 0 or max_notional < 0):
         return None, None, None, "INVALID_INPUT_OR_STEP_SIZE"
     if min_price > 0 and price < min_price:
         return None, None, None, "PRICE_BELOW_EXCHANGE_MINIMUM"
     if max_price > 0 and price > max_price:
         return None, None, None, "PRICE_ABOVE_EXCHANGE_MAXIMUM"
 
-    # The quantity must satisfy both LOT_SIZE and notional minimums. Round UP
-    # to the next exchange step; rounding down can create an invalid order.
-    required_qty = max(min_qty, step)
+    # Binance quantity grids are anchored at minQty: (quantity-minQty)%stepSize == 0.
+    # If minQty is zero, the first positive valid quantity is one full step.
+    required_qty = min_qty if min_qty > 0 else step
     if min_notional > 0:
         required_qty = max(required_qty, min_notional / price)
-    quantity = round_step_up(required_qty, step)
+    quantity = ceil_to_filter_grid(required_qty, step, min_qty)
     notional = quantity * price
 
-    # Protect against decimal boundary effects and ensure all minimums pass.
+    # Guard decimal boundary effects without stepping off the exchange grid.
     while min_notional > 0 and notional < min_notional:
-        quantity += step
+        quantity = ceil_to_filter_grid(quantity + step, step, min_qty)
         notional = quantity * price
 
     caps = [v for v in (max_notional, leverage_max_notional) if v is not None and v > 0]
@@ -528,7 +567,65 @@ def compute_minimum_order(
 
 
 def format_qty(qty: Decimal) -> str:
-    return format(qty.normalize(), "f")
+    """Format a quantity without scientific notation or cosmetic trailing zeros."""
+    value = Decimal(str(qty))
+    if not value.is_finite():
+        raise ValueError("Quantity harus berupa Decimal finite.")
+    return format(value.normalize(), "f")
+
+
+def decimal_places(value: Decimal) -> int:
+    """Return the number of meaningful decimal places in a Decimal value."""
+    number = Decimal(str(value))
+    if not number.is_finite():
+        raise ValueError("Nilai harus berupa Decimal finite.")
+    return max(0, -number.normalize().as_tuple().exponent)
+
+
+def is_step_aligned(
+    value: Decimal,
+    step_size: Decimal,
+    minimum: Decimal = Decimal("0"),
+) -> bool:
+    """Validate the exchange grid using (value - minQty/minPrice) % stepSize."""
+    value = Decimal(str(value))
+    step = Decimal(str(step_size))
+    anchor = Decimal(str(minimum))
+    if not all(x.is_finite() for x in (value, step, anchor)) or step <= 0:
+        return False
+    if value < anchor:
+        return False
+    return (value - anchor) % step == 0
+
+
+def format_qty_for_step(
+    qty: Decimal,
+    step_size: Decimal,
+    min_qty: Decimal = Decimal("0"),
+) -> str:
+    """Render quantity at exactly the decimal scale allowed by its filter step.
+
+    This helper is used by the PAPER precision audit. It deliberately refuses
+    to silently round a quantity: the caller must first prove step alignment.
+    """
+    value = Decimal(str(qty))
+    step = Decimal(str(step_size))
+    anchor = Decimal(str(min_qty))
+    if not value.is_finite() or value <= 0:
+        raise ValueError("Quantity harus positif dan finite.")
+    if not step.is_finite() or step <= 0:
+        raise ValueError("stepSize tidak valid.")
+    if not is_step_aligned(value, step, anchor):
+        raise ValueError(
+            f"Quantity {format_qty(value)} tidak sesuai grid minQty {format_qty(anchor)} "
+            f"dan stepSize {format_qty(step)}."
+        )
+    places = max(decimal_places(step), decimal_places(anchor))
+    quantum = Decimal(1).scaleb(-places)
+    rendered = value.quantize(quantum)
+    if rendered != value:
+        raise ValueError("Quantity memerlukan digit desimal di luar skala stepSize.")
+    return f"{rendered:.{places}f}"
 
 
 def parse_max_notional(response: Any) -> Decimal | None:
@@ -541,6 +638,7 @@ def parse_max_notional(response: Any) -> Decimal | None:
 
 
 def compute_quantity(entry: Decimal, margin: Decimal, leverage: int, filters: dict[str, Any], available_balance: Decimal | None = None) -> tuple[Decimal | None, str]:
+    """Calculate an offline quantity on the symbol's minQty-anchored step grid."""
     try:
         price, margin_d = Decimal(str(entry)), Decimal(str(margin))
         lev = Decimal(str(leverage))
@@ -548,26 +646,38 @@ def compute_quantity(entry: Decimal, margin: Decimal, leverage: int, filters: di
         return None, "INVALID_NUMERIC_INPUT"
     if not all(x.is_finite() for x in (price, margin_d, lev)) or price <= 0 or margin_d <= 0 or lev < 1 or lev != lev.to_integral_value():
         return None, "INVALID_INPUT_RANGE"
-    step = Decimal(str(filters.get("step_size") or "0"))
     min_qty = Decimal(str(filters.get("min_qty") or "0"))
     max_qty = Decimal(str(filters.get("max_qty") or "0"))
     min_notional = Decimal(str(filters.get("min_notional") or "0"))
     max_notional = Decimal(str(filters.get("max_notional") or "0"))
-    if step <= 0:
-        return None, "INVALID_STEP_SIZE"
+    step = Decimal(str(filters.get("step_size") or "0"))
+    filter_values = (step, min_qty, max_qty, min_notional, max_notional)
+    if not all(value.is_finite() for value in filter_values):
+        return None, "NON_FINITE_FILTER"
+    if step <= 0 or min_qty < 0 or max_qty < 0 or min_notional < 0 or max_notional < 0:
+        return None, "INVALID_STEP_SIZE_OR_FILTER"
     target = margin_d * lev
     lo = max(target * REAL_NOTIONAL_MIN_RATIO / price, min_qty)
     hi = target * REAL_NOTIONAL_MAX_RATIO / price
     if max_qty > 0: hi = min(hi, max_qty)
     if min_notional > 0: lo = max(lo, min_notional / price)
     if max_notional > 0: hi = min(hi, max_notional / price)
-    lower = ((lo / step).to_integral_value(rounding=ROUND_CEILING)) * step
-    upper = ((hi / step).to_integral_value(rounding=ROUND_DOWN)) * step
+    lower = ceil_to_filter_grid(lo, step, min_qty)
+    upper = floor_to_filter_grid(hi, step, min_qty)
     if lower <= 0 or lower > upper:
         return None, "MARGIN_DEVIATION_OUT_OF_BOUND"
     target_qty = target / price
-    candidates = {lower, upper, round_step_down(target_qty, step), ((target_qty / step).to_integral_value(rounding=ROUND_CEILING)) * step}
-    valid = [q for q in candidates if lower <= q <= upper and q > 0 and (max_qty <= 0 or q <= max_qty)]
+    candidates = {
+        lower, upper,
+        floor_to_filter_grid(max(target_qty, min_qty), step, min_qty),
+        ceil_to_filter_grid(max(target_qty, min_qty), step, min_qty),
+    }
+    valid = [
+        q for q in candidates
+        if lower <= q <= upper and q > 0
+        and (max_qty <= 0 or q <= max_qty)
+        and is_step_aligned(q, step, min_qty)
+    ]
     if not valid:
         return None, "NO_VALID_QUANTITY"
     qty = min(valid, key=lambda q: abs(q * price - target))
@@ -3011,7 +3121,7 @@ class BinanceREST:
         return result
 
     async def get_symbol_filters(self, symbol: str) -> dict[str, Any]:
-        """Return current Binance symbol filters used by REAL quantity validation."""
+        """Return public symbol filters for the PAPER-ONLY precision audit."""
         symbols = await self.get_exchange_info(force=False)
         meta = symbols.get(normalize_symbol(symbol))
         if meta is None:
@@ -3066,8 +3176,8 @@ class BinanceREST:
 # ============================================================
 # BINANCE REAL EXECUTION
 # ============================================================
-# REAL_EXECUTION_ENABLED is an environment-level kill switch. The bot starts
-# with real_mode=False every session and requires explicit /real on.
+# PAPER-ONLY enforcement: private REST, order endpoints, and private streams
+# are blocked regardless of environment values or persisted runtime settings.
 
 class BinanceAPIError(RuntimeError):
     def __init__(
@@ -3242,9 +3352,10 @@ class BinanceRealClient:
         _timing: dict[str, float] | None = None,
         _timeout_seconds: float | None = None,
     ) -> Any:
-        if not REAL_EXECUTION_ENABLED:
+        if (FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED) and (signed or path != "/fapi/v1/time"):
             raise BinanceAPIError(
-                "REAL dinonaktifkan oleh REAL_EXECUTION_ENABLED=0 di environment.",
+                "Build PAPER-ONLY: hanya endpoint waktu publik yang diizinkan melalui jalur ini; "
+                "private API dan order submission dinonaktifkan.",
                 endpoint=path,
             )
         if signed and not self.configured:
@@ -3485,8 +3596,8 @@ class BinanceRealClient:
 
     async def _user_stream_request(self, method: str, listen_key: str | None = None) -> dict[str, Any]:
         """Create/renew USD-M listenKey; API-key header only, no HMAC signature."""
-        if not REAL_EXECUTION_ENABLED:
-            raise BinanceAPIError("REAL dinonaktifkan oleh REAL_EXECUTION_ENABLED=0 di environment.", endpoint="/fapi/v1/listenKey")
+        if FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED:
+            raise BinanceAPIError("Build PAPER-ONLY: private Binance user stream dinonaktifkan.", endpoint="/fapi/v1/listenKey")
         if not self.configured:
             raise BinanceAPIError("BINANCE_API_KEY / BINANCE_API_SECRET belum tersedia.", endpoint="/fapi/v1/listenKey")
         path = "/fapi/v1/listenKey"
@@ -4514,21 +4625,24 @@ class BinanceUserDataWebSocket:
         return "OFFLINE"
 
     def require_manual_retry(self) -> None:
-        """Hold private listenKey creation/reconnect until the user confirms /real on."""
+        """Hold private listenKey creation/reconnect; private streams are disabled in PAPER-ONLY mode."""
         self._manual_retry_required = True
         self._permission_retry_event.clear()
 
     async def start(self) -> None:
+        if FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED:
+            await self.stop()
+            return
         async with self._start_lock:
             if self._task is not None and not self._task.done():
-                # /real on is an explicit approval after the user updates the IP whitelist.
+                # Private stream startup is unavailable in the PAPER-ONLY build.
                 self._permission_retry_event.set()
                 return
             self._stop.clear()
             self._manual_retry_required = False
             self._permission_retry_event.clear()
             # Keep listenKey creation inside _run(): HTTP 401/-2015 is handled
-            # there with a per-route pause instead of failing /real on and looping.
+            # there with a per-route pause instead of failing startup and looping.
             self._task = asyncio.create_task(self._run(), name="binance-private-user-stream")
 
     async def stop(self) -> None:
@@ -4563,6 +4677,8 @@ class BinanceUserDataWebSocket:
         guaranteed way around an IP ban. If Binance blocks it too, the existing
         private stream is left running and REST reconciliation takes over later.
         """
+        if FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED:
+            raise BinanceAPIError("Build PAPER-ONLY: private WebSocket API dinonaktifkan.", endpoint=f"WS_API/{method}")
         if not self.real.configured:
             raise BinanceAPIError("API key REAL belum tersedia untuk user-stream WS API.")
         request_id = uuid4().hex
@@ -4661,7 +4777,7 @@ class BinanceUserDataWebSocket:
     # reference callbacks/state that this private-stream class does not own.
 
     async def _wait_for_permission_retry(self, exc: BinanceAPIError) -> None:
-        """Hold listenKey retries until the user explicitly repeats /real on."""
+        """Hold listenKey retries; private streams are disabled in the PAPER-ONLY build."""
         generation = int(PROXY_MANAGER.generation)
         self._permission_blocked_generation = generation
         self._manual_retry_required = True
@@ -4669,14 +4785,14 @@ class BinanceUserDataWebSocket:
             self._permission_notice_generations.add(generation)
             log.error(
                 "[USER WS] listenKey ditolak HTTP %s / code %s pada route generation %s; "
-                "retry dihentikan sampai IP whitelist diperbaiki dan /real on diulang. (%s)",
+                "retry dihentikan; private stream tidak tersedia dalam build PAPER-ONLY. (%s)",
                 exc.status_code or 401, exc.code, generation, str(exc)[:220],
             )
         while not self._stop.is_set():
             if self._permission_retry_event.is_set():
                 self._permission_retry_event.clear()
                 self._manual_retry_required = False
-                log.info("[USER WS] retry listenKey diminta secara manual melalui /real on")
+                log.info("[USER WS] private listenKey retry requested; PAPER-ONLY guard remains active")
                 break
             try:
                 await asyncio.wait_for(self._permission_retry_event.wait(), timeout=5.0)
@@ -4685,6 +4801,10 @@ class BinanceUserDataWebSocket:
         self._permission_blocked_generation = None
 
     async def _run(self) -> None:
+        if FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED:
+            self.connected = False
+            self._ws = None
+            return
         backoff = WS_RECONNECT_MIN
         while not self._stop.is_set():
             if self._manual_retry_required:
@@ -5176,7 +5296,7 @@ class TradingEngine:
         self.ws = BinanceWebSocket(self._on_price, self._on_kline)
         self.user_ws = BinanceUserDataWebSocket(self.real, self._on_user_data_event)
 
-        self.real_mode = False  # REAL requires an explicit /real on each fresh session.
+        self.real_mode = False  # PAPER-ONLY: no transition to REAL is available.
         self.margin_usdt = DEFAULT_MARGIN_USDT
         self.leverage = DEFAULT_LEVERAGE
         self.min_margin_enabled = False
@@ -5231,7 +5351,7 @@ class TradingEngine:
         self.prices: dict[str, PriceSnapshot] = {}
         self.active_trades: dict[str, Trade] = {}
         # Live exchange projection. Seeded once from the account-wide snapshot
-        # already requested by /real on, then maintained by ACCOUNT_UPDATE and
+        # private account feed is disabled in this PAPER-ONLY build; only public market data is used.
         # ORDER_TRADE_UPDATE. /trade reads this cache only; it never REST-polls.
         self.exchange_positions: dict[tuple[str, str], dict[str, Any]] = {}
         self.exchange_open_orders: dict[str, dict[str, Any]] = {}
@@ -5314,12 +5434,12 @@ class TradingEngine:
         self._real_ip_permission_blocked_routes: set[str] = set()
         # Public-only egress preflight per active route. It checks Binance /time
         # and exit-IP reachability without touching authenticated/private endpoints.
-        # API-key/IP permission is tested only after the user explicitly sends /real on.
+        # No API-key/IP permission test is performed in the PAPER-ONLY build.
         self._real_egress_preflight_lock = asyncio.Lock()
         self._real_egress_preflight_status: dict[str, str] = {}
         self._real_egress_preflight_task: asyncio.Task | None = None
         # After an egress switch, hold authenticated REAL maintenance until the
-        # user has had time to whitelist the announced exit IP and explicitly retries /real on.
+        # Private user-stream setup is disabled in this PAPER-ONLY build.
         self._real_route_waiting_user = False
 
     # ----------------------- Telegram and persistence --------------------
@@ -5555,7 +5675,7 @@ class TradingEngine:
                     self._autostop_source = "REAL"
                 log.info("[AUTOSTOP] REAL checkpoint restored; balance baseline retained (no new balance baseline).")
         except Exception as exc:
-            log.warning("[AUTOSTOP] REAL checkpoint invalid; fresh /real on snapshot will establish baseline: %s", exc)
+            log.warning("[AUTOSTOP] Local checkpoint invalid; PAPER baseline will be recalculated: %s", exc)
 
     async def _save_real_guard_checkpoint(self) -> None:
         """Persist only the REAL account-risk ledger, independent of runtime/scanner settings."""
@@ -5817,9 +5937,9 @@ class TradingEngine:
                     f"ROUTE      : {info.get('new')}\n"
                     f"IP LAMA    : {info.get('old_ip') or '?'}\n"
                     f"{public_result}\n"
-                    "API KEY    : BELUM DITES (tidak ada request private)\n"
-                    "ACTION     : masukkan IP BARU ke Binance API Management. Setelah selesai, kirim /real on.\n"
-                    "STATUS     : route ditahan; REST REAL menunggu whitelist dan /real on.\n"
+                    "API KEY    : TIDAK DIGUNAKAN (mode PAPER-ONLY)\n"
+                    "ACTION     : tidak perlu whitelist API untuk simulasi PAPER.\n"
+                    "STATUS     : route hanya digunakan untuk data pasar publik.\n"
                     f"SCANNER    : OFF — kirim /scan on setelah whitelist/route siap"
                     f"{risk}"
                 )
@@ -5921,7 +6041,7 @@ class TradingEngine:
         was_blocked = identity in self._real_ip_permission_blocked_routes
         self._real_ip_permission_blocked_routes.discard(identity)
         if was_blocked:
-            # A successful /real on is the explicit retry after whitelist changes.
+            # Private-route retry is disabled in the PAPER-ONLY build.
             # Make active positions eligible for immediate reconciliation again.
             for trade in self.active_trades.values():
                 if trade.real_enabled and trade.status in {"PENDING", "FILLED"}:
@@ -5950,7 +6070,7 @@ class TradingEngine:
 
         This function deliberately never calls /fapi/v2/account, /accountConfig,
         or any other signed/private endpoint. API-key/IP permission is checked
-        only after an explicit user command /real on.
+        only when private account access is enabled; that path is disabled in this PAPER-ONLY build.
         """
         if not self._running:
             return False
@@ -6027,7 +6147,7 @@ class TradingEngine:
                             "⛔ BINANCE / PUBLIC TEST RATE-LIMITED\n"
                             f"IP : {current_ip or exit_ip}\nROUTE : {current_route}\n"
                             f"DETAIL : {detail}\n"
-                            "Belum ada tes API key/private. Tunggu cooldown Binance selesai, lalu kirim /real on untuk mengulang tes publik."
+                            "Mode PAPER-ONLY: tidak ada tes API key/private. Tunggu cooldown selesai; permintaan data publik akan dicoba kembali sesuai jadwal."
                         )
                         return False
 
@@ -6064,8 +6184,8 @@ class TradingEngine:
                     f"PUBLIC REST  : OK · {PROXY_HEALTH_SAMPLES} tes /fapi/v1/time\n"
                     f"MAX LATENSI  : {latency:.0f} ms (batas {PROXY_HEALTH_MAX_LATENCY_MS:.0f} ms)\n"
                     "API KEY/IP   : BELUM DITES — tidak ada request private.\n"
-                    "STATUS       : ROUTE SIAP. Silakan whitelist IP di Binance API Management.\n"
-                    "Setelah whitelist tersimpan, kirim /real on untuk pemeriksaan akun dan aktivasi."
+                    "STATUS       : ROUTE SIAP untuk data pasar publik dalam mode PAPER-ONLY.\n"
+                    "Tidak ada pemeriksaan akun, user stream privat, atau aktivasi order."
                 )
                 return True
             except Exception as exc:
@@ -6365,10 +6485,10 @@ class TradingEngine:
 
     # ----------------------------- Startup -------------------------------
     async def start(self) -> None:
-        """Start a clean engine session with REAL OFF until explicit /real on.
+        """Start a clean PAPER-ONLY engine session. No private account state is loaded.
 
-        Scanner and market data remain OFF until explicitly activated. Existing
-        Binance positions/orders are reconciled by the account snapshot on /real on.
+        Scanner and public market data remain OFF until explicitly activated.
+        No Binance order, account endpoint, or private user stream is available.
         """
         if self._running:
             return
@@ -6386,7 +6506,7 @@ class TradingEngine:
         )
         PROXY_MANAGER.bind(asyncio.get_running_loop(), self._on_egress_changed)
         PROXY_MANAGER.refresh_exit_ip_async("startup")
-        self.real_mode = False  # Safe default; user must explicitly enable REAL.
+        self.real_mode = False  # PAPER-ONLY: REAL cannot be enabled in this build.
         self.scan_enabled = False
         self._scan_trigger_now = False
         self.scan_schedule_slots = ()
@@ -6502,12 +6622,12 @@ class TradingEngine:
             "Exit          : M5 SL/TP only; SL priority if both hit; no trailing/forced exit\n"
             f"Max positions : {self.max_active_trades} (PAPER)\n"
             "Scanner       : OFF — menunggu /scan on atau /scan schedule\n"
-            "Execution     : REAL OFF — gunakan /real on setelah verifikasi akun/IP; default aman PAPER\n"
+            "Execution     : PAPER-ONLY — eksekusi order/private Binance dinonaktifkan permanen di build ini\n"
             "Market WS     : OFF — aktif saat scanner dimulai\n"
-            "Private WS    : OFF — aktif setelah /real on\n"
-            "Data I/O      : Binance public market data; private API hanya setelah /real on."
+            "Private WS    : OFF — dinonaktifkan pada build PAPER-ONLY\n"
+            "Data I/O      : Binance public market data only; private API/order endpoint disabled."
         )
-        # REAL remains OFF until explicit /real on; that command performs route + account preflight.
+        # PAPER-ONLY: no private account preflight or order execution is available.
 
     async def stop(self) -> None:
         """Immediately stop this in-memory engine session without touching exchange or saved data.
@@ -6685,7 +6805,7 @@ class TradingEngine:
         unknown = int(stats.get("unknown", 0))
         lines = [
             "╔══ EMA9/21 VP POC SCAN BATCH ══╗",
-            f"ENGINE    : {'REAL' if self.real_mode else 'PAPER'} · M15 EMA9/EMA21 + VP POC 200x200",
+            "ENGINE    : PAPER-ONLY · M15 EMA9/EMA21 + VP POC 200x200",
             "PROTECTION: static M15 Supertrend ATR14 x2.5 · no trailing",
             "TP / EXIT : fixed RR 1:1 · M5 SL/TP only · no forced close",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
@@ -7740,12 +7860,11 @@ class TradingEngine:
             )
         direction = trade.direction
         if not self.real_mode:
-            raise MarketEntryRejected("REAL_OFF_BEFORE_ENTRY", "REAL sedang OFF; entry baru tidak dikirim ke Binance.")
+            raise MarketEntryRejected("PAPER_ONLY", "Build ini PAPER-ONLY; simulasi tidak mengirim entry ke Binance.")
         if self._real_ip_permission_blocked_for_current_route():
             raise MarketEntryRejected(
                 "BINANCE_IP_PERMISSION_BLOCKED",
-                "Entry REAL ditahan: egress IP rute ini sebelumnya ditolak Binance (-2015). "
-                "Whitelist IP lalu jalankan /real on untuk tes ulang.",
+                "Fitur private account/order dinonaktifkan pada build PAPER-ONLY.",
                 notify=False,
             )
         if self._autostop_triggered:
@@ -8804,7 +8923,7 @@ class TradingEngine:
             if trade.initial_risk is not None and trade.initial_risk > 0:
                 trade.realized_r = move / trade.initial_risk
             if trade.real_enabled and self._real_equity_baseline is not None:
-                # Book a REAL close exactly once against the /real on baseline.
+                # Legacy close handler retained for compatibility; private order submission is blocked.
                 self._realized_since_baseline += trade.pnl_usdt
         self.active_trades.pop(trade.trade_id, None)
         self._protection_locks.pop(trade.trade_id, None)
@@ -9467,11 +9586,11 @@ class TradingEngine:
                         except Exception:
                             log.exception("[USER WS] start/reconnect ditunda")
 
-                # Account Guard uses a one-time /real on wallet baseline, then local
-                # realized PnL + live floating PnL. No periodic wallet-balance REST poll.
+                # Account Guard is not used in PAPER-ONLY mode; simulated balance is local.
+                # realized PnL + simulated floating PnL. No private wallet REST poll.
 
-                # Commands are FIFO and only one API-dependent command per pass. /real off
-                # remains immediate and can cancel a queued /real on.
+                # Commands are FIFO and only one API-dependent command per pass. REAL commands
+                # are rejected by the PAPER-ONLY guard.
                 await self._process_deferred_commands()
 
                 # Refresh universe only when scanner needs it. ExchangeInfo is
@@ -11314,110 +11433,115 @@ class TradingEngine:
                 self._live_signal_seen.pop(key, None)
 
     # ------------------------- Telegram commands -------------------------
-    async def _set_real(self, command: str) -> None:
-        """Keep this delivered build PAPER-only; no live execution is available."""
-        await self.reply(
-            "⛔ Build ini PAPER-ONLY. Perintah /real tidak dapat mengaktifkan "
-            "order live. Pengujian quantity hanya berjalan di simulasi."
-        )
-        
-        parts = str(command or "").split(maxsplit=1)
-        arg = parts[1].strip().lower() if len(parts) > 1 else ""
-        if arg == "on":
-            if not REAL_EXECUTION_ENABLED:
-                await self.reply("❌ REAL dinonaktifkan oleh REAL_EXECUTION_ENABLED=0 di environment.")
-                return
-            if not self.real.configured:
-                await self.reply("❌ BINANCE_API_KEY / BINANCE_API_SECRET belum lengkap.")
-                return
+    async def _handle_precisioncheck(self, command: str) -> None:
+        """Inspect Binance public symbol filters without creating an order."""
+        parts = str(command or "").split()
+        if len(parts) not in {2, 3, 4}:
+            await self.reply(
+                "Format: /precisioncheck SYMBOL [QUANTITY] [PRICE]\n"
+                "Contoh: /precisioncheck ARKMUSDT\n"
+                "Pemeriksaan ini hanya membaca exchangeInfo publik; tidak mengirim order."
+            )
+            return
 
-            # Public route/IP validation must pass before any signed/private call.
-            egress_identity, egress_ip, egress_route = self._real_permission_route_identity()
-            egress_status = self._real_egress_preflight_status.get(egress_identity)
-            if egress_status != "PUBLIC_READY" or not egress_ip:
-                if egress_status != "PUBLIC_TESTING":
-                    await self._run_real_egress_preflight(
-                        "manual /real on", force=True, notify_user=False
-                    )
-                    egress_identity, egress_ip, egress_route = self._real_permission_route_identity()
-                    egress_status = self._real_egress_preflight_status.get(egress_identity)
-                if egress_status == "PUBLIC_READY" and egress_ip:
-                    await self.reply(
-                        "✅ TES PUBLIC BERHASIL. REAL BELUM DIAKTIFKAN.\n"
-                        f"WHITELIST IP : {egress_ip}\nROUTE : {egress_route}\n"
-                        "Masukkan IP tersebut ke Binance API Management, lalu kirim /real on sekali lagi."
-                    )
-                    return
-                if egress_status == "RATE_LIMITED":
-                    next_step = "Binance public API sedang rate-limit; tunggu cooldown sebelum mencoba lagi."
-                elif egress_status in {"PUBLIC_REJECTED", "PUBLIC_ERROR", "IP_UNKNOWN"}:
-                    next_step = "Route belum lolos tes publik atau IP belum terdeteksi. Periksa /ip dan route."
+        symbol = normalize_symbol(parts[1])
+        if not symbol:
+            await self.reply("❌ Symbol tidak valid.")
+            return
+        try:
+            quantity = parse_decimal(parts[2]) if len(parts) >= 3 else None
+            price = parse_decimal(parts[3]) if len(parts) >= 4 else None
+            filters = await self.rest.get_symbol_filters(symbol)
+        except Exception as exc:
+            await self.reply(f"❌ PRECISION CHECK gagal untuk {symbol}: {str(exc)[:300]}")
+            return
+
+        lot_step = Decimal(str(filters.get("step_size") or "0"))
+        lot_min = Decimal(str(filters.get("min_qty") or "0"))
+        lot_max = Decimal(str(filters.get("max_qty") or "0"))
+        market_step = Decimal(str(filters.get("market_step_size") or "0"))
+        market_min = Decimal(str(filters.get("market_min_qty") or "0"))
+        market_max = Decimal(str(filters.get("market_max_qty") or "0"))
+        tick_size = Decimal(str(filters.get("tick_size") or "0"))
+        min_price = Decimal(str(filters.get("min_price") or "0"))
+        max_price = Decimal(str(filters.get("max_price") or "0"))
+        q_precision = int(filters.get("quantity_precision") or 0)
+        p_precision = int(filters.get("price_precision") or 0)
+
+        lines = [
+            f"🔎 PRECISION AUDIT • {symbol}",
+            f"LOT_SIZE        step={format_qty(lot_step)} | min={format_qty(lot_min)} | max={format_qty(lot_max)}",
+            f"MARKET_LOT_SIZE step={format_qty(market_step)} | min={format_qty(market_min)} | max={format_qty(market_max)}",
+            f"PRICE_FILTER    tickSize={format_qty(tick_size)}",
+            f"Metadata        quantityPrecision={q_precision} | pricePrecision={p_precision}",
+            "Catatan: stepSize/tickSize adalah filter increment; precision metadata bukan pengganti filter.",
+        ]
+
+        if quantity is not None:
+            q_places = decimal_places(quantity)
+            lines.append(f"Quantity input  {format_qty(quantity)} ({q_places} digit desimal)")
+            market_effective = (
+                ("MARKET_LOT_SIZE", market_step, market_min, market_max)
+                if market_step > 0 else
+                ("MARKET fallback LOT_SIZE", lot_step, lot_min, lot_max)
+            )
+            for label, step, minimum, maximum in (
+                ("LIMIT / LOT_SIZE", lot_step, lot_min, lot_max),
+                market_effective,
+            ):
+                if step <= 0:
+                    lines.append(f"{label} check  : stepSize tidak tersedia; tidak dapat dinyatakan valid")
+                    continue
+                aligned = is_step_aligned(quantity, step, minimum)
+                min_ok = minimum <= 0 or quantity >= minimum
+                max_ok = maximum <= 0 or quantity <= maximum
+                status = "PASS" if aligned and min_ok and max_ok else "FAIL"
+                detail = f"{status} | multiple={aligned} | min={min_ok} | max={max_ok}"
+                if aligned:
+                    try:
+                        detail += f" | serialized={format_qty_for_step(quantity, step, minimum)}"
+                    except ValueError as exc:
+                        detail += f" | format error={exc}"
+                lines.append(f"{label} check : {detail}")
+            lines.append(
+                f"quantityPrecision comparison: {'within' if q_places <= q_precision else 'exceeds'} metadata count "
+                "(informational only; do not use it instead of stepSize)."
+            )
+
+        if price is not None:
+            p_places = decimal_places(price)
+            lines.append(f"Price input     {format_qty(price)} ({p_places} digit desimal)")
+            if tick_size > 0:
+                aligned_price = is_step_aligned(price, tick_size, min_price)
+                rounded_down = floor_to_filter_grid(price, tick_size, min_price)
+                rounded_up = ceil_to_filter_grid(price, tick_size, min_price)
+                detail = (
+                    f"PRICE_FILTER check: {'PASS' if aligned_price else 'FAIL'} | aligned={aligned_price} "
+                    f"| tickSize={format_qty(tick_size)} | floor={format_qty(rounded_down)} | ceiling={format_qty(rounded_up)}"
+                )
+                if aligned_price:
+                    detail += f" | serialized={format_price_for_tick(price, tick_size, min_price)}"
+                lines.append(detail)
+                if (min_price > 0 and price < min_price) or (max_price > 0 and price > max_price):
+                    lines.append("PRICE_FILTER bounds: FAIL")
                 else:
-                    next_step = "Tes public route belum selesai. Tunggu hasilnya sebelum mengaktifkan REAL."
-                await self.reply(
-                    "⛔ REAL BELUM DIAKTIFKAN.\n"
-                    f"ROUTE : {egress_route}\nPUBLIC TEST : {egress_status or 'BELUM DIUJI'}\n{next_step}"
-                )
-                return
+                    lines.append("PRICE_FILTER bounds: PASS")
+            else:
+                lines.append("PRICE_FILTER check: tickSize tidak tersedia; tidak dapat divalidasi")
+            lines.append(
+                f"pricePrecision comparison: {'within' if p_places <= p_precision else 'exceeds'} metadata count "
+                "(informational only; tickSize remains the increment filter)."
+            )
 
-            try:
-                await self._load_real_guard_checkpoint()
-                await self.real.sync_server_time(force=True, samples=3)
-                account_snapshot = await self.real.get_account_info()
-                all_open_orders = await self.real.get_open_orders(None)
-                await self.real.get_account_config()
-                balance_baseline_created = False
-                if self._real_equity_baseline is None:
-                    balance_rows = await self.real.get_futures_balance()
-                    usdt_row = next((x for x in balance_rows if str(x.get("asset") or "").upper() == "USDT"), None)
-                    wallet = Decimal(str((usdt_row or {}).get("balance") or "0"))
-                    if not wallet.is_finite() or wallet <= 0:
-                        raise RuntimeError("Baseline USDT Futures balance tidak valid; REAL tidak diaktifkan.")
-                    self._real_equity_baseline = wallet
-                    self._realized_since_baseline = Decimal("0")
-                    self._equity_peak = wallet
-                    self._equity_last = wallet
-                    self._autostop_source = "REAL"
-                    self._autostop_data_hold = False
-                    balance_baseline_created = True
-                adopted_positions, adopted_orders = await self._adopt_exchange_snapshot(
-                    account_snapshot, all_open_orders, source="REAL_ON_ACCOUNT_SNAPSHOT"
-                )
-                if adopted_positions or adopted_orders:
-                    await self.ws.start()
-                    await self._sync_ws_symbols()
-                await self.user_ws.start()
-                self._last_user_ws_reconnect_count = self.user_ws.reconnect_count
-                self.real_mode = True
-                self._real_route_waiting_user = False
-                self._clear_real_ip_permission_block_for_current_route()
-                if self.autostop_percent is not None:
-                    await self._autostop_check(force=True)
-                await self._save_runtime_settings()
-                await self._save_real_guard_checkpoint()
-                await self.reply(
-                    "🟢 REAL ON — LIVE USD-M FUTURES EXECUTION ENABLED.\n"
-                    f"Exchange snapshot: {adopted_positions} posisi · {adopted_orders} open order diadopsi.\n"
-                    f"Equity baseline: {'baru diambil dari Binance' if balance_baseline_created else 'checkpoint dipertahankan'}.\n"
-                    f"Private User Data WS: {self.user_ws.status}.\n"
-                    "Pastikan margin, leverage, sizing, SL/TP, dan API permission sudah benar."
-                )
-            except Exception as exc:
-                self.real_mode = False
-                log.exception("[REAL ON] Aktivasi gagal; REAL tetap OFF")
-                await self.reply(f"❌ REAL GAGAL DIAKTIFKAN. REAL tetap OFF.\n{str(exc)[:500]}")
-        elif arg == "off":
-            self.real_mode = False
-            await self._save_runtime_settings()
-            await self.reply(
-                "🟡 REAL OFF untuk entry baru. Posisi/order REAL yang sudah ada tetap direkonsiliasi "
-                "dan dikelola sampai selesai; periksa /trade dan Binance."
-            )
-        else:
-            await self.reply(
-                f"REAL: {'ON' if self.real_mode else 'OFF'}\n"
-                "Gunakan /real on atau /real off. REAL ON mengirim order LIVE ke Binance Futures."
-            )
+        lines.append("PAPER-ONLY: audit publik ini tidak membuat, mengubah, atau membatalkan order.")
+        await self.reply("\n".join(lines))
+
+    async def _set_real(self, command: str) -> None:
+        """REAL is intentionally unavailable in this PAPER-ONLY build."""
+        await self.reply(
+            "⛔ Build ini PAPER-ONLY permanen. /real on tidak tersedia; "
+            "tidak ada signed/private API atau order yang dapat dikirim."
+        )
 
     async def _handle_length(self, text: str) -> None:
         await self.reply(
@@ -12437,8 +12561,7 @@ class TradingEngine:
             self._autostop_dirty = False
 
     async def _handle_autostop_command(self, text: str) -> None:
-        # Preserve the prior REAL checkpoint when /autostop is used after /try
-        # but before /real on; this reads only the guard ledger, not trades/scanner.
+        # Preserve local autostop checkpoint state; this does not query a private account API.
         await self._load_real_guard_checkpoint()
         parts = text.split()
         if len(parts) == 1:
@@ -12572,7 +12695,7 @@ class TradingEngine:
         )
         lines = [
             "╔════ EMA9/21 VP POC / TELEMETRY ════╗",
-            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  M15   EMA  9/21   MODE  {'REAL' if self.real_mode else 'PAPER'}",
+            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  M15   EMA  9/21   MODE  PAPER-ONLY",
             "────────────────────────────────",
             "[ PERFORMANCE ]",
             f"CLOSED       {len(closed):>5}     W/L/BE   {len(wins)}/{len(losses)}/{be}",
@@ -12633,7 +12756,7 @@ class TradingEngine:
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | Fresh prices: {fresh}\n"
             f"PAPER pending: {pending} | PAPER positions: {filled}/{self.max_active_trades}\n"
             f"Binance public REST cooldown: {self._binance_cooldown_remaining():.0f}s\n"
-            f"Execution: {'REAL LIVE' if self.real_mode else 'PAPER'} ({'enabled' if REAL_EXECUTION_ENABLED else 'disabled by env'})\n"
+            f"Execution: PAPER-ONLY (private API disabled)\n"
             f"History: {len(self.history_records)} | Events: {len(self.history_events)} | Session: {self.session_id}"
         )
 
@@ -12739,6 +12862,7 @@ class TradingEngine:
             "/banned [PAIR ...] / /unbanned PAIR ... - daftar pair yang dilewati\n"
             "/margin [USDT] / /leverage [angka] - sizing simulasi saja\n"
             "/balance - estimasi saldo PAPER\n"
+            "/precisioncheck SYMBOL [QTY] [PRICE] - audit filter presisi publik tanpa order\n"
             "/status - status sistem\n"
             "/help - bantuan\n\n"
             "ATURAN ANALISIS: EMA9/EMA21 M15 menentukan arah (EMA9 > EMA21 LONG; selain itu SHORT). "
@@ -12771,6 +12895,7 @@ class TradingEngine:
         elif command == "/margin": await self._handle_margin(text)
         elif command == "/min": await self._handle_min(text)
         elif command == "/leverage": await self._handle_leverage(text)
+        elif command == "/precisioncheck": await self._handle_precisioncheck(text)
         elif command == "/real":
             await self._set_real(text)
         elif command == "/autostop": await self._handle_autostop_command(text)
