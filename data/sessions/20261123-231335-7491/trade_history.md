@@ -12,3 +12,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-23T16:15:18.841326+00:00 | Reason: BINANCE_MARKET_REJECTED
+## AGTUSDT SHORT — CANCELED
+- Trade ID: `AGTUSDT-20261123-231536-C3CD90`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-23T16:15:42.848608+00:00 | Reason: BINANCE_MARKET_REJECTED
