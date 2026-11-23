@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Volumatic M15 + H4 EMA filter + M15 Supertrend protection.
+"""EMA9/21 + M15 Volume Profile POC baseline matching backtest_vp_poc.py.
 
-The original ChartPrime-derived EMA-SWMA bubble logic is retained. This module
-adds the closed-candle execution model used by backtest.py: a confirmed M15
-bubble is filtered by the latest fully closed H4 EMA state, enters at the next
-M15 candle open, takes the M15 Supertrend line as SL, and starts TP at 3R before extending it
-to the farthest unmitigated Volume Liquidity Trend pool across M5/M15/H1/H4 inside the 3R-4R cap.
-No intrabar/visual-offset Mode-B signal is used by the live engine.
+The active scanner API is build_poc_limit_signal(): M15 EMA9/EMA21 state sets
+LONG/SHORT direction, a 200-bar/200-level Volume Profile determines POC LIMIT,
+and Supertrend M15 ATR14 x2.5 sets a static protective stop. TP is fixed at 1R.
+Legacy Volumatic functions are retained only for safe decoding of older records;
+they are not used by the v4.0.0 scanner or PAPER execution path.
 
-Original indicator attribution/license notice: © ChartPrime, MPL-2.0.
+Original legacy indicator attribution/license notice: © ChartPrime, MPL-2.0.
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ from typing import Any, Mapping
 import numpy as np
 
 STRATEGY_NAME = "VOLUMATIC_TREND"
-STRATEGY_VERSION = "3.0.0"
+STRATEGY_VERSION = "4.0.0"
 DEFAULT_TREND_LENGTH = 100
 TREND_LENGTH = DEFAULT_TREND_LENGTH  # backward-compatible public default
 MIN_TREND_LENGTH = 1
@@ -41,9 +40,9 @@ MIN_SUPERTREND_ATR_LENGTH = 1
 # beyond the configured ATR window for adjacent indicator calculations.
 MAX_SUPERTREND_ATR_LENGTH = 1480
 MAX_SUPERTREND_FACTOR = 1000.0
-RR_TARGET = 3.0  # legacy alias for the default RR_MIN
-RR_MIN = 3.0
-RR_MAX = 5.0
+RR_TARGET = 1.0
+RR_MIN = 1.0
+RR_MAX = 1.0
 MAX_RR_VALUE = 1000.0
 H4_H1_EMA_FAST = 9
 H4_H1_EMA_SLOW = 21
@@ -57,6 +56,326 @@ LIQ_ATR_MULT = 2.0
 LIQ_VOL_CUTOFF = 0.1
 LIQUIDITY_TIMEFRAME_MS = {"M5": 300_000, "M15": 900_000, "H1": 3_600_000, "H4": 14_400_000}
 LIQUIDITY_TIMEFRAMES = ("M15",)  # baseline TP pool source; legacy MTF helpers remain unused
+
+
+# ---------------------------------------------------------------------------
+# EMA 9/21 + Volume Profile POC M15 baseline (backtest_vp_poc EMA 9/21)
+# ---------------------------------------------------------------------------
+# This is the active strategy for v4.0.0. The legacy Volumatic helpers below
+# remain only so old trade records can be decoded safely; the live scanner does
+# not call them.
+
+POC_LOOKBACK = 200
+POC_BARS = 200
+POC_VOLUME_TYPE = "Both"
+EMA_FAST = 9
+EMA_SLOW = 21
+FIXED_RR = 1.0
+M5_INTERVAL_MS = 300_000
+M15_INTERVAL_MS = 900_000
+
+
+def _bt_smooth(values: Any, length: int, alpha: float) -> np.ndarray:
+    """Exact backtest smooth(): SMA seed, then recursive EMA/RMA."""
+    x = np.asarray(values, dtype=np.float64).reshape(-1)
+    out = np.full(len(x), np.nan, dtype=np.float64)
+    valid = np.flatnonzero(np.isfinite(x))
+    if valid.size == 0 or len(x) - int(valid[0]) < int(length):
+        return out
+    start = int(valid[0])
+    first = start + int(length) - 1
+    seed = x[start:start + int(length)]
+    if len(seed) != int(length) or not np.all(np.isfinite(seed)):
+        return out
+    previous = float(np.mean(seed))
+    out[first] = previous
+    for i in range(first + 1, len(x)):
+        value = float(x[i])
+        previous += float(alpha) * (value - previous)
+        out[i] = previous
+    return out
+
+
+def _extract_ohlcv(candles: Any) -> tuple[np.ndarray, ...]:
+    """Extract compact Binance kline arrays or standard arrays into OHLCV."""
+    if isinstance(candles, Mapping):
+        def pick(*keys: str, default: Any = None) -> Any:
+            for key in keys:
+                if key in candles:
+                    return candles[key]
+            return default
+        t = pick("t", "timestamp", "open_time")
+        o = pick("o", "open")
+        h = pick("h", "high")
+        l = pick("l", "low")
+        c = pick("c", "close")
+        v = pick("v", "volume", default=np.zeros(len(c) if c is not None else 0))
+    else:
+        arr = np.asarray(candles)
+        if arr.dtype.names:
+            names = set(arr.dtype.names)
+            def field(*keys: str, default: Any = None) -> Any:
+                for key in keys:
+                    if key in names:
+                        return arr[key]
+                return default
+            t = field("t", "timestamp", "open_time")
+            o = field("o", "open")
+            h = field("h", "high")
+            l = field("l", "low")
+            c = field("c", "close")
+            v = field("v", "volume", default=np.zeros(len(arr)))
+        else:
+            if arr.ndim != 2 or arr.shape[1] < 5:
+                raise ValueError("Candles harus Nx5+ atau structured Binance kline array.")
+            t, o, h, l, c = (arr[:, i] for i in range(5))
+            v = arr[:, 5] if arr.shape[1] > 5 else np.zeros(len(arr))
+    if any(value is None for value in (t, o, h, l, c)):
+        raise ValueError("Kolom timestamp/OHLC tidak lengkap.")
+    arrays = tuple(np.asarray(value, dtype=np.float64).reshape(-1) for value in (t, o, h, l, c, v))
+    if len({len(value) for value in arrays}) != 1:
+        raise ValueError("Panjang kolom OHLCV tidak sama.")
+    ts, op, hi, lo, cl, vol = arrays
+    if len(cl) < 3:
+        raise ValueError("Minimal 3 candle M15 diperlukan.")
+    if not all(np.all(np.isfinite(value)) for value in (ts, op, hi, lo, cl, vol)):
+        raise ValueError("Data OHLCV mengandung nilai non-finite.")
+    if np.any(np.diff(ts) <= 0):
+        raise ValueError("Timestamp M15 harus unik dan terurut menaik.")
+    if np.any(hi < lo) or np.any(op <= 0) or np.any(cl <= 0) or np.any(vol < 0):
+        raise ValueError("Data OHLCV tidak valid.")
+    return ts.astype(np.int64), op, hi, lo, cl, vol
+
+
+def _calc_atr_backtest(high: np.ndarray, low: np.ndarray, close: np.ndarray, length: int = 14) -> np.ndarray:
+    """ATR calculation copied from backtest_vp_poc.py."""
+    n = len(close)
+    if n == 0:
+        return np.array([], dtype=np.float64)
+    tr = np.empty(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    if n > 1:
+        tr[1:] = np.maximum.reduce((
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1]),
+        ))
+    return _bt_smooth(tr, length, 1.0 / float(length))
+
+
+def _calc_supertrend_backtest(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray,
+    length: int = 14, factor: float = 2.5,
+) -> np.ndarray:
+    """TradingView-style Supertrend, kept numerically aligned to the backtest."""
+    n = len(close)
+    line = np.full(n, np.nan, dtype=np.float64)
+    if n == 0:
+        return line
+    atr = _calc_atr_backtest(high, low, close, length)
+    mid = (high + low) / 2.0
+    basic_upper = (mid + factor * atr).tolist()
+    basic_lower = (mid - factor * atr).tolist()
+    closes = close.tolist()
+    atrs = atr.tolist()
+    out = [float("nan")] * n
+    prev_upper = prev_lower = prev_line = None
+    for i in range(n):
+        if not np.isfinite(atrs[i]):
+            continue
+        if prev_upper is None:
+            prev_upper, prev_lower = basic_upper[i], basic_lower[i]
+            prev_line = prev_upper
+            out[i] = prev_line
+            continue
+        prev_close = closes[i - 1]
+        final_upper = (
+            basic_upper[i]
+            if basic_upper[i] < prev_upper or prev_close > prev_upper
+            else prev_upper
+        )
+        final_lower = (
+            basic_lower[i]
+            if basic_lower[i] > prev_lower or prev_close < prev_lower
+            else prev_lower
+        )
+        if prev_line == prev_upper:
+            up = closes[i] > final_upper
+        else:
+            up = not (closes[i] < final_lower)
+        prev_line = final_lower if up else final_upper
+        prev_upper, prev_lower = final_upper, final_lower
+        out[i] = prev_line
+    return np.asarray(out, dtype=np.float64)
+
+
+def volume_profile_poc(
+    opens: Any, highs: Any, lows: Any, closes: Any, volumes: Any,
+    lookback: int = POC_LOOKBACK, nbars: int = POC_BARS,
+    volume_type: str = POC_VOLUME_TYPE,
+) -> np.ndarray:
+    """Port of the exact POC routine in backtest_vp_poc.py."""
+    o = np.asarray(opens, dtype=np.float64).reshape(-1)
+    h = np.asarray(highs, dtype=np.float64).reshape(-1)
+    l = np.asarray(lows, dtype=np.float64).reshape(-1)
+    c = np.asarray(closes, dtype=np.float64).reshape(-1)
+    v = np.asarray(volumes, dtype=np.float64).reshape(-1)
+    if not (len(o) == len(h) == len(l) == len(c) == len(v)):
+        raise ValueError("Panjang OHLCV POC tidak sama.")
+    if lookback < 2 or nbars < 2:
+        raise ValueError("POC lookback dan jumlah level harus >= 2.")
+    n = len(c)
+    poc = np.full(n, np.nan, dtype=np.float64)
+    if n < lookback:
+        return poc
+    window_hi = np.lib.stride_tricks.sliding_window_view(h, lookback).max(axis=1)
+    window_lo = np.lib.stride_tricks.sliding_window_view(l, lookback).min(axis=1)
+    if str(volume_type).casefold() == "bullish":
+        weights_all = np.where(c >= o, v, 0.0)
+    elif str(volume_type).casefold() == "bearish":
+        weights_all = np.where(c < o, v, 0.0)
+    else:
+        weights_all = v
+    for k in range(len(window_hi)):
+        i = k + lookback - 1
+        top, bottom = float(window_hi[k]), float(window_lo[k])
+        step = (top - bottom) / (nbars - 1)
+        if not step > 0:
+            continue
+        sl = slice(k, i + 1)
+        jl = np.ceil((l[sl] - bottom) / step).astype(np.int64)
+        jh = np.ceil((h[sl] - bottom) / step).astype(np.int64) - 1
+        np.maximum(jl, 0, out=jl)
+        np.minimum(jh, nbars - 1, out=jh)
+        mask = jl <= jh
+        if not mask.any():
+            continue
+        weights = weights_all[sl][mask]
+        diff = (
+            np.bincount(jl[mask], weights=weights, minlength=nbars + 1)
+            - np.bincount(jh[mask] + 1, weights=weights, minlength=nbars + 1)
+        )
+        level_volume = np.cumsum(diff)[:nbars]
+        poc[i] = bottom + step * int(np.argmax(level_volume))
+    return poc
+
+
+def analyze_ema_poc_setup(
+    candles: Any,
+    *,
+    symbol: str,
+    next_open_time_ms: int,
+    ema_fast: int = EMA_FAST,
+    ema_slow: int = EMA_SLOW,
+    poc_lookback: int = POC_LOOKBACK,
+    poc_bars: int = POC_BARS,
+    supertrend_atr_length: int = SUPERTREND_ATR_LENGTH,
+    supertrend_factor: float = SUPERTREND_FACTOR,
+) -> dict[str, Any] | None:
+    """Build the next-M15-candle POC limit setup from completed M15 bars only.
+
+    This reproduces `candidates()` in backtest_vp_poc.py: EMA direction is a
+    state (fast > slow = LONG, otherwise SHORT), POC must be a pullback on the
+    correct side of the close, Supertrend must protect the POC, and the next
+    candle must be exactly contiguous. A later M5 touch performs the fill.
+    """
+    if int(ema_fast) != 9 or int(ema_slow) != 21:
+        raise ValueError("Baseline strategy dikunci pada EMA 9/21.")
+    ts, op, hi, lo, cl, vol = _extract_ohlcv(candles)
+    n = len(cl)
+    warmup = max(int(poc_lookback), int(ema_slow), int(supertrend_atr_length) + 1)
+    if n < warmup:
+        return None
+    i = n - 1
+    next_open = int(next_open_time_ms)
+    signal_close_ms = int(ts[i]) + M15_INTERVAL_MS
+    if next_open != signal_close_ms:
+        return None
+    if i + 1 < n:
+        raise AssertionError("Invalid candle index.")
+
+    ema_fast_values = _bt_smooth(cl, ema_fast, 2.0 / (ema_fast + 1.0))
+    ema_slow_values = _bt_smooth(cl, ema_slow, 2.0 / (ema_slow + 1.0))
+    ema9 = float(ema_fast_values[i])
+    ema21 = float(ema_slow_values[i])
+    if not (np.isfinite(ema9) and np.isfinite(ema21)):
+        return None
+    direction = "LONG" if ema9 > ema21 else "SHORT"
+    side = 1 if direction == "LONG" else -1
+
+    poc_values = volume_profile_poc(
+        op, hi, lo, cl, vol,
+        lookback=int(poc_lookback), nbars=int(poc_bars), volume_type=POC_VOLUME_TYPE,
+    )
+    poc = float(poc_values[i])
+    st_values = _calc_supertrend_backtest(
+        hi, lo, cl, int(supertrend_atr_length), float(supertrend_factor)
+    )
+    stop = float(st_values[i])
+    close_price = float(cl[i])
+    if not (np.isfinite(poc) and np.isfinite(stop) and poc > 1e-12):
+        return None
+
+    # Identical to backtest_vp_poc.candidates(): pullback + protective SL.
+    pullback_ok = poc < close_price if side == 1 else poc > close_price
+    protective_ok = stop < poc if side == 1 else stop > poc
+    if not (pullback_ok and protective_ok):
+        return None
+    risk = (poc - stop) * side
+    if not np.isfinite(risk) or risk <= 1e-12:
+        return None
+
+    return {
+        "strategy": STRATEGY_NAME,
+        "strategy_version": "4.0.0",
+        "signal_mode": "VP_POC_M15_LIMIT",
+        "symbol": str(symbol).upper(),
+        "timeframe": "M15",
+        "direction": direction,
+        "signal": "EMA9_21_VP_POC",
+        "signal_timeframe": "M15",
+        "signal_open_time_ms": int(ts[i]),
+        "signal_close_time_ms": signal_close_ms,
+        "entry_candle_open_time_ms": next_open,
+        "entry_candle_close_time_ms": next_open + M15_INTERVAL_MS,
+        "signal_close_price": close_price,
+        "close_price": close_price,
+        "entry_price": poc,
+        "limit_price": poc,
+        "poc_price": poc,
+        "stop_loss": stop,
+        "reference_sl": stop,
+        "supertrend_atr_length": int(supertrend_atr_length),
+        "supertrend_factor": float(supertrend_factor),
+        "signal_atr": float(_calc_atr_backtest(hi, lo, cl, int(supertrend_atr_length))[i]),
+        "ema_fast_length": int(ema_fast),
+        "ema_slow_length": int(ema_slow),
+        "ema_filter_length": [int(ema_fast), int(ema_slow)],
+        "ema_filter_value": ema9,
+        "ema_filter_slow_value": ema21,
+        "ema_filter_passed": True,
+        "ema_filter_ready": True,
+        "rr_target": FIXED_RR,
+        "rr_min": FIXED_RR,
+        "rr_max": FIXED_RR,
+        "take_profit_rr": FIXED_RR,
+        "take_profit_source": "RR_FIXED",
+        "risk_at_limit": risk,
+        "bubble_visual_time_ms": int(ts[i]),
+    }
+
+
+def build_poc_limit_signal(candles: Any, *, symbol: str, next_open_time_ms: int) -> dict[str, Any] | None:
+    """Public scanner entry point for the locked EMA9/21 baseline."""
+    return analyze_ema_poc_setup(
+        candles, symbol=symbol, next_open_time_ms=next_open_time_ms,
+        ema_fast=EMA_FAST, ema_slow=EMA_SLOW,
+        poc_lookback=POC_LOOKBACK, poc_bars=POC_BARS,
+        supertrend_atr_length=SUPERTREND_ATR_LENGTH,
+        supertrend_factor=SUPERTREND_FACTOR,
+    )
+
+
 
 
 def normalize_rr_value(value: Any, field_name: str = "RR") -> float:
