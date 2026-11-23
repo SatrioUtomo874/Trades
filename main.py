@@ -140,11 +140,9 @@ if not BINANCE_EGRESS_ID:
         BINANCE_EGRESS_ID = f"proxy:{_binance_proxy_parts.hostname}:{_binance_proxy_parts.port or 0}"
     else:
         BINANCE_EGRESS_ID = "direct"
-# SAFETY: this build is permanently PAPER-only. Keep the hard guard here,
-# even if an environment file accidentally contains REAL_EXECUTION_ENABLED=1.
-FORCE_PAPER_ONLY = False
-BINANCE_TRADING_MODE = "Paper"
-REAL_EXECUTION_ENABLED = True
+# Single source of truth for execution mode. Keep True for this PAPER-ONLY build.
+# All private/order-path guards below read this same variable.
+PAPER_ONLY = False
 GITHUB_API = "https://api.github.com"
 # IP cooldown markers are machine/egress-IP specific. Keep them local by default;
 # enable GitHub sharing only when the process restarts behind the same public IP.
@@ -3352,7 +3350,7 @@ class BinanceRealClient:
         _timing: dict[str, float] | None = None,
         _timeout_seconds: float | None = None,
     ) -> Any:
-        if (FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED) and (signed or path != "/fapi/v1/time"):
+        if PAPER_ONLY and (signed or path != "/fapi/v1/time"):
             raise BinanceAPIError(
                 "Build PAPER-ONLY: hanya endpoint waktu publik yang diizinkan melalui jalur ini; "
                 "private API dan order submission dinonaktifkan.",
@@ -3596,7 +3594,7 @@ class BinanceRealClient:
 
     async def _user_stream_request(self, method: str, listen_key: str | None = None) -> dict[str, Any]:
         """Create/renew USD-M listenKey; API-key header only, no HMAC signature."""
-        if FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED:
+        if PAPER_ONLY:
             raise BinanceAPIError("Build PAPER-ONLY: private Binance user stream dinonaktifkan.", endpoint="/fapi/v1/listenKey")
         if not self.configured:
             raise BinanceAPIError("BINANCE_API_KEY / BINANCE_API_SECRET belum tersedia.", endpoint="/fapi/v1/listenKey")
@@ -4630,7 +4628,7 @@ class BinanceUserDataWebSocket:
         self._permission_retry_event.clear()
 
     async def start(self) -> None:
-        if FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED:
+        if PAPER_ONLY:
             await self.stop()
             return
         async with self._start_lock:
@@ -4677,7 +4675,7 @@ class BinanceUserDataWebSocket:
         guaranteed way around an IP ban. If Binance blocks it too, the existing
         private stream is left running and REST reconciliation takes over later.
         """
-        if FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED:
+        if PAPER_ONLY:
             raise BinanceAPIError("Build PAPER-ONLY: private WebSocket API dinonaktifkan.", endpoint=f"WS_API/{method}")
         if not self.real.configured:
             raise BinanceAPIError("API key REAL belum tersedia untuk user-stream WS API.")
@@ -4801,7 +4799,7 @@ class BinanceUserDataWebSocket:
         self._permission_blocked_generation = None
 
     async def _run(self) -> None:
-        if FORCE_PAPER_ONLY or not REAL_EXECUTION_ENABLED:
+        if PAPER_ONLY:
             self.connected = False
             self._ws = None
             return
@@ -7859,7 +7857,7 @@ class TradingEngine:
                 result="CANCELED", notify=False,
             )
         direction = trade.direction
-        if not self.real_mode:
+        if PAPER_ONLY or not self.real_mode:
             raise MarketEntryRejected("PAPER_ONLY", "Build ini PAPER-ONLY; simulasi tidak mengirim entry ke Binance.")
         if self._real_ip_permission_blocked_for_current_route():
             raise MarketEntryRejected(
@@ -7871,7 +7869,7 @@ class TradingEngine:
             raise MarketEntryRejected("AUTOSTOP_BEFORE_ENTRY", "AUTOSTOP aktif; entry baru diblokir.")
         if now_utc() >= trade.expires_at:
             raise MarketEntryRejected("ENTRY_NEXT_M15_OPEN_WINDOW_EXPIRED", "Window entry pada candle M15 berikutnya sudah berakhir.", result="EXPIRED", notify=False)
-        if not REAL_EXECUTION_ENABLED or not self.real.configured:
+        if PAPER_ONLY or not self.real.configured:
             raise MarketEntryRejected("REAL_UNAVAILABLE", "API Binance tidak tersedia/tidak dikonfigurasi.")
         if any(
             other is not trade and other.pair == trade.pair and other.status in {"PENDING", "FILLED"}
