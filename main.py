@@ -634,7 +634,9 @@ class SymbolMeta:
     step_size: Decimal = Decimal("0")
     min_notional: Decimal = Decimal("0")
     max_notional: Decimal = Decimal("0")
+    market_min_qty: Decimal = Decimal("0")
     market_max_qty: Decimal = Decimal("0")
+    market_step_size: Decimal = Decimal("0")
     quantity_precision: int = 0
     price_precision: int = 0
 
@@ -2953,7 +2955,9 @@ class BinanceREST:
             max_price = Decimal("0")
             min_qty = Decimal("0")
             max_qty = Decimal("0")
+            market_min_qty = Decimal("0")
             market_max_qty = Decimal("0")
+            market_step_size = Decimal("0")
             step_size = Decimal("0")
             min_notional = Decimal("0")
             max_notional = Decimal("0")
@@ -2969,6 +2973,8 @@ class BinanceREST:
                     candidate_min = Decimal(str(filt.get("minQty") or "0"))
                     candidate_max = Decimal(str(filt.get("maxQty") or "0"))
                     if kind == "MARKET_LOT_SIZE":
+                        market_step_size = candidate_step
+                        market_min_qty = candidate_min
                         market_max_qty = candidate_max
                     if kind == "LOT_SIZE" or step_size <= 0:
                         step_size = candidate_step
@@ -2995,7 +3001,9 @@ class BinanceREST:
                 step_size=step_size,
                 min_notional=min_notional,
                 max_notional=max_notional,
+                market_min_qty=market_min_qty,
                 market_max_qty=market_max_qty,
+                market_step_size=market_step_size,
                 quantity_precision=int(raw.get("quantityPrecision") or 0),
                 price_precision=int(raw.get("pricePrecision") or 0),
             )
@@ -3014,7 +3022,9 @@ class BinanceREST:
             "step_size": meta.step_size,
             "min_qty": meta.min_qty,
             "max_qty": meta.max_qty,
+            "market_min_qty": meta.market_min_qty,
             "market_max_qty": meta.market_max_qty,
+            "market_step_size": meta.market_step_size,
             "min_notional": meta.min_notional,
             "max_notional": meta.max_notional,
             "min_price": meta.min_price,
@@ -7857,15 +7867,27 @@ class TradingEngine:
         symbol_max = Decimal(str(filters.get("max_notional") or "0"))
         if leverage_max_notional is not None:
             filters["max_notional"] = min(symbol_max, leverage_max_notional) if symbol_max > 0 else leverage_max_notional
+
+        # MARKET orders must satisfy MARKET_LOT_SIZE, which can have a
+        # different stepSize/minQty/maxQty from LOT_SIZE. LIMIT POC orders
+        # continue to use LOT_SIZE. Fall back only when Binance omits a
+        # usable MARKET_LOT_SIZE step.
+        sizing_filters = dict(filters)
+        if not is_poc_limit:
+            market_step = Decimal(str(filters.get("market_step_size") or "0"))
+            if market_step > 0:
+                sizing_filters["step_size"] = market_step
+                sizing_filters["min_qty"] = Decimal(str(filters.get("market_min_qty") or "0"))
+                sizing_filters["max_qty"] = Decimal(str(filters.get("market_max_qty") or "0"))
         if trade.min_margin_mode:
             quantity, notional, minimum_margin, reason = compute_minimum_order(
-                sizing_price, trade.leverage, filters, sizing_available, leverage_max_notional
+                sizing_price, trade.leverage, sizing_filters, sizing_available, leverage_max_notional
             )
             if quantity is None or notional is None or minimum_margin is None:
                 raise MarketEntryRejected("MIN_MARGIN_REJECTED", f"Minimum margin ditolak: {reason}")
             trade.margin_usdt, trade.target_notional = minimum_margin, notional
         else:
-            quantity, reason = compute_quantity(sizing_price, trade.margin_usdt, trade.leverage, filters, sizing_available)
+            quantity, reason = compute_quantity(sizing_price, trade.margin_usdt, trade.leverage, sizing_filters, sizing_available)
             if quantity is None:
                 raise MarketEntryRejected(
                     "SIZE_REJECTED",
@@ -7873,9 +7895,19 @@ class TradingEngine:
                     f"{REAL_NOTIONAL_MIN_RATIO * 100:.0f}–{REAL_NOTIONAL_MAX_RATIO * 100:.0f}% dari target; "
                     "order ditolak bila aturan LOT_SIZE memaksa margin terlalu jauh.",
                 )
-        market_cap = Decimal(str(filters.get("market_max_qty") or "0"))
-        if not is_poc_limit and market_cap > 0 and quantity > market_cap:
-            raise MarketEntryRejected("QTY_ABOVE_MARKET_MAX", f"Qty {format_qty(quantity)} melebihi batas MARKET {format_qty(market_cap)}.")
+        if not is_poc_limit:
+            market_step = Decimal(str(sizing_filters.get("step_size") or "0"))
+            market_min = Decimal(str(sizing_filters.get("min_qty") or "0"))
+            market_cap = Decimal(str(sizing_filters.get("max_qty") or "0"))
+            if market_step > 0 and quantity % market_step != 0:
+                raise MarketEntryRejected(
+                    "MARKET_QTY_STEP_INVALID",
+                    f"Qty {format_qty(quantity)} tidak sesuai MARKET stepSize {format_qty(market_step)}; order tidak dikirim.",
+                )
+            if market_min > 0 and quantity < market_min:
+                raise MarketEntryRejected("MARKET_QTY_BELOW_MIN", f"Qty {format_qty(quantity)} di bawah MARKET minQty {format_qty(market_min)}.")
+            if market_cap > 0 and quantity > market_cap:
+                raise MarketEntryRejected("QTY_ABOVE_MARKET_MAX", f"Qty {format_qty(quantity)} melebihi batas MARKET {format_qty(market_cap)}.")
 
         # Last synchronous safety gate immediately before committing the
         # MARKET submission. /banned updates the set before waiting for this
