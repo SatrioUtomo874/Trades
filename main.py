@@ -11283,7 +11283,7 @@ class TradingEngine:
     # ------------------------- Telegram commands -------------------------
     async def _set_real(self, command: str) -> None:
         """PAPER-only build: reject every attempt to enable REAL execution."""
-        self.real_mode = False
+        self.real_mode = True
         await self.reply(
             "🔒 PAPER-ONLY LOCK AKTIF\n"
             "Build ini hanya membuat simulasi PAPER dari candle M5.\n"
