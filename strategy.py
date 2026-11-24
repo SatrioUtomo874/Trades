@@ -2198,12 +2198,58 @@ def calculate_ema_tv(values: Any, length: int) -> np.ndarray:
     return _ema_tv(np.asarray(values, dtype=np.float64), int(length))
 
 
+def _h4_trend_snapshot(
+    candles: Any, confirmation_close_ms: int,
+) -> dict[str, Any] | None:
+    """Return the H4 ST10/EMA100 trend from the latest fully closed H4 bar.
+
+    The selected bar must be the exact H4 candle known at the M15
+    confirmation close. This prevents both forming-candle use and look-ahead.
+    """
+    try:
+        ts, _o, high, low, close, _v = _extract_columns(candles)
+    except (TypeError, ValueError, IndexError):
+        return None
+    h4_ms = int(TIMEFRAME_MS["H4"])
+    expected_open_ms = (int(confirmation_close_ms) // h4_ms) * h4_ms - h4_ms
+    h4_index = int(np.searchsorted(ts, expected_open_ms, side="right") - 1)
+    if (
+        h4_index < H4_EMA_LENGTH - 1
+        or h4_index >= len(close)
+        or int(ts[h4_index]) != expected_open_ms
+    ):
+        return None
+    prefix_close = close[:h4_index + 1]
+    ema = calculate_ema_tv(prefix_close, H4_EMA_LENGTH)
+    st, _direction = _backtest_supertrend(
+        high[:h4_index + 1], low[:h4_index + 1], prefix_close,
+        H4_SUPERTREND_ATR_LENGTH, H4_SUPERTREND_FACTOR,
+    )
+    close_value = float(prefix_close[-1])
+    ema_value = float(ema[-1]) if len(ema) else float("nan")
+    st_value = float(st[-1]) if len(st) else float("nan")
+    if not all(np.isfinite(x) and x > 0 for x in (close_value, ema_value, st_value)):
+        return None
+    bullish = close_value > st_value and ema_value < st_value
+    bearish = close_value < st_value and ema_value > st_value
+    trend = "BULLISH" if bullish else "BEARISH" if bearish else "CONSOLIDATION"
+    return {
+        "trend": trend,
+        "open_time_ms": int(ts[h4_index]),
+        "close": close_value,
+        "supertrend": st_value,
+        "ema100": ema_value,
+    }
+
+
 def detect_new_strategy_signal(
     m15_with_forming: Any,
     h4_closed: Any,
     *,
     symbol: str,
     trend_length: int = 9,
+    btc_h4_closed: Any | None = None,
+    btc_filter_enabled: bool = True,
 ) -> dict[str, Any] | None:
     """Evaluate the newest confirmed visual Volumatic marker against H4 trend.
 
@@ -2254,40 +2300,36 @@ def detect_new_strategy_signal(
     if confirmation_open_ms != bubble_open_ms + interval_ms:
         return None
 
-    # H4 reference must itself have closed by the time the confirming M15
-    # candle closed. Never use a forming H4 candle or future H4 values.
+    # Altcoin H4 reference must itself have closed by the time the confirming
+    # M15 candle closed. Never use a forming H4 candle or future H4 values.
     confirmation_close_ms = confirmation_open_ms + interval_ms
-    h4_index = int(np.searchsorted(
-        h4_ts, confirmation_close_ms - int(TIMEFRAME_MS["H4"]), side="right"
-    ) - 1)
-    expected_h4_open_ms = (
-        (confirmation_close_ms // int(TIMEFRAME_MS["H4"])) * int(TIMEFRAME_MS["H4"])
-        - int(TIMEFRAME_MS["H4"])
+    alt_trend_state = _h4_trend_snapshot(
+        {"t": h4_ts, "o": h4_o, "h": h4_h, "l": h4_l, "c": h4_c, "v": h4_v},
+        confirmation_close_ms,
     )
-    if (
-        h4_index < H4_EMA_LENGTH - 1 or h4_index >= len(h4_c)
-        or int(h4_ts[h4_index]) != expected_h4_open_ms
-    ):
+    if alt_trend_state is None:
         return None
-    h4_prefix = h4_c[:h4_index + 1]
-    h4_ema = calculate_ema_tv(h4_prefix, H4_EMA_LENGTH)
-    h4_st, _h4_direction = _backtest_supertrend(
-        h4_h[:h4_index + 1], h4_l[:h4_index + 1], h4_prefix,
-        H4_SUPERTREND_ATR_LENGTH, H4_SUPERTREND_FACTOR,
-    )
-    h4_close = float(h4_prefix[-1])
-    h4_ema_value = float(h4_ema[-1]) if len(h4_ema) else float("nan")
-    h4_st_value = float(h4_st[-1]) if len(h4_st) else float("nan")
-    if not all(np.isfinite(x) and x > 0 for x in (h4_close, h4_ema_value, h4_st_value)):
-        return None
-
-    bearish = h4_close < h4_st_value and h4_ema_value > h4_st_value
-    bullish = h4_close > h4_st_value and h4_ema_value < h4_st_value
-    trend = "BEARISH" if bearish else "BULLISH" if bullish else "CONSOLIDATION"
+    trend = str(alt_trend_state["trend"])
+    h4_close = float(alt_trend_state["close"])
+    h4_st_value = float(alt_trend_state["supertrend"])
+    h4_ema_value = float(alt_trend_state["ema100"])
     if trend == "CONSOLIDATION":
         return None
     if (trend == "BEARISH" and direction != "SHORT") or (trend == "BULLISH" and direction != "LONG"):
         return None
+
+    # Optional BTC H4 trend gate. It is deliberately identical to the ALT gate
+    # and must agree with both the ALT trend and the M15 bubble direction.
+    btc_trend_state: dict[str, Any] | None = None
+    if bool(btc_filter_enabled):
+        if btc_h4_closed is None:
+            return None
+        btc_trend_state = _h4_trend_snapshot(btc_h4_closed, confirmation_close_ms)
+        if btc_trend_state is None:
+            return None
+        btc_trend = str(btc_trend_state["trend"])
+        if btc_trend != trend:
+            return None
 
     # M15 initial SL is the latest fully closed M15 candle (the confirmation
     # candle), not the visually marked candle. The target entry remains the
@@ -2320,13 +2362,19 @@ def detect_new_strategy_signal(
         "signal": "BLUE" if direction == "LONG" else "RED",
         "trend": trend,
         "trend_timeframe": "H4",
-        "trend_h4_open_time_ms": int(h4_ts[h4_index]),
+        "trend_h4_open_time_ms": int(alt_trend_state["open_time_ms"]),
         "trend_h4_close": h4_close,
         "trend_h4_supertrend": h4_st_value,
         "trend_h4_ema100": h4_ema_value,
         "trend_h4_supertrend_atr": H4_SUPERTREND_ATR_LENGTH,
         "trend_h4_supertrend_factor": H4_SUPERTREND_FACTOR,
         "trend_h4_ema_length": H4_EMA_LENGTH,
+        "btc_filter_enabled": bool(btc_filter_enabled),
+        "btc_trend": (str(btc_trend_state["trend"]) if btc_trend_state is not None else "OFF"),
+        "btc_h4_open_time_ms": (int(btc_trend_state["open_time_ms"]) if btc_trend_state is not None else None),
+        "btc_h4_close": (float(btc_trend_state["close"]) if btc_trend_state is not None else None),
+        "btc_h4_supertrend": (float(btc_trend_state["supertrend"]) if btc_trend_state is not None else None),
+        "btc_h4_ema100": (float(btc_trend_state["ema100"]) if btc_trend_state is not None else None),
         "trend_valid": True,
         "bubble_open_time_ms": bubble_open_ms,
         "bubble_close_time_ms": bubble_open_ms + interval_ms,
