@@ -402,3 +402,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:26:32.220622+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## C98USDT LONG — CANCELED
+- Trade ID: `C98USDT-20261124-092638-2EE4DD`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:27:05.201534+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
