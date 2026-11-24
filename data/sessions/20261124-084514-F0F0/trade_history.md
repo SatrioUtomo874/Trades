@@ -66,3 +66,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:54:27.727337+00:00 | Reason: SIZE_REJECTED
+## BROCCOLI714USDT LONG — CANCELED
+- Trade ID: `BROCCOLI714USDT-20261124-085442-B2DE92`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:54:50.053125+00:00 | Reason: SIZE_REJECTED
