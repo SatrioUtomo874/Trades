@@ -84,3 +84,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:16:20.029790+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
+## LISTAUSDT LONG — CANCELED
+- Trade ID: `LISTAUSDT-20261124-110834-0F4D1A`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:16:41.228604+00:00 | Reason: BINANCE_USER_WS_CANCELED
