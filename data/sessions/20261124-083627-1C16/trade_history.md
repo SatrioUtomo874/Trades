@@ -78,3 +78,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:42:02.037282+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
+## AVAUSDT LONG — CANCELED
+- Trade ID: `AVAUSDT-20261124-084219-2E875E`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:42:22.363813+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
