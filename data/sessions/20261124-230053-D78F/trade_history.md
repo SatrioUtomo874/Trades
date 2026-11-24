@@ -1032,3 +1032,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:45:01.292821+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AKEUSDT SHORT — CANCELED
+- Trade ID: `AKEUSDT-20261125-054558-86A2DB`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:53:36.512571+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
