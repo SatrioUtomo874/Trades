@@ -36,3 +36,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:33:19.233986+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## FLUIDUSDT SHORT — CANCELED
+- Trade ID: `FLUIDUSDT-20261125-013231-98C227`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:33:47.382238+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
