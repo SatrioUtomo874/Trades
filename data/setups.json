@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T03:17:43.962046+00:00",
+  "updated_at": "2026-11-24T03:17:45.859364+00:00",
   "active_trades": [
     {
       "trade_id": "BLURUSDT-20261124-101629-69A690",
@@ -194,13 +194,13 @@
       "target_notional": "5.5",
       "actual_notional": "5.50766",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_PENDING",
       "position_side": "BOTH",
       "entry_order_id": 1549832507,
       "entry_client_order_id": "VT7a93c004c23319336e414ee346cb",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": null,
+      "entry_executed_qty": "0",
       "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
