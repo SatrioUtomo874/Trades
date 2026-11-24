@@ -30,3 +30,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:38:50.458835+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
+## ACTUSDT LONG — CANCELED
+- Trade ID: `ACTUSDT-20261124-083907-FB2409`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:39:10.903795+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
