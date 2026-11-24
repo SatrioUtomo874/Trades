@@ -264,3 +264,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:15:06.045295+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ETHFIUSDT SHORT — EXPIRED
+- Trade ID: `ETHFIUSDT-20261125-014829-C20E83`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:15:19.366579+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
