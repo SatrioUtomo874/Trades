@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T15:34:00.435242+00:00",
+  "updated_at": "2026-11-24T15:34:17.974892+00:00",
   "active_trades": [
     {
       "trade_id": "SOPHUSDT-20261124-211700-5B9887",
@@ -6298,7 +6298,7 @@
       "tp_client_algo_id": "VTTPSDT-20261124-223135-855299",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
@@ -6581,8 +6581,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-24T15:34:02.422466+00:00",
+      "entry_trigger_price": "0.01538",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
