@@ -768,3 +768,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:45:00.123137+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## GTCUSDT SHORT — CANCELED
+- Trade ID: `GTCUSDT-20261125-032324-54C59A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:45:00.220599+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
