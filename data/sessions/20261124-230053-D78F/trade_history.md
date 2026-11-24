@@ -558,3 +558,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:17:32.979902+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BBUSDT SHORT — EXPIRED
+- Trade ID: `BBUSDT-20261125-024741-770492`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:17:47.357882+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
