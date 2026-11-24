@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T14:30:33.691412+00:00",
+  "updated_at": "2026-11-24T14:30:37.961251+00:00",
   "active_trades": [
     {
       "trade_id": "SOPHUSDT-20261124-211700-5B9887",
@@ -351,12 +351,12 @@
       "liquidity_pool_timeframe": null,
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002200579115,
       "tp_algo_id": null,
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSLSDT-20261124-213009-F014B3",
       "tp_client_algo_id": "VTTPSDT-20261124-213009-F014B3",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
