@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T02:52:55.403845+00:00",
+  "updated_at": "2026-11-24T02:53:09.968520+00:00",
   "active_trades": [
     {
       "trade_id": "0GUSDT-20261124-084550-BC94FB",
@@ -887,9 +887,9 @@
       "tp_algo_id": 4000002198140665,
       "sl_client_algo_id": "VTSLSDT-20261124-093706-4B2582",
       "tp_client_algo_id": "VTTPSDT-20261124-093706-4B2582",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "sl_algo_status": "FINISHED",
+      "tp_algo_status": "EXPIRED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
