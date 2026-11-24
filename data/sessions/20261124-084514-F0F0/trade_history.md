@@ -156,3 +156,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:01:20.846883+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
+## ALICEUSDT LONG — EXPIRED
+- Trade ID: `ALICEUSDT-20261124-084904-898FF8`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:01:55.995388+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
