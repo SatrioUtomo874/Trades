@@ -141,6 +141,25 @@ if not BINANCE_EGRESS_ID:
     else:
         BINANCE_EGRESS_ID = "direct"
 BINANCE_TRADING_MODE = "live"
+BTC_EMA_FILTER_SYMBOL = "BTCUSDT"
+BTC_H4_EMA_FAST, BTC_H4_EMA_SLOW = 9, 21
+
+
+def h4_ema_state(closed: Any) -> tuple[str, float, float]:
+    """EMA9/21 state of completed H4 candles: ("UP"|"DOWN"|"FLAT", fast, slow)."""
+    closes = np.asarray(closed["c"], dtype=float)
+    if len(closes) < BTC_H4_EMA_SLOW * 3:
+        raise RuntimeError("Riwayat H4 BTC tidak cukup untuk EMA21.")
+    values = []
+    for length in (BTC_H4_EMA_FAST, BTC_H4_EMA_SLOW):
+        alpha = 2.0 / (length + 1.0)
+        ema = float(closes[0])
+        for price in closes[1:]:
+            ema = alpha * float(price) + (1.0 - alpha) * ema
+        values.append(ema)
+    fast, slow = values
+    return ("UP" if fast > slow else "DOWN" if fast < slow else "FLAT"), fast, slow
+
 REAL_EXECUTION_ENABLED = (os.getenv("REAL_EXECUTION_ENABLED", "1") or "1").strip().lower() not in {
     "0", "false", "off", "no", "disabled"
 }
@@ -6801,7 +6820,7 @@ class TradingEngine:
             f"DIRECTION : LONG {blue}  ·  SHORT {red}  ·  NO SETUP {no_signal}",
             f"REJECTED  : {rejected}",
             f"EXECUTION : NEW {created}  ·  FILLED {filled}  ·  DEFERRED {deferred}  ·  UNKNOWN {unknown}",
-            "H4/H1/BTC FILTER: DISABLED",
+            f"BTC FILTER: {stats.get('btc_filter_status', 'UNKNOWN')}  ·  BLOCK {int(stats.get('btc_ema_blocked', 0))}  ·  ALT H4 BLOCK {int(stats.get('ema_blocked', 0))}",
             f"OTHER     : MAX BLOCK {int(stats.get('max_blocked', 0))}  ·  DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
             f"DURATION  : {elapsed:.1f}s",
         ]
@@ -7010,6 +7029,22 @@ class TradingEngine:
                 volumatic.POC_LOOKBACK, volumatic.POC_BARS, len(universe),
                 SCAN_MAX_PAIRS_PER_CYCLE, offset,
             )
+            btc_state, btc_fast, btc_slow = "UNAVAILABLE", 0.0, 0.0
+            btc_filter_status = "BTC H4 EMA9/21 DATA UNAVAILABLE"
+            try:
+                btc_h4 = await self.rest.get_klines(
+                    BTC_EMA_FILTER_SYMBOL, "4h", 150, volumatic.TIMEFRAME_MS["H4"], force_refresh=False
+                )
+                btc_state, btc_fast, btc_slow = h4_ema_state(btc_h4)
+                btc_filter_status = f"H4 EMA9/21 {btc_state} ({btc_fast:.2f}/{btc_slow:.2f})"
+            except BinanceRateLimitError as exc:
+                self._scan_interrupted_by_cooldown = True
+                self._scan_trigger_now = True
+                await self._notify_binance_cooldown(exc, source="BTC H4 EMA REFERENCE", symbol=BTC_EMA_FILTER_SYMBOL)
+                return
+            except Exception as exc:
+                btc_filter_status = f"DATA UNAVAILABLE: {str(exc)[:90]}"
+                log.exception("[BTC EMA] filter wajib tidak tersedia; entry baru ditolak.")
             await self._expire_due_pending()
 
             while offset < len(universe):
@@ -7030,7 +7065,7 @@ class TradingEngine:
                     "deferred": 0, "unknown": 0, "ema_blocked": 0,
                     "h1_ema_blocked": 0, "btc_ema_blocked": 0,
                     "max_blocked": 0, "duplicate": 0,
-                    "btc_filter_status": "DISABLED — NOT A TRADE GATE",
+                    "btc_filter_status": btc_filter_status,
                     "errors": 0, "details": [],
                 }
                 log.info(
@@ -7095,6 +7130,33 @@ class TradingEngine:
 
                         direction = str(signal["direction"]).upper()
                         signal["source"] = "SCANNER_M15_EMA9_21_VP_POC"
+                        wanted = "UP" if direction == "LONG" else "DOWN"
+                        if btc_state != wanted:
+                            stats["btc_ema_blocked"] += 1
+                            stats["rejected"] += 1
+                            reason = "BTC_H4_EMA_" + ("UNAVAILABLE" if btc_state == "UNAVAILABLE" else "AGAINST")
+                            stats["rejection_reasons"][reason] = stats["rejection_reasons"].get(reason, 0) + 1
+                            self._scan_resume_cursor = absolute_index + 1
+                            continue
+                        # ALT H4 EMA9/21 is fetched only for candidates that passed BTC.
+                        try:
+                            alt_h4 = await self.rest.get_klines(
+                                symbol, "4h", 150, volumatic.TIMEFRAME_MS["H4"], force_refresh=False
+                            )
+                            alt_state, alt_fast, alt_slow = h4_ema_state(alt_h4)
+                        except BinanceRateLimitError:
+                            self.last_processed_candles.pop(key, None)
+                            raise
+                        except Exception as exc:
+                            alt_state, alt_fast, alt_slow = "UNAVAILABLE", 0.0, 0.0
+                            log.warning("[ALT H4 EMA] %s tidak tersedia: %s", symbol, exc)
+                        if alt_state != wanted:
+                            stats["ema_blocked"] += 1
+                            stats["rejected"] += 1
+                            reason = "ALT_H4_EMA_" + ("UNAVAILABLE" if alt_state == "UNAVAILABLE" else "AGAINST")
+                            stats["rejection_reasons"][reason] = stats["rejection_reasons"].get(reason, 0) + 1
+                            self._scan_resume_cursor = absolute_index + 1
+                            continue
                         outcome = await self._dispatch_mode_b_signal(
                             signal, expiry_ms, source="SCANNER_M15_EMA9_21_VP_POC"
                         )
@@ -11681,7 +11743,7 @@ class TradingEngine:
         self.h1_enabled = False
         await self.reply(
             "H1 FILTER: OFF / NOT USED\n"
-            "Baseline hanya memakai EMA9/EMA21 pada candle M15. H4, H1, dan BTC tidak menjadi filter."
+            "Baseline memakai EMA9/EMA21 M15 + syarat arah EMA9/21 H4 BTCUSDT dan EMA9/21 H4 koin itu sendiri (LONG butuh EMA9>EMA21, SHORT butuh EMA9<EMA21)."
         )
 
     def _symbols_from_command(text: str) -> list[str]:
@@ -13037,7 +13099,7 @@ class TradingEngine:
             "hanya untuk candle M15 berikutnya. LONG hanya jika POC < close; SHORT hanya jika POC > close. "
             "SL statis pada Supertrend M15 ATR14 x2.5 dan harus protektif terhadap POC. TP fixed 1R dihitung "
             "ulang dari fill M5 aktual. Fill memakai sentuhan pertama M5; gap mengisi di open jika lebih baik. "
-            "Jika SL dan TP tersentuh pada M5 yang sama, SL diprioritaskan (PAPER). Tidak ada H4/H1/BTC filter, "
+            "Jika SL dan TP tersentuh pada M5 yang sama, SL diprioritaskan (PAPER). Filter EMA9/21 H4 BTC dan alt searah sinyal; tanpa filter H1, "
             "liquidity TP, trailing SL, trend-flip exit, atau forced close. REAL: LIMIT GTC di Binance, "
             "dibatalkan di akhir candle jika belum terisi; SL/TP closePosition dipasang setelah fill."
         )
