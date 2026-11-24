@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T23:48:51.114650+00:00",
+  "updated_at": "2026-11-24T23:48:54.829399+00:00",
   "active_trades": [
     {
       "trade_id": "SOPHUSDT-20261125-004613-4ED906",
@@ -891,9 +891,9 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795563000000,
-      "trailing_last_st": null,
-      "trailing_last_reason": null,
+      "trailing_last_close_ms": 1795563900000,
+      "trailing_last_st": "0.014768178904180059",
+      "trailing_last_reason": "CANDIDATE_INVALID_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; fixed 2R TP; M15 close trailing SL",
