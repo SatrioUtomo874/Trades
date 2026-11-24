@@ -66,3 +66,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:41:18.229984+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
+## ATOMUSDT LONG — CANCELED
+- Trade ID: `ATOMUSDT-20261124-084137-99472E`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:41:40.554781+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
