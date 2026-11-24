@@ -648,3 +648,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:20:37.463634+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## WETUSDT SHORT — EXPIRED
+- Trade ID: `WETUSDT-20261125-025431-93D5C6`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:20:48.352845+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
