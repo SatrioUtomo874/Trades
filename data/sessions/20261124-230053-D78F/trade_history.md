@@ -348,3 +348,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:21:50.382373+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AEVOUSDT SHORT — CANCELED
+- Trade ID: `AEVOUSDT-20261125-020136-4000D0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:22:21.798854+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
