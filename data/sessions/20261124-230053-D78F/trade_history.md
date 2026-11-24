@@ -156,3 +156,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:50:49.739534+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## PLUMEUSDT SHORT — CANCELED
+- Trade ID: `PLUMEUSDT-20261125-015216-591B69`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:52:42.664903+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
