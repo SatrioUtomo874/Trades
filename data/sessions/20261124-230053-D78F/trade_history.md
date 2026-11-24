@@ -522,3 +522,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:15:55.383095+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AUCTIONUSDT SHORT — EXPIRED
+- Trade ID: `AUCTIONUSDT-20261125-024644-3DF35C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:16:17.274117+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
