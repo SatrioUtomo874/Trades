@@ -270,3 +270,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:16:56.715639+00:00 | Reason: SIZE_REJECTED
+## AIXBTUSDT LONG — CANCELED
+- Trade ID: `AIXBTUSDT-20261124-091715-6AC8F8`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:17:23.430812+00:00 | Reason: SIZE_REJECTED
