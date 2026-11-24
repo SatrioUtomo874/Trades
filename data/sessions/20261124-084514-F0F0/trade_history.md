@@ -246,3 +246,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:14:50.356175+00:00 | Reason: SIZE_REJECTED
+## DOLOUSDT LONG — CANCELED
+- Trade ID: `DOLOUSDT-20261124-090205-48F90E`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:15:01.937450+00:00 | Reason: BINANCE_USER_WS_CANCELED
