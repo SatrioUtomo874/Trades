@@ -516,3 +516,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:15:41.377911+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## NEARUSDT SHORT — EXPIRED
+- Trade ID: `NEARUSDT-20261125-025209-C89A94`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:15:55.383095+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
