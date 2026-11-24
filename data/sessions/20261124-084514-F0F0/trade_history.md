@@ -582,3 +582,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:45:59.164962+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## BREVUSDT LONG — CANCELED
+- Trade ID: `BREVUSDT-20261124-094615-35DFDC`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:46:35.886344+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
