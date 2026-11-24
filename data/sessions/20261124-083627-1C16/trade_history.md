@@ -12,3 +12,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:37:51.928883+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
+## 1000RATSUSDT LONG — CANCELED
+- Trade ID: `1000RATSUSDT-20261124-083806-E00BE4`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:38:08.928387+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
