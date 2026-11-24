@@ -182,12 +182,17 @@
     "M15:DYMUSDT": 1795485600000,
     "M15:EDENUSDT": 1795485600000,
     "M15:EDGEUSDT": 1795485600000,
-    "M15:EDUUSDT": 1795485600000
+    "M15:EDUUSDT": 1795485600000,
+    "M15:EGLDUSDT": 1795485600000,
+    "M15:EIGENUSDT": 1795485600000,
+    "M15:ELSAUSDT": 1795485600000,
+    "M15:ENAUSDT": 1795485600000,
+    "M15:ENJUSDT": 1795485600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 165,
+  "scan_resume_cursor": 171,
   "scan_resume_boundary_ms": 1795484700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-24T02:07:50.811686+00:00"
+  "updated_at": "2026-11-24T02:08:58.368559+00:00"
 }
