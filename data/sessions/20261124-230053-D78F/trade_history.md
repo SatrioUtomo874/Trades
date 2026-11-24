@@ -840,3 +840,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:00:00.128688+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## TAUSDT LONG — EXPIRED
+- Trade ID: `TAUSDT-20261125-043248-D7B611`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:00:01.200385+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
