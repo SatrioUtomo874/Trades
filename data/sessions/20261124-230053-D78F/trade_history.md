@@ -378,3 +378,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:25:30.965965+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CELOUSDT SHORT — CANCELED
+- Trade ID: `CELOUSDT-20261125-020524-15678E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:25:53.312456+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
