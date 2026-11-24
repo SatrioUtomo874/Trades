@@ -432,3 +432,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:31:00.713512+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## EIGENUSDT SHORT — EXPIRED
+- Trade ID: `EIGENUSDT-20261125-020901-B7D884`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:31:11.512115+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
