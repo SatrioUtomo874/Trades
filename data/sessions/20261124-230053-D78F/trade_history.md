@@ -720,3 +720,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:31:13.380941+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MEMEUSDT SHORT — EXPIRED
+- Trade ID: `MEMEUSDT-20261125-030905-D19FCE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:31:25.712986+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
