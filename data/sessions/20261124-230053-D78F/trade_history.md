@@ -132,3 +132,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:45:39.719128+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AIOUSDT SHORT — CANCELED
+- Trade ID: `AIOUSDT-20261125-014635-5DE0E4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:47:17.871222+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
