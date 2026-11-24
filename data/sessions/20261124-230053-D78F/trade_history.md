@@ -186,3 +186,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:00:00.844069+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## JCTUSDT SHORT — EXPIRED
+- Trade ID: `JCTUSDT-20261125-013311-2CDA26`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:00:01.207916+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
