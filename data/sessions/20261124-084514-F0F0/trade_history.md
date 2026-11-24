@@ -624,3 +624,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:49:57.964694+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## COTIUSDT LONG — CANCELED
+- Trade ID: `COTIUSDT-20261124-095030-E54167`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:50:45.998234+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
