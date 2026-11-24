@@ -138,3 +138,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:59:47.257959+00:00 | Reason: SIZE_REJECTED
+## ACHUSDT LONG — EXPIRED
+- Trade ID: `ACHUSDT-20261124-084736-AFD3B9`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:00:34.807989+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
