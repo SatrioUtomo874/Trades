@@ -54,3 +54,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:40:20.481445+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
+## ARCUSDT SHORT — CANCELED
+- Trade ID: `ARCUSDT-20261124-084047-46980B`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:40:51.146216+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
