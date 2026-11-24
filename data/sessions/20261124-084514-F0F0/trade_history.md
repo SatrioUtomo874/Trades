@@ -84,3 +84,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:55:43.400911+00:00 | Reason: SIZE_REJECTED
+## C98USDT LONG — CANCELED
+- Trade ID: `C98USDT-20261124-085556-3EE9BE`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:56:01.629754+00:00 | Reason: SIZE_REJECTED
