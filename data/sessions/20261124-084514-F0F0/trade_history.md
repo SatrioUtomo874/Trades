@@ -696,3 +696,9 @@
 - Entry: 0.1182 | Exit: 0.1182
 - PnL: 0 USDT (0%) | R: None
 - Closed: 2026-11-24T02:58:25.755144+00:00 | Reason: EXTERNAL_CLOSE_RECONCILED
+## FETUSDT SHORT — CANCELED
+- Trade ID: `FETUSDT-20261124-095824-64B993`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:58:56.929076+00:00 | Reason: SIZE_REJECTED
