@@ -444,3 +444,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:30:42.807302+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## DOSUSDT SHORT — CANCELED
+- Trade ID: `DOSUSDT-20261124-093110-FF8221`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:31:25.274357+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
