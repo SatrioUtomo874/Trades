@@ -630,3 +630,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:20:01.504306+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## TAGUSDT SHORT — EXPIRED
+- Trade ID: `TAGUSDT-20261125-025406-541906`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:20:13.517674+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
