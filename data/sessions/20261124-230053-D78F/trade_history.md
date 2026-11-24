@@ -216,3 +216,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:07:33.341286+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AWEUSDT SHORT — CANCELED
+- Trade ID: `AWEUSDT-20261125-020343-EB67C2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:08:08.398115+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
