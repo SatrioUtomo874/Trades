@@ -978,3 +978,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:17:13.787216+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ORDERUSDT SHORT — EXPIRED
+- Trade ID: `ORDERUSDT-20261125-045302-391B4D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:17:24.899266+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
