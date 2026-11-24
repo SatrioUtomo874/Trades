@@ -408,3 +408,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:27:05.201534+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CCUSDT LONG — CANCELED
+- Trade ID: `CCUSDT-20261124-092712-B13CF9`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:27:37.790442+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
