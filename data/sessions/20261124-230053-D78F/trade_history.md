@@ -996,3 +996,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:17:49.205494+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## STOUSDT SHORT — EXPIRED
+- Trade ID: `STOUSDT-20261125-045631-1713A3`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:18:01.416417+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
