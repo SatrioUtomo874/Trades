@@ -78,3 +78,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:16:09.815056+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## KGENUSDT LONG — EXPIRED
+- Trade ID: `KGENUSDT-20261124-110744-B6E247`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:16:20.029790+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
