@@ -132,3 +132,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:59:13.398785+00:00 | Reason: SIZE_REJECTED
+## CYSUSDT SHORT — CANCELED
+- Trade ID: `CYSUSDT-20261124-085937-A50FDC`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:59:47.257959+00:00 | Reason: SIZE_REJECTED
