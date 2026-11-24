@@ -384,3 +384,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:25:53.312456+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AAVEUSDT SHORT — EXPIRED
+- Trade ID: `AAVEUSDT-20261125-020103-62124D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:30:00.128467+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
