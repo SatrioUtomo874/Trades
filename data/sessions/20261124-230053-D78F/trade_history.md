@@ -54,3 +54,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:34:50.460577+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SLXUSDT SHORT — CANCELED
+- Trade ID: `SLXUSDT-20261125-013548-D84D76`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:36:10.779759+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
