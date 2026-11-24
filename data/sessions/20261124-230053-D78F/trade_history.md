@@ -618,3 +618,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:19:38.685602+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HOLOUSDT SHORT — EXPIRED
+- Trade ID: `HOLOUSDT-20261125-025028-15FE54`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:19:49.642022+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
