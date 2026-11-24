@@ -1176,3 +1176,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:45:57.292358+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## GMTUSDT SHORT — EXPIRED
+- Trade ID: `GMTUSDT-20261125-062331-F2BFC2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:46:26.727852+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
