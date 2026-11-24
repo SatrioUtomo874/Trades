@@ -672,3 +672,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:30:00.134524+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BTRUSDT SHORT — EXPIRED
+- Trade ID: `BTRUSDT-20261125-030232-3C42A2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:30:00.959415+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
