@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""EMA9/21 + M15 Volume Profile POC engine (PAPER-ONLY build).
+"""EMA9/21 + M15 Volume Profile POC engine (PAPER + REAL build).
 
 Analysis reproduces backtest_vp_poc.py (EMA 9/21 variant): completed M15
 EMA9/EMA21 state selects direction; 200-bar/200-level Volume Profile POC is
-the modeled limit entry; M15 Supertrend ATR14 x2.5 is the static SL; TP is fixed
-at 1R. The simulated limit remains valid for the immediately following M15
-candle only. M5 OHLC replay models first-touch/gap fills and prioritizes SL when
-SL and TP are both inside one M5 candle.
+the limit entry; M15 Supertrend ATR14 x2.5 is the static SL; TP is fixed at 1R
+from the actual fill. The limit is valid for the immediately following M15
+candle only. PAPER replays M5 OHLC (first-touch/gap fills, SL-first). REAL sends
+one GTC LIMIT at POC, cancels it at the candle close if unfilled, and places
+SL/TP closePosition algo orders on Binance after the fill.
 
-No live order, signed/private account request, or private user-data stream is
-available in this build. `/precisioncheck` reads public exchange filters only.
+REAL starts OFF each session and requires an explicit /real on.
 """
 
 import asyncio
@@ -140,9 +140,10 @@ if not BINANCE_EGRESS_ID:
         BINANCE_EGRESS_ID = f"proxy:{_binance_proxy_parts.hostname}:{_binance_proxy_parts.port or 0}"
     else:
         BINANCE_EGRESS_ID = "direct"
-# Single source of truth for execution mode. Keep True for this PAPER-ONLY build.
-# All private/order-path guards below read this same variable.
-PAPER_ONLY = False
+BINANCE_TRADING_MODE = "live"
+REAL_EXECUTION_ENABLED = (os.getenv("REAL_EXECUTION_ENABLED", "1") or "1").strip().lower() not in {
+    "0", "false", "off", "no", "disabled"
+}
 GITHUB_API = "https://api.github.com"
 # IP cooldown markers are machine/egress-IP specific. Keep them local by default;
 # enable GitHub sharing only when the process restarts behind the same public IP.
@@ -3119,7 +3120,7 @@ class BinanceREST:
         return result
 
     async def get_symbol_filters(self, symbol: str) -> dict[str, Any]:
-        """Return public symbol filters for the PAPER-ONLY precision audit."""
+        """Return current Binance symbol filters used by sizing and precision checks."""
         symbols = await self.get_exchange_info(force=False)
         meta = symbols.get(normalize_symbol(symbol))
         if meta is None:
@@ -3350,10 +3351,9 @@ class BinanceRealClient:
         _timing: dict[str, float] | None = None,
         _timeout_seconds: float | None = None,
     ) -> Any:
-        if PAPER_ONLY and (signed or path != "/fapi/v1/time"):
+        if not REAL_EXECUTION_ENABLED:
             raise BinanceAPIError(
-                "Build PAPER-ONLY: hanya endpoint waktu publik yang diizinkan melalui jalur ini; "
-                "private API dan order submission dinonaktifkan.",
+                "REAL_EXECUTION_ENABLED=0; private Binance API dinonaktifkan oleh environment.",
                 endpoint=path,
             )
         if signed and not self.configured:
@@ -3594,8 +3594,8 @@ class BinanceRealClient:
 
     async def _user_stream_request(self, method: str, listen_key: str | None = None) -> dict[str, Any]:
         """Create/renew USD-M listenKey; API-key header only, no HMAC signature."""
-        if PAPER_ONLY:
-            raise BinanceAPIError("Build PAPER-ONLY: private Binance user stream dinonaktifkan.", endpoint="/fapi/v1/listenKey")
+        if not REAL_EXECUTION_ENABLED:
+            raise BinanceAPIError("REAL_EXECUTION_ENABLED=0; user stream REAL dinonaktifkan.", endpoint="/fapi/v1/listenKey")
         if not self.configured:
             raise BinanceAPIError("BINANCE_API_KEY / BINANCE_API_SECRET belum tersedia.", endpoint="/fapi/v1/listenKey")
         path = "/fapi/v1/listenKey"
@@ -4623,14 +4623,11 @@ class BinanceUserDataWebSocket:
         return "OFFLINE"
 
     def require_manual_retry(self) -> None:
-        """Hold private listenKey creation/reconnect; private streams are disabled in PAPER-ONLY mode."""
+        """Hold private listenKey creation/reconnect until the user confirms /real on."""
         self._manual_retry_required = True
         self._permission_retry_event.clear()
 
     async def start(self) -> None:
-        if PAPER_ONLY:
-            await self.stop()
-            return
         async with self._start_lock:
             if self._task is not None and not self._task.done():
                 # Private stream startup is unavailable in the PAPER-ONLY build.
@@ -4675,8 +4672,6 @@ class BinanceUserDataWebSocket:
         guaranteed way around an IP ban. If Binance blocks it too, the existing
         private stream is left running and REST reconciliation takes over later.
         """
-        if PAPER_ONLY:
-            raise BinanceAPIError("Build PAPER-ONLY: private WebSocket API dinonaktifkan.", endpoint=f"WS_API/{method}")
         if not self.real.configured:
             raise BinanceAPIError("API key REAL belum tersedia untuk user-stream WS API.")
         request_id = uuid4().hex
@@ -4775,7 +4770,7 @@ class BinanceUserDataWebSocket:
     # reference callbacks/state that this private-stream class does not own.
 
     async def _wait_for_permission_retry(self, exc: BinanceAPIError) -> None:
-        """Hold listenKey retries; private streams are disabled in the PAPER-ONLY build."""
+        """Hold listenKey retries; retry stops until /real on is repeated."""
         generation = int(PROXY_MANAGER.generation)
         self._permission_blocked_generation = generation
         self._manual_retry_required = True
@@ -4783,14 +4778,14 @@ class BinanceUserDataWebSocket:
             self._permission_notice_generations.add(generation)
             log.error(
                 "[USER WS] listenKey ditolak HTTP %s / code %s pada route generation %s; "
-                "retry dihentikan; private stream tidak tersedia dalam build PAPER-ONLY. (%s)",
+                "retry dihentikan sampai IP whitelist diperbaiki dan /real on diulang. (%s)",
                 exc.status_code or 401, exc.code, generation, str(exc)[:220],
             )
         while not self._stop.is_set():
             if self._permission_retry_event.is_set():
                 self._permission_retry_event.clear()
                 self._manual_retry_required = False
-                log.info("[USER WS] private listenKey retry requested; PAPER-ONLY guard remains active")
+                log.info("[USER WS] retry listenKey diminta secara manual melalui /real on")
                 break
             try:
                 await asyncio.wait_for(self._permission_retry_event.wait(), timeout=5.0)
@@ -4799,10 +4794,6 @@ class BinanceUserDataWebSocket:
         self._permission_blocked_generation = None
 
     async def _run(self) -> None:
-        if PAPER_ONLY:
-            self.connected = False
-            self._ws = None
-            return
         backoff = WS_RECONNECT_MIN
         while not self._stop.is_set():
             if self._manual_retry_required:
@@ -5294,7 +5285,7 @@ class TradingEngine:
         self.ws = BinanceWebSocket(self._on_price, self._on_kline)
         self.user_ws = BinanceUserDataWebSocket(self.real, self._on_user_data_event)
 
-        self.real_mode = False  # PAPER-ONLY: no transition to REAL is available.
+        self.real_mode = False  # New REAL entries always require explicit /real on.
         self.margin_usdt = DEFAULT_MARGIN_USDT
         self.leverage = DEFAULT_LEVERAGE
         self.min_margin_enabled = False
@@ -5935,9 +5926,9 @@ class TradingEngine:
                     f"ROUTE      : {info.get('new')}\n"
                     f"IP LAMA    : {info.get('old_ip') or '?'}\n"
                     f"{public_result}\n"
-                    "API KEY    : TIDAK DIGUNAKAN (mode PAPER-ONLY)\n"
-                    "ACTION     : tidak perlu whitelist API untuk simulasi PAPER.\n"
-                    "STATUS     : route hanya digunakan untuk data pasar publik.\n"
+                    "API KEY    : BELUM DITES (tidak ada request private)\n"
+                    "ACTION     : masukkan IP BARU ke Binance API Management. Setelah selesai, kirim /real on.\n"
+                    "STATUS     : route ditahan; REST REAL menunggu whitelist dan /real on.\n"
                     f"SCANNER    : OFF — kirim /scan on setelah whitelist/route siap"
                     f"{risk}"
                 )
@@ -6145,7 +6136,7 @@ class TradingEngine:
                             "⛔ BINANCE / PUBLIC TEST RATE-LIMITED\n"
                             f"IP : {current_ip or exit_ip}\nROUTE : {current_route}\n"
                             f"DETAIL : {detail}\n"
-                            "Mode PAPER-ONLY: tidak ada tes API key/private. Tunggu cooldown selesai; permintaan data publik akan dicoba kembali sesuai jadwal."
+                            "Belum ada tes API key/private. Tunggu cooldown Binance selesai, lalu kirim /real on untuk mengulang tes publik."
                         )
                         return False
 
@@ -6182,8 +6173,8 @@ class TradingEngine:
                     f"PUBLIC REST  : OK · {PROXY_HEALTH_SAMPLES} tes /fapi/v1/time\n"
                     f"MAX LATENSI  : {latency:.0f} ms (batas {PROXY_HEALTH_MAX_LATENCY_MS:.0f} ms)\n"
                     "API KEY/IP   : BELUM DITES — tidak ada request private.\n"
-                    "STATUS       : ROUTE SIAP untuk data pasar publik dalam mode PAPER-ONLY.\n"
-                    "Tidak ada pemeriksaan akun, user stream privat, atau aktivasi order."
+                    "STATUS       : ROUTE SIAP. Silakan whitelist IP di Binance API Management.\n"
+                    "Setelah whitelist tersimpan, kirim /real on untuk pemeriksaan akun dan aktivasi."
                 )
                 return True
             except Exception as exc:
@@ -6427,15 +6418,6 @@ class TradingEngine:
                     if status in {"PENDING", "FILLED"}:
                         self.legacy_active_snapshot_count += 1
                     continue
-                if bool(row.get("real_intent") or row.get("real_enabled") or row.get("exchange_adopted")):
-                    if status in {"PENDING", "FILLED"}:
-                        self.legacy_active_snapshot_count += 1
-                    log.critical(
-                        "[STATE] Active REAL/exchange trade in local snapshot deferred to live Binance account adoption: %s %s. "
-                        "This process will not manage or close it.",
-                        row.get("pair"), row.get("direction"),
-                    )
-                    continue
                 try:
                     trade = Trade.from_record(row)
                     if trade.direction not in {"LONG", "SHORT"} or trade.timeframe not in volumatic.TIMEFRAME_MS:
@@ -6483,7 +6465,7 @@ class TradingEngine:
 
     # ----------------------------- Startup -------------------------------
     async def start(self) -> None:
-        """Start a clean PAPER-ONLY engine session. No private account state is loaded.
+        """Start a clean engine session. No private account state is loaded until /real on.
 
         Scanner and public market data remain OFF until explicitly activated.
         No Binance order, account endpoint, or private user stream is available.
@@ -6504,7 +6486,7 @@ class TradingEngine:
         )
         PROXY_MANAGER.bind(asyncio.get_running_loop(), self._on_egress_changed)
         PROXY_MANAGER.refresh_exit_ip_async("startup")
-        self.real_mode = False  # PAPER-ONLY: REAL cannot be enabled in this build.
+        self.real_mode = False
         self.scan_enabled = False
         self._scan_trigger_now = False
         self.scan_schedule_slots = ()
@@ -6610,22 +6592,24 @@ class TradingEngine:
         )
         await self.reply(
             "🟢 EMA9/21 + VP POC / SESSION READY\n\n"
-            "Runtime state : CLEAN (sesi PAPER baru)\n"
+            "Runtime state : CLEAN (trade/sesi lama tidak dimuat)\n"
             f"Permanent bans: {len(self.banned_symbols)} simbol dimuat\n"
             "Signal TF     : M15\n"
             "Direction     : EMA9 > EMA21 = LONG; EMA9 <= EMA21 = SHORT\n"
             f"Volume Profile: {volumatic.POC_LOOKBACK} candle / {volumatic.POC_BARS} level / {volumatic.POC_VOLUME_TYPE}\n"
-            "Entry         : LIMIT POC, valid 1 candle M15; fill direplay dari M5\n"
-            "Protection    : static Supertrend M15 ATR14 x2.5; TP RR 1:1\n"
-            "Exit          : M5 SL/TP only; SL priority if both hit; no trailing/forced exit\n"
-            f"Max positions : {self.max_active_trades} (PAPER)\n"
+            "Entry         : LIMIT POC, valid 1 candle M15 (PAPER: replay M5; REAL: GTC LIMIT Binance)\n"
+            "Protection    : static Supertrend M15 ATR14 x2.5; TP RR 1:1 dari fill aktual\n"
+            "Exit          : SL/TP saja (PAPER via M5, REAL via Binance algo); no trailing/forced exit\n"
+            f"Max positions : {self.max_active_trades}\n"
             "Scanner       : OFF — menunggu /scan on atau /scan schedule\n"
-            "Execution     : PAPER-ONLY — eksekusi order/private Binance dinonaktifkan permanen di build ini\n"
+            "REAL          : OFF — menunggu /real on\n"
             "Market WS     : OFF — aktif saat scanner dimulai\n"
-            "Private WS    : OFF — dinonaktifkan pada build PAPER-ONLY\n"
-            "Data I/O      : Binance public market data only; private API/order endpoint disabled."
+            "Private WS    : OFF — aktif setelah /real on\n"
+            "Startup I/O   : hanya tes IP keluar + Binance public API; tidak memanggil endpoint private.\n\n"
+            "PERHATIAN: posisi/order LIVE yang masih ada di Binance tidak diadopsi sesi baru. "
+            "Periksa akun Binance sebelum /real on."
         )
-        # PAPER-ONLY: no private account preflight or order execution is available.
+        self._schedule_real_egress_preflight("startup")
 
     async def stop(self) -> None:
         """Immediately stop this in-memory engine session without touching exchange or saved data.
@@ -6803,7 +6787,7 @@ class TradingEngine:
         unknown = int(stats.get("unknown", 0))
         lines = [
             "╔══ EMA9/21 VP POC SCAN BATCH ══╗",
-            "ENGINE    : PAPER-ONLY · M15 EMA9/EMA21 + VP POC 200x200",
+            "ENGINE    : M15 EMA9/EMA21 + VP POC 200x200 · PAPER/REAL",
             "PROTECTION: static M15 Supertrend ATR14 x2.5 · no trailing",
             "TP / EXIT : fixed RR 1:1 · M5 SL/TP only · no forced close",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
@@ -7573,10 +7557,19 @@ class TradingEngine:
 
             raw_poc = finite_decimal(signal.get("poc_price") or signal.get("limit_price"), "POC")
             raw_stop = finite_decimal(signal.get("stop_loss") or signal.get("reference_sl"), "Supertrend SL")
-            # PAPER simulation keeps raw POC/Supertrend prices exactly as the
-            # backtest does; exchange tick-size rounding is deliberately omitted.
-            entry = raw_poc
-            stop = raw_stop
+            if self.real_mode:
+                if not REAL_EXECUTION_ENABLED:
+                    raise RuntimeError("REAL_EXECUTION_ENABLED=0; eksekusi LIVE dikunci oleh environment.")
+                if not self.real.configured:
+                    raise RuntimeError("BINANCE_API_KEY / BINANCE_API_SECRET belum lengkap.")
+                # REAL LIMIT/SL must sit on the PRICE_FILTER grid: LONG rounds down, SHORT up.
+                round_px = quantized_price if direction == "LONG" else quantized_price_ceiling
+                entry = round_px(raw_poc, meta.tick_size)
+                stop = round_px(raw_stop, meta.tick_size)
+            else:
+                # PAPER keeps raw POC/Supertrend prices exactly as the backtest does.
+                entry = raw_poc
+                stop = raw_stop
             risk = (entry - stop) if direction == "LONG" else (stop - entry)
             if risk <= 0:
                 await self._record_event(
@@ -7587,7 +7580,9 @@ class TradingEngine:
                 return "INVALID_SL"
 
             raw_target = entry + risk if direction == "LONG" else entry - risk
-            target = raw_target  # provisional; recomputed from the actual PAPER M5 fill at exact RR 1R
+            target = raw_target  # provisional; recomputed from the actual fill at exact RR 1R
+            if self.real_mode:
+                target = (quantized_price_ceiling if direction == "LONG" else quantized_price)(raw_target, meta.tick_size)
             if target <= 0 or (direction == "LONG" and target <= entry) or (direction == "SHORT" and target >= entry):
                 return "INVALID_TP"
 
@@ -7645,7 +7640,7 @@ class TradingEngine:
             try:
                 await self._record_event(
                     "M15_POC_LIMIT_SETUP_CREATED", trade,
-                    order_type="PAPER_M5_TOUCH",
+                    order_type="REAL_GTC_LIMIT_POC" if trade.real_intent else "PAPER_M5_TOUCH",
                     signal_mode="VP_POC_M15_LIMIT", ema9=decimal_to_str(ema_fast),
                     ema21=decimal_to_str(ema_slow), poc=decimal_to_str(entry),
                     stop_loss=decimal_to_str(stop), take_profit=decimal_to_str(target),
@@ -7661,17 +7656,25 @@ class TradingEngine:
                     f"{'🟢' if direction == 'LONG' else '🔴'} EMA9/21 {direction} • {pair}\n\n"
                     f"Signal TF: M15 • EMA9: {fmt_price(ema_fast)} • EMA21: {fmt_price(ema_slow)}\n"
                     f"Volume Profile POC ({volumatic.POC_LOOKBACK} candles / {volumatic.POC_BARS} levels): {fmt_price(entry)}\n"
-                    f"Entry: LIMIT di POC (menunggu touch M5)\n"
+                    f"Entry: LIMIT di POC ({'GTC Binance, cancel di akhir candle' if trade.real_intent else 'menunggu touch M5'})\n"
                     f"Supertrend M15 SL: {fmt_price(stop)} • ATR14 / Factor 2.5 (statis)\n"
                     f"TP: {fmt_price(target)} • RR 1:1\n"
                     f"Order berlaku sampai: {format_wib(expiry_dt)}\n"
                     f"Margin target: {trade.margin_usdt} USDT • Leverage: {trade.leverage}x\n"
-                    + ("Mode: REAL INTENT — POC LIMIT akan dikirim setelah preflight" if trade.real_intent
+                    + ("Mode: REAL — POC LIMIT dikirim ke Binance setelah preflight" if trade.real_intent
                        else "Mode: PAPER — simulasi M5 OHLC; tidak mengirim order Binance")
                 )
             except Exception:
                 self.active_trades.pop(trade.trade_id, None)
                 raise
+
+            if trade.real_intent:
+                # REAL: Binance matches the GTC LIMIT; no local M5 replay. Preflight
+                # (positions/balance/leverage) runs inside the single-flight task and an
+                # unsent setup simply expires with the M15 window.
+                await self._sync_ws_symbols()
+                self._schedule_market_entry(trade, trade.entry, "M15_POC_LIMIT")
+                return "ORDER_CREATED"
 
             # Replay closed M5 bars from the start of this one-candle entry
             # window. Scanner batches can take time, so the first POC touch may
@@ -7857,19 +7860,20 @@ class TradingEngine:
                 result="CANCELED", notify=False,
             )
         direction = trade.direction
-        if PAPER_ONLY or not self.real_mode:
-            raise MarketEntryRejected("PAPER_ONLY", "Build ini PAPER-ONLY; simulasi tidak mengirim entry ke Binance.")
+        if not self.real_mode:
+            raise MarketEntryRejected("REAL_OFF_BEFORE_ENTRY", "REAL sedang OFF; entry baru tidak dikirim ke Binance.")
         if self._real_ip_permission_blocked_for_current_route():
             raise MarketEntryRejected(
                 "BINANCE_IP_PERMISSION_BLOCKED",
-                "Fitur private account/order dinonaktifkan pada build PAPER-ONLY.",
+                "Entry REAL ditahan: egress IP rute ini sebelumnya ditolak Binance (-2015). "
+                "Whitelist IP lalu jalankan /real on untuk tes ulang.",
                 notify=False,
             )
         if self._autostop_triggered:
             raise MarketEntryRejected("AUTOSTOP_BEFORE_ENTRY", "AUTOSTOP aktif; entry baru diblokir.")
         if now_utc() >= trade.expires_at:
             raise MarketEntryRejected("ENTRY_NEXT_M15_OPEN_WINDOW_EXPIRED", "Window entry pada candle M15 berikutnya sudah berakhir.", result="EXPIRED", notify=False)
-        if PAPER_ONLY or not self.real.configured:
+        if not REAL_EXECUTION_ENABLED or not self.real.configured:
             raise MarketEntryRejected("REAL_UNAVAILABLE", "API Binance tidak tersedia/tidak dikonfigurasi.")
         if any(
             other is not trade and other.pair == trade.pair and other.status in {"PENDING", "FILLED"}
@@ -11531,15 +11535,113 @@ class TradingEngine:
                 "(informational only; tickSize remains the increment filter)."
             )
 
-        lines.append("PAPER-ONLY: audit publik ini tidak membuat, mengubah, atau membatalkan order.")
+        lines.append("Audit publik ini tidak membuat, mengubah, atau membatalkan order.")
         await self.reply("\n".join(lines))
 
     async def _set_real(self, command: str) -> None:
-        """REAL is intentionally unavailable in this PAPER-ONLY build."""
-        await self.reply(
-            "⛔ Build ini PAPER-ONLY permanen. /real on tidak tersedia; "
-            "tidak ada signed/private API atau order yang dapat dikirim."
-        )
+        arg = command.split(maxsplit=1)[1].strip().lower() if len(command.split(maxsplit=1)) > 1 else ""
+        if arg == "on":
+            if not REAL_EXECUTION_ENABLED:
+                await self.reply("❌ REAL dikunci oleh REAL_EXECUTION_ENABLED=0.")
+                return
+            if not self.real.configured:
+                await self.reply("❌ BINANCE_API_KEY / BINANCE_API_SECRET belum lengkap.")
+                return
+            # The route is tested with public Binance endpoints before the user
+            # whitelists it. Never send a signed/private request during startup or
+            # immediately after an egress change. If this command has to initiate
+            # the public test, return so the user can whitelist the reported IP.
+            egress_identity, egress_ip, egress_route = self._real_permission_route_identity()
+            egress_status = self._real_egress_preflight_status.get(egress_identity)
+            if egress_status != "PUBLIC_READY" or not egress_ip:
+                if egress_status != "PUBLIC_TESTING":
+                    await self._run_real_egress_preflight(
+                        "manual /real on", force=True, notify_user=False
+                    )
+                    egress_identity, egress_ip, egress_route = self._real_permission_route_identity()
+                    egress_status = self._real_egress_preflight_status.get(egress_identity)
+                if egress_status == "PUBLIC_READY" and egress_ip:
+                    await self.reply(
+                        "✅ TES PUBLIC BERHASIL. REAL BELUM DIAKTIFKAN.\n"
+                        f"WHITELIST IP : {egress_ip}\n"
+                        f"ROUTE : {egress_route}\n"
+                        "Tes ini hanya memakai Binance public API; belum menguji API key.\n"
+                        "Masukkan IP di atas ke Binance API Management, lalu kirim /real on sekali lagi."
+                    )
+                    return
+                if egress_status == "RATE_LIMITED":
+                    next_step = "Binance public API sedang rate-limit; tunggu cooldown selesai sebelum menguji ulang."
+                elif egress_status in {"PUBLIC_REJECTED", "PUBLIC_ERROR", "IP_UNKNOWN"}:
+                    next_step = "Route belum lolos tes publik atau IP keluar belum terdeteksi. Tunggu pergantian route atau jalankan /IP untuk melihat IP."
+                else:
+                    next_step = "Tes public route belum selesai. Tunggu hasil tes sebelum mengaktifkan REAL."
+                await self.reply(
+                    "⛔ REAL BELUM DIAKTIFKAN.\n"
+                    f"ROUTE : {egress_route}\n"
+                    f"PUBLIC TEST : {egress_status or 'BELUM DIUJI'}\n"
+                    f"{next_step}"
+                )
+                return
+            # Restore only the REAL equity ledger, never scanner/trade state. The
+            # first /real on takes one wallet-balance baseline; later process starts
+            # retain that baseline and the locally accumulated realized PnL.
+            await self._load_real_guard_checkpoint()
+            # Synchronize against Binance immediately before the first signed
+            # account calls. REST timestamp generation also refreshes
+            # this offset periodically and retries one -1021 after resync.
+            await self.real.sync_server_time(force=True, samples=3)
+            account_snapshot = await self.real.get_account_info()
+            all_open_orders = await self.real.get_open_orders(None)
+            await self.real.get_account_config()
+            balance_baseline_created = False
+            if self._real_equity_baseline is None:
+                balance_rows = await self.real.get_futures_balance()
+                usdt_row = next((x for x in balance_rows if str(x.get("asset") or "").upper() == "USDT"), None)
+                try:
+                    wallet = Decimal(str((usdt_row or {}).get("balance") or "0"))
+                except (InvalidOperation, TypeError, ValueError):
+                    wallet = Decimal("0")
+                if not wallet.is_finite() or wallet <= 0:
+                    raise RuntimeError("Baseline USDT Futures balance tidak valid; REAL tidak diaktifkan.")
+                self._real_equity_baseline = wallet
+                self._realized_since_baseline = Decimal("0")
+                self._equity_peak = wallet
+                self._equity_last = wallet
+                self._autostop_source = "REAL"
+                self._autostop_data_hold = False
+                balance_baseline_created = True
+            adopted_positions, adopted_orders = await self._adopt_exchange_snapshot(
+                account_snapshot, all_open_orders, source="REAL_ON_ACCOUNT_SNAPSHOT"
+            )
+            # Even with the entry scanner OFF, adopted live exposure/orders still
+            # need market prices for floating-PnL guard and position monitoring.
+            if adopted_positions or adopted_orders:
+                await self.ws.start()
+                await self._sync_ws_symbols()
+            # Private stream becomes the live source of incremental order/position
+            # updates. No REST request is made by /trade after this point.
+            await self.user_ws.start()
+            self._last_user_ws_reconnect_count = self.user_ws.reconnect_count
+            self.real_mode = True
+            self._real_route_waiting_user = False
+            self._clear_real_ip_permission_block_for_current_route()
+            if self.autostop_percent is not None:
+                await self._autostop_check(force=True)
+            await self._save_runtime_settings()
+            await self._save_real_guard_checkpoint()
+            await self.reply(
+                "🟢 REAL ON. Entry baru: satu MARKET order dikirim pada window open candle M15 berikutnya; tidak ada LIMIT touch-entry. Harga fill REAL mengikuti eksekusi Binance dan dapat berbeda dari open backtest.\n"
+                f"Live snapshot : {adopted_positions} posisi · {adopted_orders} open order dimuat dari Binance.\n"
+                f"Equity baseline: {'baru diambil dari Binance' if balance_baseline_created else 'checkpoint lokal dipertahankan'}; selanjutnya dihitung lokal dari PnL + floating.\n"
+                f"Private User Data WS: {self.user_ws.status}. ORDER_TRADE_UPDATE + ACCOUNT_UPDATE menjaga /trade realtime; /trade tidak memanggil REST.\n"
+                "Posisi/order yang sudah ada tetap dikelola walaupun /real off."
+            )
+        elif arg == "off":
+            self.real_mode = False
+            await self.reply("🟡 REAL OFF untuk entry baru. Pending entry-window yang belum dikirim tidak dieksekusi; posisi REAL yang sudah ada tetap direkonsiliasi dan dikelola sampai selesai.")
+        else:
+            await self.reply(f"REAL: {'ON' if self.real_mode else 'OFF'}\nGunakan /real on atau /real off.")
+
 
     async def _handle_length(self, text: str) -> None:
         await self.reply(
@@ -12076,8 +12178,44 @@ class TradingEngine:
         )
 
     async def _refresh_exchange_open_orders_for_trade_view(self) -> str | None:
-        """Return no REST snapshot here; /trade uses the existing WS/account cache."""
-        return None
+        """Refresh live Binance open orders only when the user explicitly asks /trade.
+
+        The User Data WS remains the realtime path. This one-shot REST snapshot is
+        a recovery path for missed ORDER_TRADE_UPDATE events or WS reconnect gaps.
+        It deliberately skips requests during the global Binance cooldown.
+        """
+        if not getattr(self.real, "configured", False):
+            return "Binance snapshot: API belum dikonfigurasi; menampilkan cache lokal."
+        cooldown = self._binance_cooldown_remaining()
+        if cooldown > 0:
+            return f"Binance snapshot: REST cooldown {cooldown:.0f}s; menampilkan cache WebSocket/lokal."
+        try:
+            rows = await self.real.get_open_orders(None)
+        except BinanceRateLimitError as exc:
+            await self._notify_binance_cooldown(exc, source="TRADE VIEW OPEN-ORDER SYNC")
+            return f"Binance snapshot gagal karena rate limit; cache WebSocket/lokal dipakai. {str(exc)[:180]}"
+        except Exception as exc:
+            log.warning("[TRADE VIEW] openOrders snapshot gagal; fallback ke cache | %s", exc)
+            return f"Binance snapshot gagal; cache WebSocket/lokal dipakai. {str(exc)[:180]}"
+
+        live_rows = [
+            row for row in rows
+            if str(row.get("status") or row.get("X") or "NEW").upper()
+            in {"NEW", "PARTIALLY_FILLED"}
+        ]
+        # openOrders is an account-wide snapshot. Replace only the open-order
+        # projection, then reconcile/adopt each current exchange order. Existing
+        # local pending trades are retained if an order is temporarily absent.
+        self.exchange_open_orders.clear()
+        for row in live_rows:
+            await self._upsert_exchange_order_snapshot(row, source="TRADE_COMMAND_SYNC")
+        self.exchange_snapshot_at = now_utc()
+        await self._sync_ws_symbols()
+        log.info(
+            "[TRADE VIEW] Binance openOrders snapshot refreshed | active_orders=%s | adopted_cache=%s",
+            len(live_rows), len(self.exchange_open_orders),
+        )
+        return f"Binance snapshot: {len(live_rows)} open order aktif berhasil disinkronkan."
 
     def _trade_h1_ema_status_line(self, trade: Trade) -> str:
         """Legacy state formatter; no forced-exit path is active in the PAPER POC baseline."""
@@ -12693,7 +12831,7 @@ class TradingEngine:
         )
         lines = [
             "╔════ EMA9/21 VP POC / TELEMETRY ════╗",
-            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  M15   EMA  9/21   MODE  PAPER-ONLY",
+            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  M15   EMA  9/21   MODE  {'REAL' if self.real_mode else 'PAPER'}",
             "────────────────────────────────",
             "[ PERFORMANCE ]",
             f"CLOSED       {len(closed):>5}     W/L/BE   {len(wins)}/{len(losses)}/{be}",
@@ -12754,7 +12892,7 @@ class TradingEngine:
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | Fresh prices: {fresh}\n"
             f"PAPER pending: {pending} | PAPER positions: {filled}/{self.max_active_trades}\n"
             f"Binance public REST cooldown: {self._binance_cooldown_remaining():.0f}s\n"
-            f"Execution: PAPER-ONLY (private API disabled)\n"
+            f"Execution: {'REAL ON' if self.real_mode else 'PAPER (REAL OFF)'} | Private WS: {self.user_ws.status}\n"
             f"History: {len(self.history_records)} | Events: {len(self.history_events)} | Session: {self.session_id}"
         )
 
@@ -12850,16 +12988,19 @@ class TradingEngine:
             "/ATR - cek Supertrend ATR14 yang terkunci\n"
             "/Factor - cek Supertrend factor 2.5 yang terkunci\n"
             "/RR_MIN atau /RR_MAX - cek TP fixed 1R\n"
-            "/max [angka] - batas posisi simulasi PAPER\n"
-            "/trade - lihat setup/posisi PAPER\n"
-            "/stats - statistik PAPER (PnL, win rate, drawdown, R)\n"
-            "/setup - simpan snapshot PAPER\n"
-            "/open - pulihkan snapshot PAPER versi 4.0.0\n"
-            "/del PAIR|all - batalkan pending PAPER\n"
-            "/close PAIR|all - tutup simulasi PAPER\n"
+            "/max [angka] - batas posisi aktif (PAPER/REAL)\n"
+            "/trade - lihat setup/posisi, proteksi SL/TP\n"
+            "/stats - statistik (PnL, win rate, drawdown, R)\n"
+            "/setup - simpan snapshot trade aktif\n"
+            "/open - pulihkan snapshot versi 4.0.0\n"
+            "/del PAIR|all - batalkan pending order\n"
+            "/close PAIR|all - tutup posisi atau batalkan pending\n"
+            "/real on|off - aktif/nonaktifkan entry baru REAL (POC LIMIT)\n"
+            "/autostop [persen|off|reset] - hentikan scanner saat equity turun dari peak\n"
+            "/IP - lihat IP keluar untuk whitelist Binance\n"
             "/banned [PAIR ...] / /unbanned PAIR ... - daftar pair yang dilewati\n"
-            "/margin [USDT] / /leverage [angka] - sizing simulasi saja\n"
-            "/balance - estimasi saldo PAPER\n"
+            "/margin [USDT] / /leverage [angka] - sizing entry baru\n"
+            "/balance - saldo Futures (REAL) atau estimasi PAPER\n"
             "/precisioncheck SYMBOL [QTY] [PRICE] - audit filter presisi publik tanpa order\n"
             "/status - status sistem\n"
             "/help - bantuan\n\n"
@@ -12868,8 +13009,9 @@ class TradingEngine:
             "hanya untuk candle M15 berikutnya. LONG hanya jika POC < close; SHORT hanya jika POC > close. "
             "SL statis pada Supertrend M15 ATR14 x2.5 dan harus protektif terhadap POC. TP fixed 1R dihitung "
             "ulang dari fill M5 aktual. Fill memakai sentuhan pertama M5; gap mengisi di open jika lebih baik. "
-            "Jika SL dan TP tersentuh pada M5 yang sama, SL diprioritaskan. Tidak ada H4/H1/BTC filter, "
-            "liquidity TP, trailing SL, trend-flip exit, atau forced close. Semua hasil PAPER; tidak ada order Binance."
+            "Jika SL dan TP tersentuh pada M5 yang sama, SL diprioritaskan (PAPER). Tidak ada H4/H1/BTC filter, "
+            "liquidity TP, trailing SL, trend-flip exit, atau forced close. REAL: LIMIT GTC di Binance, "
+            "dibatalkan di akhir candle jika belum terisi; SL/TP closePosition dipasang setelah fill."
         )
 
     async def _dispatch_command(self, text: str) -> None:
