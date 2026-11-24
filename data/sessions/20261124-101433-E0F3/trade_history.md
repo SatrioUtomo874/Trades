@@ -54,3 +54,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:15:04.632633+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## BABYUSDT LONG — EXPIRED
+- Trade ID: `BABYUSDT-20261124-110204-EEBF70`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:15:15.563838+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
