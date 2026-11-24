@@ -342,3 +342,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:20:42.038887+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## STRKUSDT SHORT — CANCELED
+- Trade ID: `STRKUSDT-20261125-022053-058A4D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:21:50.382373+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
