@@ -318,3 +318,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:18:30.024521+00:00 | Reason: SIGNAL_TRACE_PRICE_GAP_MISSED
+## GMTUSDT SHORT — CANCELED
+- Trade ID: `GMTUSDT-20261125-021007-2B3A09`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:19:40.893337+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
