@@ -696,3 +696,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:30:25.922522+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## EULUSDT SHORT — EXPIRED
+- Trade ID: `EULUSDT-20261125-030500-CD51D6`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:30:37.453022+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
