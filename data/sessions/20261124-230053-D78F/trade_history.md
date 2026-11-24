@@ -1008,3 +1008,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:28:34.781771+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MANTAUSDT SHORT — CANCELED
+- Trade ID: `MANTAUSDT-20261125-053113-FA02EA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:32:40.157994+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
