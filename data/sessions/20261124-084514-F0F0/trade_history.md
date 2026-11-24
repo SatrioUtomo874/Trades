@@ -750,3 +750,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T03:01:36.231539+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
+## HUSDT SHORT — CANCELED
+- Trade ID: `HUSDT-20261124-100404-15801F`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T03:04:14.387558+00:00 | Reason: SIZE_REJECTED
