@@ -264,3 +264,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:15:47.635618+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## AIOUSDT SHORT — CANCELED
+- Trade ID: `AIOUSDT-20261124-091650-FAC4A7`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:16:56.715639+00:00 | Reason: SIZE_REJECTED
