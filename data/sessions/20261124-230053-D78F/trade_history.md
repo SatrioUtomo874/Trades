@@ -354,3 +354,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:22:21.798854+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## GASUSDT SHORT — CANCELED
+- Trade ID: `GASUSDT-20261125-020940-F66C2A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:22:59.190160+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
