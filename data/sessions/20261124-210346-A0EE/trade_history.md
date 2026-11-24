@@ -24,3 +24,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T15:30:00.466183+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## XNYUSDT SHORT — EXPIRED
+- Trade ID: `XNYUSDT-20261124-220219-58DB40`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T15:30:01.435410+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
