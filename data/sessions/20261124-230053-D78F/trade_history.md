@@ -450,3 +450,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:31:34.203561+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HANAUSDT SHORT — EXPIRED
+- Trade ID: `HANAUSDT-20261125-021053-35B62D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:31:46.732905+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
