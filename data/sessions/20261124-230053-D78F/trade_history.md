@@ -726,3 +726,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:31:25.712986+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## LABUSDT SHORT — EXPIRED
+- Trade ID: `LABUSDT-20261125-030805-E3E1A1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:31:37.350240+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
