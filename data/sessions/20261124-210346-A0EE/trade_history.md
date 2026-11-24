@@ -18,3 +18,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T15:30:00.042773+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SYNUSDT SHORT — EXPIRED
+- Trade ID: `SYNUSDT-20261124-220107-1CD20E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T15:30:00.466183+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
