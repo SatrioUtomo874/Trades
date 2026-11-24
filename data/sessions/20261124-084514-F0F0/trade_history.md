@@ -450,3 +450,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:31:25.274357+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## EDENUSDT SHORT — CANCELED
+- Trade ID: `EDENUSDT-20261124-093152-D9F9F0`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:32:07.924205+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
