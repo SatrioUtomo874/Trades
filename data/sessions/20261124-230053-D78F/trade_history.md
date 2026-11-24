@@ -66,3 +66,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:36:42.255626+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## STARUSDT SHORT — CANCELED
+- Trade ID: `STARUSDT-20261125-013608-A21D29`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:37:02.872667+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
