@@ -900,3 +900,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:15:00.122644+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## 1000CATUSDT SHORT — EXPIRED
+- Trade ID: `1000CATUSDT-20261125-044512-E74857`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:15:00.936099+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
