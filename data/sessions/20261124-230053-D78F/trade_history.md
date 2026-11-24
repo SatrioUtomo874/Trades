@@ -48,3 +48,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:34:17.899279+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## KATUSDT SHORT — CANCELED
+- Trade ID: `KATUSDT-20261125-013406-02C357`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:34:50.460577+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
