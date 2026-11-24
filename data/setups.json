@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T04:03:55.682331+00:00",
+  "updated_at": "2026-11-24T04:04:03.713406+00:00",
   "active_trades": [
     {
       "trade_id": "1000LUNCUSDT-20261124-110015-D61434",
@@ -461,7 +461,7 @@
       "tp_client_algo_id": "VTTPSDT-20261124-110330-FC8390",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
