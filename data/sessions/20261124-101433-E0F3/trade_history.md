@@ -114,3 +114,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:20:28.119799+00:00 | Reason: SIZE_REJECTED
+## CYSUSDT LONG — CANCELED
+- Trade ID: `CYSUSDT-20261124-112045-25033B`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:20:56.289659+00:00 | Reason: SIZE_REJECTED
