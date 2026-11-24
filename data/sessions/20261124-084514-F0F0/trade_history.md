@@ -396,3 +396,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:25:49.610230+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## BTWUSDT LONG — CANCELED
+- Trade ID: `BTWUSDT-20261124-092617-EC0894`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:26:32.220622+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
