@@ -258,3 +258,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:15:10.653320+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
+## EDUUSDT LONG — CANCELED
+- Trade ID: `EDUUSDT-20261124-090653-B90B42`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:15:47.635618+00:00 | Reason: BINANCE_USER_WS_CANCELED
