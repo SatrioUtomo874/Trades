@@ -678,3 +678,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:30:00.959415+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## DATAIPUSDT SHORT — EXPIRED
+- Trade ID: `DATAIPUSDT-20261125-030325-4568D6`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:30:01.232548+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
