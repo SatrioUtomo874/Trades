@@ -78,3 +78,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:55:14.336627+00:00 | Reason: SIZE_REJECTED
+## BSVUSDT LONG — CANCELED
+- Trade ID: `BSVUSDT-20261124-085532-7217A3`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:55:43.400911+00:00 | Reason: SIZE_REJECTED
