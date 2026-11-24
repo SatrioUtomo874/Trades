@@ -96,3 +96,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:56:35.804374+00:00 | Reason: SIZE_REJECTED
+## CFXUSDT LONG — CANCELED
+- Trade ID: `CFXUSDT-20261124-085646-E4177C`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:56:58.223769+00:00 | Reason: SIZE_REJECTED
