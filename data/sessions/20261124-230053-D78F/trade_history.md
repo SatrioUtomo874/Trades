@@ -864,3 +864,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:01:50.010311+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## RVNUSDT SHORT — CANCELED
+- Trade ID: `RVNUSDT-20261125-045455-FEC904`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:02:24.948517+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
