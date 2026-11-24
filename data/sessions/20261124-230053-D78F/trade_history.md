@@ -654,3 +654,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:20:48.352845+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ZECUSDT SHORT — CANCELED
+- Trade ID: `ZECUSDT-20261125-031650-008C07`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:22:11.662069+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
