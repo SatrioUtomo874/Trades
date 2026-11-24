@@ -702,3 +702,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:30:37.453022+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## TUSDT SHORT — EXPIRED
+- Trade ID: `TUSDT-20261125-031403-B6BE3D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:30:50.280375+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
