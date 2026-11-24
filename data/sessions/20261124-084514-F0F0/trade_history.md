@@ -348,3 +348,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:22:34.171124+00:00 | Reason: SIZE_REJECTED
+## BIOUSDT LONG — CANCELED
+- Trade ID: `BIOUSDT-20261124-092253-3998C5`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:22:59.985956+00:00 | Reason: SIZE_REJECTED
