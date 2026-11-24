@@ -1170,3 +1170,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:45:44.715033+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BANKUSDT SHORT — EXPIRED
+- Trade ID: `BANKUSDT-20261125-061807-BD99D5`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:45:57.292358+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
