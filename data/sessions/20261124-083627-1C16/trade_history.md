@@ -42,3 +42,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:39:40.750601+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
+## ALCHUSDT LONG — CANCELED
+- Trade ID: `ALCHUSDT-20261124-083957-4FE42D`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:40:00.153211+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
