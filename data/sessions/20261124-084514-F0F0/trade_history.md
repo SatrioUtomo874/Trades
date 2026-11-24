@@ -828,3 +828,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T03:11:01.635792+00:00 | Reason: BINANCE_CANCELED
+## GRIFFAINUSDT SHORT — CANCELED
+- Trade ID: `GRIFFAINUSDT-20261124-100216-E9BED2`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T03:11:27.933471+00:00 | Reason: MANUAL_CANCEL; BINANCE_CANCELED
