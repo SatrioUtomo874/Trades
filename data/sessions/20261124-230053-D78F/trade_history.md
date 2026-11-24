@@ -468,3 +468,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:45:00.995023+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ZKUSDT SHORT — EXPIRED
+- Trade ID: `ZKUSDT-20261125-022443-AE2365`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:45:01.073960+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
