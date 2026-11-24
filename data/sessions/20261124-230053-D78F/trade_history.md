@@ -792,3 +792,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:45:15.933755+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MUBARAKUSDT SHORT — CANCELED
+- Trade ID: `MUBARAKUSDT-20261125-033745-B0A01F`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:51:27.279873+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
