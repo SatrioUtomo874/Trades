@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T15:00:02.036253+00:00",
+  "updated_at": "2026-11-24T15:00:04.225211+00:00",
   "active_trades": [
     {
       "trade_id": "SOPHUSDT-20261124-211700-5B9887",
@@ -431,7 +431,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795531500000,
+      "trailing_last_close_ms": 1795532400000,
       "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; fixed 2R TP; M15 close trailing SL",
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     }
