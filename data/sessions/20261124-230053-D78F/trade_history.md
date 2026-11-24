@@ -1116,3 +1116,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:32:13.767321+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## CGPTUSDT SHORT — EXPIRED
+- Trade ID: `CGPTUSDT-20261125-060142-81247C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:32:31.543439+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
