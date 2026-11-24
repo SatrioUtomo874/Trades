@@ -48,3 +48,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:13:00.833791+00:00 | Reason: SIZE_REJECTED
+## ALCHUSDT LONG — CANCELED
+- Trade ID: `ALCHUSDT-20261124-110100-31AFB0`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:15:04.632633+00:00 | Reason: BINANCE_USER_WS_CANCELED
