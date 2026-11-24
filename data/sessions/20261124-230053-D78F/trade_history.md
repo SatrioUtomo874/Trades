@@ -210,3 +210,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:06:49.903067+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AUCTIONUSDT SHORT — CANCELED
+- Trade ID: `AUCTIONUSDT-20261125-020308-74E349`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:07:33.341286+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
