@@ -438,3 +438,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:29:53.859545+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## DOLOUSDT LONG — CANCELED
+- Trade ID: `DOLOUSDT-20261124-093027-CCF5EF`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:30:42.807302+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
