@@ -234,3 +234,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:12:22.605908+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## LAYERUSDT SHORT — CANCELED
+- Trade ID: `LAYERUSDT-20261125-021251-6A01D6`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:13:09.809140+00:00 | Reason: SIGNAL_TRACE_PRICE_GAP_MISSED
