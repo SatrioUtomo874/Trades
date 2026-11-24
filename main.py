@@ -5383,6 +5383,7 @@ class TradingEngine:
         # racing position/order recovery at the exact moment the ban expires.
         self._rest_recovery_active = self._was_in_binance_cooldown
         self._scan_protection_paused = False
+        self._max_cancel_running = False
         self._last_user_stream_start_attempt = 0.0
 
         self._running = False
@@ -7898,7 +7899,7 @@ class TradingEngine:
         uncertain_entry = next((
             other for other in self.active_trades.values()
             if other is not trade and other.status == "PENDING" and other.real_intent and other.real_enabled
-            and (other.real_submit_ambiguous or other.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN", "REAL_PENDING"})
+            and (other.real_submit_ambiguous or other.real_state in {"REAL_SUBMITTING", "REAL_SUBMIT_UNKNOWN"})
         ), None)
         if uncertain_entry is not None:
             raise MarketEntryRejected(
@@ -8235,6 +8236,10 @@ class TradingEngine:
         if first_fill:
             trade.status = "FILLED"
             trade.filled_at = filled_at or now_utc()
+            if trade.real_enabled:
+                _t = asyncio.create_task(self._cancel_pending_limits_if_max_reached(), name="max-cancel")
+                self._entry_tasks.add(_t)
+                _t.add_done_callback(self._entry_tasks.discard)
         if price > 0:
             trade.fill_price = price
         if trade.fill_price is None or trade.fill_price <= 0:
@@ -8810,6 +8815,28 @@ class TradingEngine:
         await self._finalize_trade(
             trade, "EXPIRED" if "EXPIRE" in reason else "CANCELED", None, reason
         )
+
+    async def _cancel_pending_limits_if_max_reached(self) -> None:
+        """Once MAX active positions is filled, cancel every resting REAL entry LIMIT."""
+        if self._max_cancel_running:
+            return
+        self._max_cancel_running = True
+        try:
+            if len(self._active_slot_projection()) < self.max_active_trades:
+                return
+            for trade in list(self.active_trades.values()):
+                if trade.status != "PENDING" or not trade.real_enabled or trade.entry_inflight:
+                    continue
+                log.info("[MAX] %s LIMIT dibatalkan: %s/%s posisi aktif", trade.pair,
+                         len(self._active_slot_projection()), self.max_active_trades)
+                try:
+                    await self._cancel_pending_trade(trade, "MAX_ACTIVE_POSITIONS_REACHED")
+                except BinanceRateLimitError:
+                    break
+                except Exception as exc:
+                    log.warning("[MAX] cancel LIMIT %s gagal; dicoba lagi: %s", trade.pair, exc)
+        finally:
+            self._max_cancel_running = False
 
     async def _close_trade(
         self, trade: Trade, reference_price: Decimal, reason: str, *,
@@ -9610,6 +9637,7 @@ class TradingEngine:
                         except Exception as exc:
                             log.warning("[UNIVERSE] refresh belum berhasil; retry bertahap: %s", exc)
 
+                await self._cancel_pending_limits_if_max_reached()
                 await self._expire_due_pending()
                 transport_failure_seen = False
                 for trade in list(self.active_trades.values()):
