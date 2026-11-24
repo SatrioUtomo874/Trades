@@ -108,3 +108,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:17:30.331731+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
+## CUSDT LONG — CANCELED
+- Trade ID: `CUSDT-20261124-112020-87296F`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:20:28.119799+00:00 | Reason: SIZE_REJECTED
