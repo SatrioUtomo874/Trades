@@ -684,3 +684,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:30:01.232548+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MAGICUSDT SHORT — EXPIRED
+- Trade ID: `MAGICUSDT-20261125-030837-4AE243`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:30:14.008041+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
