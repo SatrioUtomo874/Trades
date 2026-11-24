@@ -156,3 +156,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:23:15.719907+00:00 | Reason: SIZE_REJECTED
+## LISTAUSDT LONG — CANCELED
+- Trade ID: `LISTAUSDT-20261124-112333-20489A`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:23:43.923244+00:00 | Reason: SIZE_REJECTED
