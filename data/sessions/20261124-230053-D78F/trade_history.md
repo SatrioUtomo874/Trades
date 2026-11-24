@@ -252,3 +252,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:14:24.548573+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ENAUSDT SHORT — EXPIRED
+- Trade ID: `ENAUSDT-20261125-014804-7F8602`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:15:00.165119+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
