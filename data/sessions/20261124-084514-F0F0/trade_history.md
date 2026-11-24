@@ -432,3 +432,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:29:23.161113+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CYSUSDT SHORT — CANCELED
+- Trade ID: `CYSUSDT-20261124-092928-C0E356`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:29:53.859545+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
