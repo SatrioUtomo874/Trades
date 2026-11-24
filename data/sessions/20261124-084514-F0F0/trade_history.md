@@ -222,3 +222,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:12:16.634353+00:00 | Reason: SIZE_REJECTED
+## GASUSDT LONG — CANCELED
+- Trade ID: `GASUSDT-20261124-091248-23F628`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:12:54.645456+00:00 | Reason: SIZE_REJECTED
