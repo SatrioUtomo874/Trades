@@ -318,3 +318,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:20:25.136454+00:00 | Reason: SIZE_REJECTED
+## AVAAIUSDT LONG — CANCELED
+- Trade ID: `AVAAIUSDT-20261124-092046-D715F0`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:20:50.944071+00:00 | Reason: SIZE_REJECTED
