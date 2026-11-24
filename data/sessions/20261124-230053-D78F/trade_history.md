@@ -360,3 +360,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:22:59.190160+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ALICEUSDT SHORT — CANCELED
+- Trade ID: `ALICEUSDT-20261125-020153-FC1E30`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:23:22.603307+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
