@@ -228,3 +228,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:12:54.645456+00:00 | Reason: SIZE_REJECTED
+## 1000CHEEMSUSDT LONG — CANCELED
+- Trade ID: `1000CHEEMSUSDT-20261124-091332-07318C`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:13:37.155293+00:00 | Reason: SIZE_REJECTED
