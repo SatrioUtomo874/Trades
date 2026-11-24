@@ -528,3 +528,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:39:43.045897+00:00 | Reason: SIZE_REJECTED
+## ALICEUSDT LONG — CANCELED
+- Trade ID: `ALICEUSDT-20261124-094004-689163`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:40:11.359124+00:00 | Reason: SIZE_REJECTED
