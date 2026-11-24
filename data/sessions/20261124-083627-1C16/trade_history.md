@@ -48,3 +48,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:40:00.153211+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
+## ALICEUSDT LONG — CANCELED
+- Trade ID: `ALICEUSDT-20261124-084017-D9B1F2`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:40:20.481445+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
