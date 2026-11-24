@@ -168,3 +168,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:02:23.119053+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
+## ARCUSDT SHORT — EXPIRED
+- Trade ID: `ARCUSDT-20261124-084950-422D85`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:03:01.224028+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
