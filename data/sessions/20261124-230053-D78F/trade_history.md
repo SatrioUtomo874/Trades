@@ -390,3 +390,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:30:00.128467+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ARKUSDT SHORT — EXPIRED
+- Trade ID: `ARKUSDT-20261125-020234-BD4451`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:30:01.270345+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
