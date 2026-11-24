@@ -192,12 +192,19 @@
     "M15:ENSUSDT": 1795485600000,
     "M15:ERAUSDT": 1795485600000,
     "M15:ESPORTSUSDT": 1795485600000,
-    "M15:ESPUSDT": 1795485600000
+    "M15:ESPUSDT": 1795485600000,
+    "M15:ETCUSDT": 1795485600000,
+    "M15:ETHFIUSDT": 1795485600000,
+    "M15:ETHWUSDT": 1795485600000,
+    "M15:EULUSDT": 1795485600000,
+    "M15:EVAAUSDT": 1795485600000,
+    "M15:FARTCOINUSDT": 1795485600000,
+    "M15:FETUSDT": 1795485600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 176,
+  "scan_resume_cursor": 183,
   "scan_resume_boundary_ms": 1795484700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-24T02:10:18.709114+00:00"
+  "updated_at": "2026-11-24T02:11:22.227572+00:00"
 }
