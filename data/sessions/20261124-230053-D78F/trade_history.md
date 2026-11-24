@@ -306,3 +306,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:17:26.260386+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ONDOUSDT SHORT — CANCELED
+- Trade ID: `ONDOUSDT-20261125-021618-22B08C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:17:55.573768+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
