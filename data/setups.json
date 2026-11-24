@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T17:46:37.526865+00:00",
+  "updated_at": "2026-11-24T17:46:43.621622+00:00",
   "active_trades": [
     {
       "trade_id": "DODOXUSDT-20261125-004535-7071B2",
@@ -146,7 +146,7 @@
       "tp_client_algo_id": "VTTPSDT-20261125-004613-4ED906",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
