@@ -1014,3 +1014,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:32:40.157994+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## KMNOUSDT SHORT — CANCELED
+- Trade ID: `KMNOUSDT-20261125-052040-5A5D97`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:37:53.429389+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
