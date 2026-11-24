@@ -936,3 +936,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:15:51.940395+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## DOGSUSDT SHORT — EXPIRED
+- Trade ID: `DOGSUSDT-20261125-044858-2278DD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:16:03.941560+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
