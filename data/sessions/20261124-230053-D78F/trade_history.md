@@ -606,3 +606,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:19:14.605623+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## FUSDT SHORT — EXPIRED
+- Trade ID: `FUSDT-20261125-024946-9F6E96`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:19:26.296730+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
