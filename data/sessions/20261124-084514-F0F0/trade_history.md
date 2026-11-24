@@ -834,3 +834,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T03:11:27.933471+00:00 | Reason: MANUAL_CANCEL; BINANCE_CANCELED
+## HAEDALUSDT SHORT — CANCELED
+- Trade ID: `HAEDALUSDT-20261124-100247-5B11D8`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T03:11:42.346070+00:00 | Reason: BINANCE_CANCELED
