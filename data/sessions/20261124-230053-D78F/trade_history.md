@@ -366,3 +366,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:23:22.603307+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MAVUSDT SHORT — CANCELED
+- Trade ID: `MAVUSDT-20261125-021412-2A75B9`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:24:18.635126+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
