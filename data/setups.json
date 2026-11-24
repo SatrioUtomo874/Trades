@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T22:00:41.748041+00:00",
+  "updated_at": "2026-11-24T22:00:44.158458+00:00",
   "active_trades": [
     {
       "trade_id": "SOPHUSDT-20261125-004613-4ED906",
@@ -108,7 +108,7 @@
       "entry_touch_armed": true,
       "entry_touch_missed": false,
       "trailing_last_close_ms": 1795543200000,
-      "trailing_last_st": "0.0008820779262430775",
+      "trailing_last_st": "0.0008753466337357356",
       "trailing_last_reason": "PENDING_TRAILING_SL_ACK_UNKNOWN: HTTP 400 | code -2013 | /fapi/v1/algoOrder: Order does not exist.",
       "trailing_pending_algo_client_id": "VTSLfdbd8fc6f50d4ea8ac669f1b83be",
       "trailing_pending_algo_trigger": "0.000889",
