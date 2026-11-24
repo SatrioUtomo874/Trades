@@ -708,3 +708,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:59:13.141854+00:00 | Reason: SIZE_REJECTED
+## FLUXUSDT SHORT — CANCELED
+- Trade ID: `FLUXUSDT-20261124-095939-2AC97C`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:59:47.066939+00:00 | Reason: SIZE_REJECTED
