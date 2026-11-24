@@ -1152,3 +1152,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:45:01.198720+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AKTUSDT SHORT — EXPIRED
+- Trade ID: `AKTUSDT-20261125-061633-DBA670`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:45:02.024626+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
