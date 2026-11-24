@@ -174,3 +174,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:55:00.499022+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## WOOUSDT SHORT — EXPIRED
+- Trade ID: `WOOUSDT-20261125-013813-6786A0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:00:00.119003+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
