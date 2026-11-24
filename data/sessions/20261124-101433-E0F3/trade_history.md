@@ -132,3 +132,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:21:49.360942+00:00 | Reason: SIZE_REJECTED
+## INXUSDT LONG — CANCELED
+- Trade ID: `INXUSDT-20261124-112152-39DA9F`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:22:02.599018+00:00 | Reason: SIZE_REJECTED
