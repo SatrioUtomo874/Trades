@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T02:43:16.994932+00:00",
+  "updated_at": "2026-11-24T02:43:24.798488+00:00",
   "active_trades": [
     {
       "trade_id": "0GUSDT-20261124-084550-BC94FB",
@@ -885,8 +885,8 @@
       "supertrend_factor": 2.5,
       "sl_algo_id": null,
       "tp_algo_id": null,
-      "sl_client_algo_id": null,
-      "tp_client_algo_id": null,
+      "sl_client_algo_id": "VTSLSDT-20261124-093559-28314B",
+      "tp_client_algo_id": "VTTPSDT-20261124-093559-28314B",
       "sl_algo_status": "NOT_PLACED",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
@@ -1173,8 +1173,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-24T02:43:24.688326+00:00",
+      "entry_trigger_price": "0.04206",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "4.0.0",
       "entry_reason": "M15 EMA9/EMA21 direction + 200-bar Volume Profile POC LIMIT; static M15 Supertrend ATR14 x2.5 SL; fixed RR 1R TP",
