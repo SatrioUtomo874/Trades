@@ -408,3 +408,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:30:16.701422+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AVNTUSDT SHORT — EXPIRED
+- Trade ID: `AVNTUSDT-20261125-020327-7052D7`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:30:26.599078+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
