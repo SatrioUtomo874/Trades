@@ -168,3 +168,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:53:54.390588+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## PHAROSUSDT LONG — CANCELED
+- Trade ID: `PHAROSUSDT-20261125-015200-49DAA6`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:55:00.499022+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
