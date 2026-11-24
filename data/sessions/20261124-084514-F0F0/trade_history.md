@@ -390,3 +390,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:25:10.513652+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## BSBUSDT LONG — CANCELED
+- Trade ID: `BSBUSDT-20261124-092508-840AC8`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:25:49.610230+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
