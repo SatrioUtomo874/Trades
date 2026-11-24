@@ -336,3 +336,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:20:24.708786+00:00 | Reason: SIGNAL_TRACE_PRICE_GAP_MISSED
+## DYMUSDT SHORT — CANCELED
+- Trade ID: `DYMUSDT-20261125-020821-FFE5E1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:20:42.038887+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
