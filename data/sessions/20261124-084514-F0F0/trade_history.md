@@ -846,3 +846,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T03:12:03.063061+00:00 | Reason: MANUAL_CANCEL; BINANCE_CANCELED
+## INJUSDT SHORT — CANCELED
+- Trade ID: `INJUSDT-20261124-100535-A7D181`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T03:12:17.624528+00:00 | Reason: BINANCE_CANCELED
