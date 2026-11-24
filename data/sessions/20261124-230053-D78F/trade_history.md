@@ -330,3 +330,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:20:10.279217+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SPELLUSDT SHORT — CANCELED
+- Trade ID: `SPELLUSDT-20261125-021943-A14306`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:20:24.708786+00:00 | Reason: SIGNAL_TRACE_PRICE_GAP_MISSED
