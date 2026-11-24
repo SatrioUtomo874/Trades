@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T23:27:34.554609+00:00",
+  "updated_at": "2026-11-24T23:27:41.257021+00:00",
   "active_trades": [
     {
       "trade_id": "SOPHUSDT-20261125-004613-4ED906",
@@ -2268,12 +2268,12 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002202405956,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002202406186,
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSLSDT-20261125-061721-DDA9D7",
       "tp_client_algo_id": "VTTPSDT-20261125-061721-DDA9D7",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
+      "tp_algo_status": "NEW",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
       "protection_warning_sent": false,
@@ -2335,7 +2335,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "777315242:NEW:NEW:0:0",
+      "last_ws_event_key": "777315242:TRADE:FILLED:106:55761877",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
