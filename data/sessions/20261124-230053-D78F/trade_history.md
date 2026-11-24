@@ -180,3 +180,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:00:00.119003+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## FRAXUSDT SHORT — EXPIRED
+- Trade ID: `FRAXUSDT-20261125-013245-24E996`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:00:00.844069+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
