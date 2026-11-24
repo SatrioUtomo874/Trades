@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T02:44:36.506725+00:00",
+  "updated_at": "2026-11-24T02:44:46.879412+00:00",
   "active_trades": [
     {
       "trade_id": "0GUSDT-20261124-084550-BC94FB",
@@ -1060,7 +1060,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "5169742046:NEW:NEW:0:0",
+      "last_ws_event_key": "5169742046:TRADE:FILLED:1506:278142158",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
