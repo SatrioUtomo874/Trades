@@ -858,3 +858,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:00:55.922137+00:00 | Reason: SIGNAL_TRACE_OPPOSITE_BUBBLE
+## ZKUSDT SHORT — CANCELED
+- Trade ID: `ZKUSDT-20261125-045725-B6E4B0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:01:50.010311+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
