@@ -324,3 +324,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:19:40.893337+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## LQTYUSDT SHORT — CANCELED
+- Trade ID: `LQTYUSDT-20261125-021328-25B3BC`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:20:10.279217+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
