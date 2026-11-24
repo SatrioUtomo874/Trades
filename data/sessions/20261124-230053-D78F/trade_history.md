@@ -834,3 +834,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T21:55:36.794402+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## DODOXUSDT LONG — EXPIRED
+- Trade ID: `DODOXUSDT-20261125-043050-90F308`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:00:00.128688+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
