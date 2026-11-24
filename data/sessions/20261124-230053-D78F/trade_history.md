@@ -870,3 +870,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:02:24.948517+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ARXUSDT SHORT — CANCELED
+- Trade ID: `ARXUSDT-20261125-044710-BE2CCD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:03:13.439530+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
