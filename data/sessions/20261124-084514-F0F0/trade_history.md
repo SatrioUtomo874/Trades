@@ -492,3 +492,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:35:34.044403+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AIAUSDT SHORT — CANCELED
+- Trade ID: `AIAUSDT-20261124-093727-7C0D30`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:37:33.056755+00:00 | Reason: SIZE_REJECTED
