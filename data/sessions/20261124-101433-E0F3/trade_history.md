@@ -126,3 +126,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:21:20.177996+00:00 | Reason: SIZE_REJECTED
+## HOMEUSDT LONG — CANCELED
+- Trade ID: `HOMEUSDT-20261124-112138-2115DD`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:21:49.360942+00:00 | Reason: SIZE_REJECTED
