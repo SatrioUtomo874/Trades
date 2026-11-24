@@ -810,3 +810,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T21:15:00.115589+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PIPPINUSDT LONG — CANCELED
+- Trade ID: `PIPPINUSDT-20261125-043210-F48B4F`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T21:35:15.895373+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
