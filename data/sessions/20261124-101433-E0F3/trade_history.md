@@ -102,3 +102,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:17:20.096317+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## 1000LUNCUSDT LONG — EXPIRED
+- Trade ID: `1000LUNCUSDT-20261124-110015-D61434`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:17:30.331731+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
