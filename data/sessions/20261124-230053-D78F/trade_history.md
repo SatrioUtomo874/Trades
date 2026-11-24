@@ -816,3 +816,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T21:35:15.895373+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## BRETTUSDT SHORT — CANCELED
+- Trade ID: `BRETTUSDT-20261125-044813-CFE5BA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T21:54:11.956144+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
