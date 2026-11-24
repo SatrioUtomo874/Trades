@@ -108,3 +108,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:57:12.305069+00:00 | Reason: SIZE_REJECTED
+## CHILLGUYUSDT LONG — CANCELED
+- Trade ID: `CHILLGUYUSDT-20261124-085732-F5CC39`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:57:44.319138+00:00 | Reason: SIZE_REJECTED
