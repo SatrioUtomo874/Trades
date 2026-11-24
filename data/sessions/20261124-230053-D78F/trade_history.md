@@ -204,3 +204,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:05:54.745295+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CGPTUSDT SHORT — CANCELED
+- Trade ID: `CGPTUSDT-20261125-020551-F39861`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:06:49.903067+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
