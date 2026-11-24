@@ -576,3 +576,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:45:27.539387+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## BNBUSDT SHORT — CANCELED
+- Trade ID: `BNBUSDT-20261124-094519-A9F85D`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:45:59.164962+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
