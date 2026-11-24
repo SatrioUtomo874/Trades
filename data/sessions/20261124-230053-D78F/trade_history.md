@@ -120,3 +120,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:45:21.778857+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SCRUSDT SHORT — EXPIRED
+- Trade ID: `SCRUSDT-20261125-012321-4AE7E0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:45:30.738293+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
