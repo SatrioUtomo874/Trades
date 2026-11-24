@@ -102,3 +102,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:43:35.460802+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
+## 1000CHEEMSUSDT LONG — CANCELED
+- Trade ID: `1000CHEEMSUSDT-20261124-083715-FDBAC1`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:44:13.067944+00:00 | Reason: BINANCE_USER_WS_CANCELED
