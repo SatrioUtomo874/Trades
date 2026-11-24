@@ -954,3 +954,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:16:27.244217+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MARSCOINUSDT SHORT — EXPIRED
+- Trade ID: `MARSCOINUSDT-20261125-045153-B9A6B2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:16:39.927761+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
