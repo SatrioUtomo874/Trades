@@ -252,3 +252,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:15:01.937450+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## EDGEUSDT SHORT — EXPIRED
+- Trade ID: `EDGEUSDT-20261124-090540-34806C`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:15:10.653320+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
