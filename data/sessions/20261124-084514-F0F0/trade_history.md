@@ -150,3 +150,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:01:10.039187+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## ALCHUSDT LONG — EXPIRED
+- Trade ID: `ALCHUSDT-20261124-084847-21E3F3`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:01:20.846883+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
