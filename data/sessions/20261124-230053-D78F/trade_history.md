@@ -804,3 +804,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T21:04:33.228029+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## PHAROSUSDT LONG — EXPIRED
+- Trade ID: `PHAROSUSDT-20261125-034654-D7350E`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T21:15:00.115589+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
