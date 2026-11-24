@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T03:08:18.747655+00:00",
+  "updated_at": "2026-11-24T03:08:25.232045+00:00",
   "active_trades": [
     {
       "trade_id": "1000LUNCUSDT-20261124-084623-901520",
@@ -780,10 +780,10 @@
       "tp_algo_id": null,
       "sl_client_algo_id": "VTSLSDT-20261124-100337-DDBA1F",
       "tp_client_algo_id": "VTTPSDT-20261124-100337-DDBA1F",
-      "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
-      "protection_state": "WAITING_FOR_EXCHANGE",
-      "protection_error": "Binance reports no matching open position (-4509); waiting for side-specific reconciliation.",
+      "sl_algo_status": "FINISHED",
+      "tp_algo_status": "CANCELED",
+      "protection_state": "CANCELED",
+      "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
       "sl_submit_ambiguous": false,
@@ -846,7 +846,7 @@
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
-      "last_ws_event_key": "996616438:NEW:NEW:0:0",
+      "last_ws_event_key": "996616438:TRADE:FILLED:135:100546309",
       "late_fill_during_api_cooldown": false,
       "preserve_gtc_after_cooldown": false,
       "exchange_adopted": false,
