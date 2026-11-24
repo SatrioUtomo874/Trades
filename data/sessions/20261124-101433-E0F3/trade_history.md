@@ -90,3 +90,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:16:41.228604+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## NIGHTUSDT LONG — EXPIRED
+- Trade ID: `NIGHTUSDT-20261124-111024-D52921`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:16:50.650213+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
