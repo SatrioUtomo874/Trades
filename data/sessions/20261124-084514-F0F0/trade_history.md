@@ -324,3 +324,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:20:50.944071+00:00 | Reason: SIZE_REJECTED
+## AWEUSDT LONG — CANCELED
+- Trade ID: `AWEUSDT-20261124-092112-58CC0D`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:21:18.597140+00:00 | Reason: SIZE_REJECTED
