@@ -1,0 +1,8 @@
+# Trading Journal
+
+## 1000LUNCUSDT LONG — CANCELED
+- Trade ID: `1000LUNCUSDT-20261124-083732-AAEA5A`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:37:35.607835+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
