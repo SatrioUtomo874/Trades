@@ -714,3 +714,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:31:01.919024+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## GUNUSDT SHORT — EXPIRED
+- Trade ID: `GUNUSDT-20261125-030652-38A5A9`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:31:13.380941+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
