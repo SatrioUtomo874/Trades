@@ -354,3 +354,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:22:59.985956+00:00 | Reason: SIZE_REJECTED
+## BLURUSDT LONG — CANCELED
+- Trade ID: `BLURUSDT-20261124-092319-F6229D`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:23:26.332186+00:00 | Reason: SIZE_REJECTED
