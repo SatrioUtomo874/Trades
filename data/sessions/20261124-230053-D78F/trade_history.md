@@ -882,3 +882,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:04:25.968554+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## FUSDT SHORT — CANCELED
+- Trade ID: `FUSDT-20261125-045017-2927C6`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:04:59.430023+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
