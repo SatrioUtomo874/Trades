@@ -990,3 +990,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:17:37.278137+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## RECALLUSDT SHORT — EXPIRED
+- Trade ID: `RECALLUSDT-20261125-045400-B1038D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:17:49.205494+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
