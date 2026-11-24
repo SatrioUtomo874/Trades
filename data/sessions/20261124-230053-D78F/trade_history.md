@@ -1050,3 +1050,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:24:39.126876+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AXLUSDT SHORT — CANCELED
+- Trade ID: `AXLUSDT-20261125-061745-ECA856`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:25:15.465461+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
