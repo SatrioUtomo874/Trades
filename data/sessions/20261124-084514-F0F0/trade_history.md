@@ -144,3 +144,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:00:34.807989+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
+## AIXBTUSDT LONG — CANCELED
+- Trade ID: `AIXBTUSDT-20261124-084809-027869`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:01:10.039187+00:00 | Reason: BINANCE_USER_WS_CANCELED
