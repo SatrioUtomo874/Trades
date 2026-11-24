@@ -60,3 +60,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:15:15.563838+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
+## BLURUSDT LONG — CANCELED
+- Trade ID: `BLURUSDT-20261124-110252-80C213`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:15:34.895773+00:00 | Reason: BINANCE_USER_WS_CANCELED
