@@ -1188,3 +1188,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:46:38.863107+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BOMEUSDT SHORT — EXPIRED
+- Trade ID: `BOMEUSDT-20261125-061914-60F9F7`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:46:50.615877+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
