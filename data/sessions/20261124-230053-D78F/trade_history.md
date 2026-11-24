@@ -690,3 +690,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:30:14.008041+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ENAUSDT SHORT — EXPIRED
+- Trade ID: `ENAUSDT-20261125-030415-AC75D0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:30:25.922522+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
