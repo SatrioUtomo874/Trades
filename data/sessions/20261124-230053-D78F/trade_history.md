@@ -912,3 +912,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:15:01.987422+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## APEUSDT SHORT — EXPIRED
+- Trade ID: `APEUSDT-20261125-044647-CE569B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:15:17.333462+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
