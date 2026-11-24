@@ -1044,3 +1044,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:22:54.886832+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## EULUSDT SHORT — CANCELED
+- Trade ID: `EULUSDT-20261125-062217-7C0C6F`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:24:39.126876+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
