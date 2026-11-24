@@ -312,3 +312,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:20:01.482389+00:00 | Reason: SIZE_REJECTED
+## ASTRUSDT LONG — CANCELED
+- Trade ID: `ASTRUSDT-20261124-092019-E20BC1`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:20:25.136454+00:00 | Reason: SIZE_REJECTED
