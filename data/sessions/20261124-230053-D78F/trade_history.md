@@ -540,3 +540,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:16:45.732671+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## RVNUSDT SHORT — EXPIRED
+- Trade ID: `RVNUSDT-20261125-025334-B6F559`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:16:58.478407+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
