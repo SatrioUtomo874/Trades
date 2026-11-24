@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T04:20:04.211714+00:00",
+  "updated_at": "2026-11-24T04:20:09.640901+00:00",
   "active_trades": [
     {
       "trade_id": "USUALUSDT-20261124-111518-92C4AE",
@@ -1050,13 +1050,13 @@
       "target_notional": "5.5",
       "actual_notional": "5.499662",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_PENDING",
       "position_side": "BOTH",
       "entry_order_id": 6485114958,
       "entry_client_order_id": "VTad47d6ebb68d3a9356503bc6a5db",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": null,
+      "entry_executed_qty": "0",
       "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
