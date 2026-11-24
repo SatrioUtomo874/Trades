@@ -84,3 +84,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:40:37.282023+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## STOUSDT SHORT — CANCELED
+- Trade ID: `STOUSDT-20261125-013651-3074C7`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:41:15.164879+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
