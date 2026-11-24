@@ -246,3 +246,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:13:15.887989+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## HOLOUSDT SHORT — CANCELED
+- Trade ID: `HOLOUSDT-20261125-021145-838EFF`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:14:24.548573+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
