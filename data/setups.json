@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T04:08:23.538425+00:00",
+  "updated_at": "2026-11-24T04:08:27.773385+00:00",
   "active_trades": [
     {
       "trade_id": "1000LUNCUSDT-20261124-110015-D61434",
@@ -813,7 +813,7 @@
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
       "ema_exit_attempts": 0,
-      "ema_exit_last_error": null,
+      "ema_exit_last_error": "Forced EMA exit is disabled by EMA9/21 + VP POC baseline v4.0.0.",
       "expires_at": "2026-11-24T04:15:00+00:00",
       "status": "FILLED",
       "created_at": "2026-11-24T04:08:01.003003+00:00",
