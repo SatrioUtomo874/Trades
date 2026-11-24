@@ -414,3 +414,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:30:26.599078+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## CTKUSDT SHORT — EXPIRED
+- Trade ID: `CTKUSDT-20261125-020624-768FE1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:30:37.619016+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
