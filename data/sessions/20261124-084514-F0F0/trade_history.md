@@ -456,3 +456,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:32:07.924205+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## EDGEUSDT SHORT — CANCELED
+- Trade ID: `EDGEUSDT-20261124-093214-2B9974`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:32:42.258074+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
