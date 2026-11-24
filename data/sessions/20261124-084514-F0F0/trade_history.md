@@ -372,3 +372,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:24:24.506630+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## AIGENSYNUSDT LONG — CANCELED
+- Trade ID: `AIGENSYNUSDT-20261124-091607-C6445B`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:24:31.602423+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED; BINANCE_CANCELED
