@@ -90,3 +90,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:56:01.629754+00:00 | Reason: SIZE_REJECTED
+## CCUSDT LONG — CANCELED
+- Trade ID: `CCUSDT-20261124-085624-D0A74E`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:56:35.804374+00:00 | Reason: SIZE_REJECTED
