@@ -114,3 +114,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:57:44.319138+00:00 | Reason: SIZE_REJECTED
+## COAIUSDT LONG — CANCELED
+- Trade ID: `COAIUSDT-20261124-085806-95ABBF`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:58:20.116773+00:00 | Reason: SIZE_REJECTED
