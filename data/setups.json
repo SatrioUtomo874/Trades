@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T02:58:15.012524+00:00",
+  "updated_at": "2026-11-24T02:58:20.919769+00:00",
   "active_trades": [
     {
       "trade_id": "0GUSDT-20261124-084550-BC94FB",
@@ -1103,8 +1103,8 @@
       "tp_client_algo_id": null,
       "sl_algo_status": "NOT_PLACED",
       "tp_algo_status": "NOT_PLACED",
-      "protection_state": "INVALID_RISK",
-      "protection_error": "Actual fill price and M15 Supertrend SL do not form a positive risk distance.",
+      "protection_state": "CANCELED",
+      "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
       "sl_submit_ambiguous": false,
@@ -1118,7 +1118,7 @@
       "ema_exit_fast_length": 9,
       "ema_exit_slow_length": 21,
       "ema_exit_config_source": "CURRENT_EMA_CONFIG_AT_ADOPTION",
-      "ema_exit_state": "UNINITIALIZED",
+      "ema_exit_state": "DISABLED",
       "ema_exit_last_open_ms": 0,
       "ema_exit_last_fast": null,
       "ema_exit_last_slow": null,
@@ -1131,7 +1131,7 @@
       "ema_exit_order_id": null,
       "ema_exit_order_status": "NOT_SUBMITTED",
       "ema_exit_attempts": 0,
-      "ema_exit_last_error": "Exchange-adopted position: no M15 strategy forced-exit state; review its Binance protection independently.",
+      "ema_exit_last_error": "Forced EMA exit is disabled by EMA9/21 + VP POC baseline v4.0.0.",
       "expires_at": "2026-11-24T03:54:07.068000+00:00",
       "status": "FILLED",
       "created_at": "2026-11-24T02:54:07.068000+00:00",
