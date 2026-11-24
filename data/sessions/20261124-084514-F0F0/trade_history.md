@@ -840,3 +840,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T03:11:42.346070+00:00 | Reason: BINANCE_CANCELED
+## HANAUSDT SHORT — CANCELED
+- Trade ID: `HANAUSDT-20261124-100308-D92900`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T03:12:03.063061+00:00 | Reason: MANUAL_CANCEL; BINANCE_CANCELED
