@@ -462,3 +462,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:32:42.258074+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ESPUSDT SHORT — CANCELED
+- Trade ID: `ESPUSDT-20261124-093248-5E60CE`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:33:18.033870+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
