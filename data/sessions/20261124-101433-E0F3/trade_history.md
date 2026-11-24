@@ -138,3 +138,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:22:02.599018+00:00 | Reason: SIZE_REJECTED
+## IOSTUSDT LONG — CANCELED
+- Trade ID: `IOSTUSDT-20261124-112224-04D6A4`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:22:33.743015+00:00 | Reason: SIZE_REJECTED
