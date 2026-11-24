@@ -150,3 +150,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T04:22:53.404023+00:00 | Reason: SIZE_REJECTED
+## KITEUSDT LONG — CANCELED
+- Trade ID: `KITEUSDT-20261124-112310-75C784`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T04:23:15.719907+00:00 | Reason: SIZE_REJECTED
