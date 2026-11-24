@@ -714,3 +714,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:59:47.066939+00:00 | Reason: SIZE_REJECTED
+## EDENUSDT SHORT — CANCELED
+- Trade ID: `EDENUSDT-20261124-095451-765BC2`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T03:00:03.144690+00:00 | Reason: BINANCE_USER_WS_CANCELED
