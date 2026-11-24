@@ -1062,3 +1062,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:25:55.516404+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## HIVEUSDT SHORT — CANCELED
+- Trade ID: `HIVEUSDT-20261125-062529-987F4E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:26:11.706969+00:00 | Reason: SIGNAL_TRACE_PRICE_GAP_MISSED
