@@ -36,3 +36,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:52:08.822573+00:00 | Reason: SIZE_REJECTED
+## BANKUSDT LONG — CANCELED
+- Trade ID: `BANKUSDT-20261124-085215-0700AF`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:52:24.546799+00:00 | Reason: SIZE_REJECTED
