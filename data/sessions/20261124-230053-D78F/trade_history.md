@@ -642,3 +642,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:20:25.446563+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PROVEUSDT SHORT — EXPIRED
+- Trade ID: `PROVEUSDT-20261125-025315-85951F`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:20:37.463634+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
