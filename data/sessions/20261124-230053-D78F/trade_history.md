@@ -828,3 +828,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T21:54:42.613279+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## FRAXUSDT SHORT — CANCELED
+- Trade ID: `FRAXUSDT-20261125-044957-7D0EB4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T21:55:36.794402+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
