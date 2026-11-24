@@ -240,3 +240,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:14:27.083857+00:00 | Reason: SIZE_REJECTED
+## AAVEUSDT LONG — CANCELED
+- Trade ID: `AAVEUSDT-20261124-091446-B04E63`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:14:50.356175+00:00 | Reason: SIZE_REJECTED
