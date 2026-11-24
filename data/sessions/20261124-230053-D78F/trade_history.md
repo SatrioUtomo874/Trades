@@ -1056,3 +1056,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:25:15.465461+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## 1000CATUSDT SHORT — CANCELED
+- Trade ID: `1000CATUSDT-20261125-061511-C10C82`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:25:55.516404+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
