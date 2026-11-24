@@ -150,3 +150,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:50:13.477120+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## METUSDT SHORT — CANCELED
+- Trade ID: `METUSDT-20261125-014949-5B8120`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:50:49.739534+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
