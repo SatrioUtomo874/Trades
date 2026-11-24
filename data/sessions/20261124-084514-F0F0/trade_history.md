@@ -744,3 +744,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T03:01:30.128666+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## DOSUSDT SHORT — EXPIRED
+- Trade ID: `DOSUSDT-20261124-095339-A2C002`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T03:01:36.231539+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
