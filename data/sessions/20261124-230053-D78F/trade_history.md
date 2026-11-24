@@ -24,3 +24,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:30:00.308887+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## CFGUSDT SHORT — EXPIRED
+- Trade ID: `CFGUSDT-20261125-010111-ECF348`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:30:00.828239+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
