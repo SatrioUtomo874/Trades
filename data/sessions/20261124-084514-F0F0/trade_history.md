@@ -426,3 +426,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:28:51.566087+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CTUSDT SHORT — CANCELED
+- Trade ID: `CTUSDT-20261124-092857-B987D9`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:29:23.161113+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
