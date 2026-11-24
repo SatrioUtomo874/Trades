@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T04:15:42.991979+00:00",
+  "updated_at": "2026-11-24T04:15:44.624180+00:00",
   "active_trades": [
     {
       "trade_id": "1000LUNCUSDT-20261124-110015-D61434",
@@ -836,14 +836,14 @@
       "target_notional": "5.5",
       "actual_notional": "5.49633",
       "real_enabled": true,
-      "real_state": "REAL_SUBMITTING",
+      "real_state": "REAL_PENDING",
       "position_side": "BOTH",
       "entry_order_id": 2454950298,
       "entry_client_order_id": "VT986707f5c6ad5fa345c9454fecac",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": null,
-      "entry_order_status": "SUBMITTING",
+      "entry_executed_qty": "0",
+      "entry_order_status": "NEW",
       "entry_order_terminal": false,
       "pending_cancel_reason": null,
       "last_ws_event_key": null,
