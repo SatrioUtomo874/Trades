@@ -258,3 +258,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:15:00.165119+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SUPERUSDT SHORT — EXPIRED
+- Trade ID: `SUPERUSDT-20261125-015318-915DB8`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:15:06.045295+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
