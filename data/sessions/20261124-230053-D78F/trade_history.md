@@ -588,3 +588,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:18:45.427862+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## DOLOUSDT SHORT — EXPIRED
+- Trade ID: `DOLOUSDT-20261125-024908-76631D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:19:00.874532+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
