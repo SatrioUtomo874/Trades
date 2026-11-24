@@ -1086,3 +1086,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:30:05.193575+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## CTSIUSDT SHORT — EXPIRED
+- Trade ID: `CTSIUSDT-20261125-060202-EDEA76`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:30:36.163731+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
