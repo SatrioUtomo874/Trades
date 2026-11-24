@@ -336,3 +336,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:21:43.788394+00:00 | Reason: SIZE_REJECTED
+## BANUSDT SHORT — CANCELED
+- Trade ID: `BANUSDT-20261124-092202-1EDEB6`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:22:07.099876+00:00 | Reason: SIZE_REJECTED
