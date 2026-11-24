@@ -444,3 +444,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:31:23.184453+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## GOATUSDT SHORT — EXPIRED
+- Trade ID: `GOATUSDT-20261125-021037-2140FE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:31:34.203561+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
