@@ -798,3 +798,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:51:27.279873+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## GPSUSDT LONG — CANCELED
+- Trade ID: `GPSUSDT-20261125-040055-C9BD32`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T21:04:33.228029+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
