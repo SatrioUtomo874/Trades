@@ -11,7 +11,7 @@
   "supertrend_factor": 2.5,
   "rr_min": "1",
   "rr_max": "1",
-  "max_active_trades": 10,
+  "max_active_trades": 8,
   "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": false,
@@ -116,9 +116,9 @@
     "M15:BNBUSDT": 1795486500000,
     "M15:BNTUSDT": 1795486500000,
     "M15:BOMEUSDT": 1795486500000,
-    "M15:BRETTUSDT": 1795484700000,
-    "M15:BREVUSDT": 1795484700000,
-    "M15:BROCCOLI714USDT": 1795484700000,
+    "M15:BRETTUSDT": 1795486500000,
+    "M15:BREVUSDT": 1795486500000,
+    "M15:BROCCOLI714USDT": 1795486500000,
     "M15:BROCCOLIF3BUSDT": 1795484700000,
     "M15:BRUSDT": 1795484700000,
     "M15:BSBUSDT": 1795484700000,
@@ -219,8 +219,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 100,
+  "scan_resume_cursor": 101,
   "scan_resume_boundary_ms": 1795485600000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-24T02:23:45.760365+00:00"
+  "updated_at": "2026-11-24T02:24:21.936982+00:00"
 }
