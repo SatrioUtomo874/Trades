@@ -420,3 +420,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:30:37.619016+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HBARUSDT SHORT — EXPIRED
+- Trade ID: `HBARUSDT-20261125-021109-D15C70`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:30:48.253565+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
