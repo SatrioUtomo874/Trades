@@ -942,3 +942,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:16:03.941560+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## FFUSDT LONG — EXPIRED
+- Trade ID: `FFUSDT-20261125-044917-9621AF`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:16:15.629597+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
