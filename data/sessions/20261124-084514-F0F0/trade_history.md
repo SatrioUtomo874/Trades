@@ -732,3 +732,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T03:00:48.296375+00:00 | Reason: BINANCE_USER_WS_CANCELED
+## EULUSDT SHORT — EXPIRED
+- Trade ID: `EULUSDT-20261124-095728-E2FC27`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T03:00:57.733469+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
