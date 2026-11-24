@@ -510,3 +510,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:38:25.940044+00:00 | Reason: PRICE_BEYOND_SL_BEFORE_ENTRY
+## AIOUSDT SHORT — CANCELED
+- Trade ID: `AIOUSDT-20261124-093846-6B21DC`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:38:53.071148+00:00 | Reason: SIZE_REJECTED
