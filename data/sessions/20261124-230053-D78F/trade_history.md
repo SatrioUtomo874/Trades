@@ -786,3 +786,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:45:01.519441+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## REZUSDT SHORT — EXPIRED
+- Trade ID: `REZUSDT-20261125-032420-088C68`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:45:15.933755+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
