@@ -162,3 +162,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:01:55.995388+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
+## APTUSDT LONG — EXPIRED
+- Trade ID: `APTUSDT-20261124-084936-25B34A`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:02:23.119053+00:00 | Reason: ENTRY_POC_WINDOW_EXPIRED; BINANCE_CANCELED
