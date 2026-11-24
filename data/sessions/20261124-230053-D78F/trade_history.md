@@ -780,3 +780,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:45:00.672624+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BLUAIUSDT SHORT — EXPIRED
+- Trade ID: `BLUAIUSDT-20261125-032245-04BE3B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:45:01.519441+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
