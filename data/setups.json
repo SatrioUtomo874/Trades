@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-24T03:07:54.437332+00:00",
+  "updated_at": "2026-11-24T03:08:05.236613+00:00",
   "active_trades": [
     {
       "trade_id": "1000LUNCUSDT-20261124-084623-901520",
@@ -1277,8 +1277,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-24T03:07:57.719094+00:00",
+      "entry_trigger_price": "0.1019",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "4.0.0",
       "entry_reason": "M15 EMA9/EMA21 direction + 200-bar Volume Profile POC LIMIT; static M15 Supertrend ATR14 x2.5 SL; fixed RR 1R TP",
