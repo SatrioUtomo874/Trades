@@ -612,3 +612,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T20:19:26.296730+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HIVEUSDT SHORT — EXPIRED
+- Trade ID: `HIVEUSDT-20261125-025009-1B9486`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T20:19:38.685602+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
