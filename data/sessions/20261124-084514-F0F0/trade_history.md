@@ -540,3 +540,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:40:38.885536+00:00 | Reason: SIZE_REJECTED
+## ARCUSDT SHORT — CANCELED
+- Trade ID: `ARCUSDT-20261124-094059-446FD9`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:41:06.534612+00:00 | Reason: SIZE_REJECTED
