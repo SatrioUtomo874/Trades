@@ -771,6 +771,13 @@ class Trade:
     entry_touch_armed: bool = False
     entry_touch_missed: bool = False
     trailing_last_close_ms: int = 0
+    trailing_last_st: Decimal | None = None
+    trailing_last_reason: str | None = None
+    # A trailing STOP_MARKET POST may succeed even if the response is lost.
+    # Persist its clientAlgoId/trigger so restart/retry performs lookup only and
+    # never submits a duplicate stop with a new client ID.
+    trailing_pending_algo_client_id: str | None = None
+    trailing_pending_algo_trigger: Decimal | None = None
 
     @property
     def entry_side(self) -> str:
@@ -861,6 +868,10 @@ class Trade:
             "entry_touch_armed": bool(self.entry_touch_armed),
             "entry_touch_missed": bool(self.entry_touch_missed),
             "trailing_last_close_ms": int(self.trailing_last_close_ms or 0),
+            "trailing_last_st": decimal_to_str(self.trailing_last_st),
+            "trailing_last_reason": self.trailing_last_reason,
+            "trailing_pending_algo_client_id": self.trailing_pending_algo_client_id,
+            "trailing_pending_algo_trigger": decimal_to_str(self.trailing_pending_algo_trigger),
             "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; fixed 2R TP; M15 close trailing SL",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
@@ -1053,6 +1064,10 @@ class Trade:
             entry_touch_armed=bool(row.get("entry_touch_armed", False)),
             entry_touch_missed=bool(row.get("entry_touch_missed", False)),
             trailing_last_close_ms=max(0, int(row.get("trailing_last_close_ms") or 0)),
+            trailing_last_st=dec("trailing_last_st"),
+            trailing_last_reason=(str(row.get("trailing_last_reason"))[:160] if row.get("trailing_last_reason") else None),
+            trailing_pending_algo_client_id=(str(row.get("trailing_pending_algo_client_id") or "").strip() or None),
+            trailing_pending_algo_trigger=dec("trailing_pending_algo_trigger"),
         )
 
 
@@ -5163,6 +5178,7 @@ class TradingEngine:
         self.timeframe = "M15"
         self.trend_length = 9
         self.ema_filter_length: int | tuple[int, int] | None = None
+        self.btc_filter_enabled = True  # Optional BTC H4 ST10x2.5 + EMA100 trend alignment gate
         self.h1_enabled = False  # Legacy compatibility field; H1 is not used by strategy v4
         self._h1_toggle_generation = 0
         self.supertrend_atr_length = 14
@@ -5413,6 +5429,7 @@ class TradingEngine:
             # obsolete persisted values written by older versions of the bot.
             self.trend_length = 9
             self.ema_filter_length = None
+            self.btc_filter_enabled = bool(payload.get("btc_filter_enabled", True))
             self.h1_enabled = False
             self.supertrend_atr_length = 14
             self.supertrend_factor = 2.5
@@ -5560,6 +5577,7 @@ class TradingEngine:
                 "timeframe": self.timeframe,
                 "trend_length": self.trend_length,
                 "ema_filter_length": list(self.ema_filter_length) if isinstance(self.ema_filter_length, tuple) else self.ema_filter_length,
+                "btc_filter_enabled": bool(self.btc_filter_enabled),
                 "h1_enabled": bool(self.h1_enabled),
                 "supertrend_atr_length": self.supertrend_atr_length,
                 "supertrend_factor": self.supertrend_factor,
@@ -6384,6 +6402,7 @@ class TradingEngine:
         self.timeframe = "M15"
         self.trend_length = 9
         self.ema_filter_length = None
+        self.btc_filter_enabled = True
         self.h1_enabled = False
         self._h1_toggle_generation = 0
         self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
@@ -6687,7 +6706,8 @@ class TradingEngine:
             f"BUBBLES   : BLUE {blue}  ·  RED {red}  ·  NONE {no_signal}",
             f"REJECTED  : {rejected}",
             f"EXECUTION : NEW {created}  ·  FILLED {filled}  ·  DEFERRED {deferred}  ·  UNKNOWN {unknown}",
-            "H4 FILTER : close/ST/EMA100 strict alignment; invalid or mixed = consolidation skip",
+            "ALT H4 FILTER: close/ST/EMA100 strict alignment; invalid or mixed = consolidation skip",
+            f"BTC H4 FILTER: {stats.get('btc_filter_status', 'UNKNOWN')} (same ST10×2.5 + EMA100 rule)",
             f"ENTRY GUARD: MAX BLOCK {int(stats.get('max_blocked', 0))}",
             f"OTHER     : DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
             f"DURATION  : {elapsed:.1f}s",
@@ -6868,6 +6888,8 @@ class TradingEngine:
             log.info("[SCAN] cycle sebelumnya masih aktif; trigger ditahan.")
             return
         async with self._scan_cycle_lock:
+            if not self.scan_enabled:
+                return
             interval_ms = volumatic.TIMEFRAME_MS["M15"]
             trend_length = 9
             m15_st_atr = 14
@@ -6897,10 +6919,34 @@ class TradingEngine:
                 )
                 return
 
+            btc_filter_enabled = bool(self.btc_filter_enabled)
+            btc_h4_closed = None
+            btc_filter_status = "OFF"
+            if btc_filter_enabled:
+                btc_filter_status = "ON - DATA UNAVAILABLE (FAIL CLOSED)"
+                try:
+                    btc_h4_closed = await self.rest.get_klines(
+                        BTC_EMA_FILTER_SYMBOL, "4h", 499,
+                        volumatic.TIMEFRAME_MS["H4"], force_refresh=False,
+                    )
+                    if btc_h4_closed is None or len(btc_h4_closed) < volumatic.H4_EMA_LENGTH + 10:
+                        raise RuntimeError("BTC H4 history belum cukup untuk EMA100 + SuperTrend.")
+                    btc_filter_status = f"ON - DATA READY ({len(btc_h4_closed)} H4 candles)"
+                except BinanceRateLimitError as exc:
+                    self._scan_interrupted_by_cooldown = True
+                    self._scan_trigger_now = True
+                    await self._notify_binance_cooldown(
+                        exc, source="BTC H4 TREND FILTER", symbol=BTC_EMA_FILTER_SYMBOL
+                    )
+                    log.warning("[SCAN V4] BTC H4 filter fetch ditahan rate limit; scan cycle ditunda.")
+                    return
+                except Exception as exc:
+                    log.warning("[SCAN V4] BTC H4 filter unavailable; all new entries fail closed: %s", exc)
             log.info(
-                "[SCAN V4] start | M15 Volumatic LEN9 | H4 ST10x2.5 + EMA100 | "
-                "M15 ST14x2.5 | pairs=%s | batch_size=%s | cursor=%s",
-                len(universe), SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
+                "[SCAN V4] start | M15 Volumatic LEN9 | ALT H4 ST10x2.5 + EMA100 | "
+                "BTC H4 filter=%s | M15 ST14x2.5 | pairs=%s | batch_size=%s | cursor=%s",
+                "ON" if btc_filter_enabled else "OFF", len(universe),
+                SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
             )
             await self._expire_due_pending()
             offset = self._scan_resume_cursor
@@ -6924,13 +6970,19 @@ class TradingEngine:
                     "deferred": 0, "unknown": 0, "max_blocked": 0,
                     "duplicate": 0, "ema_blocked": 0, "h1_ema_blocked": 0,
                     "btc_ema_blocked": 0, "errors": 0, "details": [],
-                    "btc_filter_status": "NOT USED",
+                    "btc_filter_status": btc_filter_status,
                 }
                 interrupted = False
                 configuration_changed = False
                 for local_index, symbol in enumerate(batch):
                     absolute_index = offset + local_index
                     if not self._running or not self.scan_enabled:
+                        break
+                    if bool(self.btc_filter_enabled) != btc_filter_enabled:
+                        configuration_changed = True
+                        self._scan_resume_cursor = 0
+                        self._scan_resume_boundary_ms = 0
+                        self._scan_trigger_now = True
                         break
                     if self._binance_cooldown_remaining() > 0:
                         interrupted = True
@@ -6956,6 +7008,12 @@ class TradingEngine:
                         # confirmed M15 event model. This also catches/cancels
                         # opposite bubbles formed while an older trace is waiting.
                         await self._refresh_signal_trace_state(symbol, m15[:-1], 9)
+                        if bool(self.btc_filter_enabled) != btc_filter_enabled:
+                            configuration_changed = True
+                            self._scan_resume_cursor = 0
+                            self._scan_resume_boundary_ms = 0
+                            self._scan_trigger_now = True
+                            break
 
                         confirming_open_ms = int(m15["t"][-2])
                         forming_open_ms = int(m15["t"][-1])
@@ -6976,7 +7034,9 @@ class TradingEngine:
 
                         stats["analyzed"] += 1
                         signal = volumatic.detect_new_strategy_signal(
-                            m15, h4, symbol=symbol, trend_length=9
+                            m15, h4, symbol=symbol, trend_length=9,
+                            btc_h4_closed=btc_h4_closed,
+                            btc_filter_enabled=btc_filter_enabled,
                         )
                         self.last_processed_candles[key] = confirming_open_ms
                         if signal is None:
@@ -7000,11 +7060,12 @@ class TradingEngine:
                             stats["unknown"] += 1
                         elif outcome == "MAX_BLOCKED":
                             stats["max_blocked"] += 1
-                        elif outcome in {"DUPLICATE", "EXCHANGE_SLOT_EXISTS", "BANNED_SYMBOL", "MISSED"}:
+                        elif outcome in {"DUPLICATE", "EXCHANGE_SLOT_EXISTS", "BANNED_SYMBOL", "MISSED", "BTC_FILTER_CHANGED", "SCANNER_OFF"}:
                             stats["duplicate"] += 1
                         stats["details"].append(
                             f"#{absolute_index + 1:04d} {symbol} {bubble}/{direction} "
-                            f"H4={signal.get('trend')} entry={fmt_num(signal.get('entry_price'), 10)} "
+                            f"ALT-H4={signal.get('trend')} BTC-H4={signal.get('btc_trend', 'OFF')} "
+                            f"entry={fmt_num(signal.get('entry_price'), 10)} "
                             f"SL={fmt_num(signal.get('stop_loss'), 10)} TP=2R {outcome}"[:220]
                         )
                         stats["processed"] += 1
@@ -7080,6 +7141,14 @@ class TradingEngine:
         self, signal: dict[str, Any], expiry_ms: int, *, source: str
     ) -> str:
         """Dispatch one closed M15 bubble; name kept for launcher/runtime compatibility."""
+        if (
+            not self.scan_enabled
+            or (
+                "btc_filter_enabled" in signal
+                and bool(signal.get("btc_filter_enabled")) != bool(self.btc_filter_enabled)
+            )
+        ):
+            return "SCANNER_OFF" if not self.scan_enabled else "BTC_FILTER_CHANGED"
         pair = normalize_symbol(signal.get("symbol") or "")
         timeframe = "M15"
         direction = str(signal.get("direction") or "").upper()
@@ -7388,6 +7457,13 @@ class TradingEngine:
 
     async def _handle_signal(self, signal: dict[str, Any], expiry_ms: int) -> str:
         """Create a local retest watch at the visual Volumatic candle close."""
+        if not self.scan_enabled:
+            return "SCANNER_OFF"
+        if (
+            "btc_filter_enabled" in signal
+            and bool(signal.get("btc_filter_enabled")) != bool(self.btc_filter_enabled)
+        ):
+            return "BTC_FILTER_CHANGED"
         pair = normalize_symbol(signal.get("symbol") or "")
         direction = str(signal.get("direction") or "").upper()
         if not pair or direction not in {"LONG", "SHORT"}:
@@ -7424,6 +7500,13 @@ class TradingEngine:
         await self._cancel_opposite_signal_trace(pair, bubble)
 
         async with self._trade_lock:
+            if not self.scan_enabled:
+                return "SCANNER_OFF"
+            if (
+                "btc_filter_enabled" in signal
+                and bool(signal.get("btc_filter_enabled")) != bool(self.btc_filter_enabled)
+            ):
+                return "BTC_FILTER_CHANGED"
             if pair in self.banned_symbols:
                 return "BANNED_SYMBOL"
             # An existing filled position (REAL or PAPER) always wins over a new
@@ -7630,7 +7713,8 @@ class TradingEngine:
         never start a second MARKET execution.
         """
         if (
-            not self._running or self._real_route_waiting_user or trade.status != "PENDING" or not trade.real_intent
+            not self._running or not self.scan_enabled or self._real_route_waiting_user or trade.status != "PENDING" or not trade.real_intent
+            or trade.pending_cancel_reason == "SCANNER_OFF"
             or trade.real_enabled or trade.entry_inflight
         ):
             return
@@ -7679,6 +7763,11 @@ class TradingEngine:
                     log.warning("[ENTRY] %s preflight gagal (%s/%s); coba lagi: %s", trade.pair, attempts, MARKET_ENTRY_MAX_PRESEND_ATTEMPTS, exc)
         finally:
             trade.entry_inflight = False
+            if (not self.scan_enabled or trade.pending_cancel_reason == "SCANNER_OFF") and trade.status == "PENDING":
+                try:
+                    await self._cancel_pending_trade(trade, "SCANNER_OFF")
+                except Exception as exc:
+                    log.warning("[SCAN OFF] deferred pending cleanup %s belum terkonfirmasi: %s", trade.pair, exc)
 
     async def _abort_market_entry(self, trade: Trade, rejection: MarketEntryRejected) -> None:
         if trade.status != "PENDING":
@@ -7706,6 +7795,16 @@ class TradingEngine:
     async def _run_market_entry(self, trade: Trade, trigger_price: Decimal, source: str) -> None:
         if trade.status != "PENDING" or trade.real_enabled:
             return
+        if trade.pending_cancel_reason == "SCANNER_OFF":
+            raise MarketEntryRejected(
+                "SCANNER_OFF_BEFORE_ENTRY", "Setup dibuat sebelum scanner OFF; MARKET entry dibatalkan.",
+                result="CANCELED", notify=False,
+            )
+        if not self.scan_enabled:
+            raise MarketEntryRejected(
+                "SCANNER_OFF_BEFORE_ENTRY", "Scanner sudah OFF; MARKET entry baru tidak dikirim.",
+                result="CANCELED", notify=False,
+            )
         if trade.pair in self.banned_symbols:
             raise MarketEntryRejected(
                 "PERMANENT_SYMBOL_BAN",
@@ -7858,8 +7957,13 @@ class TradingEngine:
             raise MarketEntryRejected("QTY_ABOVE_MARKET_MAX", f"Qty {format_qty(quantity)} melebihi batas MARKET {format_qty(market_cap)}.")
 
         # Last synchronous safety gate immediately before committing the
-        # MARKET submission. /banned updates the set before waiting for this
+        # MARKET submission. /scan off and /banned update their gates before this
         # execution lock, so a preflight already in progress is stopped here.
+        if not self.scan_enabled or trade.pending_cancel_reason == "SCANNER_OFF":
+            raise MarketEntryRejected(
+                "SCANNER_OFF_BEFORE_ENTRY", "Scanner dimatikan saat preflight; MARKET entry tidak dikirim.",
+                result="CANCELED", notify=False,
+            )
         if trade.pair in self.banned_symbols:
             raise MarketEntryRejected(
                 "PERMANENT_SYMBOL_BAN",
@@ -8532,6 +8636,45 @@ class TradingEngine:
         all_cleared = True
         errors: list[str] = []
         terminal = {"CANCELED", "FINISHED", "REJECTED", "EXPIRED", "TRIGGERED"}
+        pending_trailing_client = str(trade.trailing_pending_algo_client_id or "").strip()
+        if pending_trailing_client:
+            try:
+                response = await self.real.cancel_algo_order(
+                    symbol=trade.pair, client_algo_id=pending_trailing_client
+                )
+                pending_status = str(response.get("algoStatus") or response.get("status") or "CANCELED").upper()
+                if pending_status in terminal:
+                    trade.trailing_pending_algo_client_id = None
+                    trade.trailing_pending_algo_trigger = None
+                else:
+                    all_cleared = False
+                    errors.append(f"Pending trailing SL cancel belum terminal ({pending_status})")
+            except BinanceRateLimitError as exc:
+                all_cleared = False
+                errors.append(f"Pending trailing SL: REST cooldown ({str(exc)[:140]})")
+            except Exception as exc:
+                # Lookup can prove it has already disappeared; otherwise keep its
+                # clientAlgoId persisted so cleanup can retry without losing identity.
+                try:
+                    existing = await self.real.get_algo_order(
+                        symbol=trade.pair, client_algo_id=pending_trailing_client
+                    )
+                    pending_status = str(existing.get("algoStatus") or existing.get("status") or "UNKNOWN").upper()
+                    if pending_status in terminal:
+                        trade.trailing_pending_algo_client_id = None
+                        trade.trailing_pending_algo_trigger = None
+                    else:
+                        all_cleared = False
+                        errors.append(f"Pending trailing SL tetap {pending_status}")
+                except BinanceAPIError as lookup_exc:
+                    all_cleared = False
+                    errors.append(
+                        "Pending trailing SL belum dapat dipastikan hilang "
+                        f"(lookup code {lookup_exc.code}); clientAlgoId dipertahankan untuk retry."
+                    )
+                except Exception as lookup_exc:
+                    all_cleared = False
+                    errors.append(f"Pending trailing SL: {str(lookup_exc)[:140]}")
         for kind, algo_id, client_id, status in (
             ("SL", trade.sl_algo_id, trade.sl_client_algo_id, trade.sl_algo_status),
             ("TP", trade.tp_algo_id, trade.tp_client_algo_id, trade.tp_algo_status),
@@ -9868,71 +10011,261 @@ class TradingEngine:
                 and trade.timeframe == "M15"
                 and trade.strategy_version == volumatic.STRATEGY_VERSION
             ):
-                await self._trail_trade_on_m15_close(trade, close_ms)
+                await self._trail_trade_on_m15_close(trade, close_ms, kline)
 
-    async def _trail_trade_on_m15_close(self, trade: Trade, close_ms: int) -> None:
+    async def _resolve_pending_trailing_stop(self, trade: Trade) -> bool:
+        """Resolve a previously submitted trailing SL by its durable clientAlgoId.
+
+        Returns True only after Binance confirms that the pending stop is active.
+        A missing/ambiguous lookup is deliberately NOT permission to POST again.
+        """
+        client_id = str(trade.trailing_pending_algo_client_id or "").strip()
+        if not client_id:
+            return True
+        if self._binance_cooldown_remaining() > 0:
+            trade.trailing_last_reason = "PENDING_TRAILING_SL_LOOKUP_WAITING_REST_COOLDOWN"
+            await self._save_active_state()
+            return False
+        try:
+            existing = await self.real.get_algo_order(
+                symbol=trade.pair, client_algo_id=client_id
+            )
+        except BinanceRateLimitError:
+            trade.trailing_last_reason = "PENDING_TRAILING_SL_LOOKUP_RATE_LIMIT"
+            await self._save_active_state()
+            return False
+        except Exception as exc:
+            # -2011/-2013 are still ambiguous here: the POST may have landed but
+            # Binance's lookup endpoint may not expose it yet. Never make a new POST.
+            trade.trailing_last_reason = f"PENDING_TRAILING_SL_ACK_UNKNOWN: {str(exc)[:100]}"
+            await self._save_active_state()
+            log.warning(
+                "[TRAIL SL] %s pending clientAlgoId=%s unresolved; no duplicate POST: %s",
+                trade.pair, client_id, exc,
+            )
+            return False
+
+        found_id = existing.get("algoId", existing.get("ai"))
+        status = str(existing.get("algoStatus") or existing.get("status") or "UNKNOWN").upper()
+        terminal = {"CANCELED", "FINISHED", "REJECTED", "EXPIRED", "TRIGGERED"}
+        if status in terminal:
+            if status in {"TRIGGERED", "FINISHED"}:
+                trade.protection_exit_reason = "STOP_LOSS"
+                trade.trailing_last_reason = f"PENDING_TRAILING_SL_{status}"
+            else:
+                trade.trailing_last_reason = f"PENDING_TRAILING_SL_NOT_ACTIVE: {status}"
+            # A terminal exchange status is definitive; a later candle may retry
+            # after a rejected/canceled stop. The old confirmed SL remains active.
+            trade.trailing_pending_algo_client_id = None
+            trade.trailing_pending_algo_trigger = None
+            await self._save_active_state()
+            return False
+        if found_id is None or status not in {"NEW", "WORKING"}:
+            trade.trailing_last_reason = f"PENDING_TRAILING_SL_ACK_UNKNOWN: {status}"
+            await self._save_active_state()
+            return False
+
+        previous_id = trade.sl_algo_id
+        previous_client = trade.sl_client_algo_id
+        if previous_id is not None or previous_client:
+            already_retired = any(
+                (previous_id is not None and item.get("algo_id") == previous_id)
+                or (previous_client and str(item.get("client_id") or "") == previous_client)
+                for item in trade.retired_sl_algo_orders
+            )
+            if not already_retired:
+                trade.retired_sl_algo_orders.append({"algo_id": previous_id, "client_id": previous_client})
+
+        trade.sl_algo_id = int(found_id)
+        trade.sl_client_algo_id = client_id
+        trade.sl_algo_status = status
+        if trade.trailing_pending_algo_trigger is not None:
+            trade.stop_loss = trade.trailing_pending_algo_trigger
+        trade.trailing_pending_algo_client_id = None
+        trade.trailing_pending_algo_trigger = None
+        trade.protection_state = "ACTIVE"
+        trade.protection_error = None
+        trade.trailing_last_reason = "PENDING_TRAILING_SL_CONFIRMED_BY_LOOKUP"
+        await self._save_active_state()
+        if trade.retired_sl_algo_orders:
+            if not await self._cleanup_retired_trailing_stops(trade):
+                trade.trailing_last_reason = "PENDING_TRAILING_SL_ACTIVE_OLD_SL_CLEANUP_PENDING"
+                await self._save_active_state()
+                return False
+        log.info(
+            "[TRAIL SL] %s pending trailing stop confirmed | algo=%s trigger=%s status=%s",
+            trade.pair, trade.sl_algo_id, trade.stop_loss, status,
+        )
+        return True
+
+    async def _trail_trade_on_m15_close(self, trade: Trade, close_ms: int, closed_kline: dict[str, Any]) -> None:
         if trade.real_enabled:
             lock = self._protection_locks.setdefault(trade.trade_id, asyncio.Lock())
             async with lock:
-                await self._trail_trade_on_m15_close_impl(trade, close_ms)
+                await self._trail_trade_on_m15_close_impl(trade, close_ms, closed_kline)
         else:
-            await self._trail_trade_on_m15_close_impl(trade, close_ms)
+            await self._trail_trade_on_m15_close_impl(trade, close_ms, closed_kline)
 
-    async def _trail_trade_on_m15_close_impl(self, trade: Trade, close_ms: int) -> None:
+    async def _trail_trade_on_m15_close_impl(
+        self, trade: Trade, close_ms: int, closed_kline: dict[str, Any]
+    ) -> None:
+        """Trail from the exact WebSocket-confirmed M15 close, never a stale cache row."""
         if trade.status != "FILLED" or trade.strategy_version != volumatic.STRATEGY_VERSION:
             return
-        if int(close_ms) <= int(trade.trailing_last_close_ms or 0):
+        close_ms = int(close_ms)
+        if close_ms <= int(trade.trailing_last_close_ms or 0):
             return
+        interval_ms = int(volumatic.TIMEFRAME_MS["M15"])
+        expected_open_ms = close_ms - interval_ms
         try:
+            event_open = int(closed_kline["t"])
+            if event_open != expected_open_ms or closed_kline.get("x") is not True:
+                raise ValueError("WebSocket M15 closed candle timestamp tidak sesuai dengan close event.")
+            event_row = np.asarray([(
+                event_open,
+                float(closed_kline["o"]), float(closed_kline["h"]),
+                float(closed_kline["l"]), float(closed_kline["c"]),
+                float(closed_kline.get("v") or 0.0), float(closed_kline.get("q") or 0.0),
+            )], dtype=KLINE_CACHE_DTYPE)
+            if not np.all(np.isfinite(np.asarray([
+                event_row["o"][0], event_row["h"][0], event_row["l"][0],
+                event_row["c"][0], event_row["v"][0], event_row["qv"][0],
+            ], dtype=np.float64))):
+                raise ValueError("OHLCV pada candle M15 penutup tidak finite.")
+            if (
+                event_row["o"][0] <= 0 or event_row["l"][0] <= 0
+                or event_row["h"][0] < max(event_row["o"][0], event_row["c"][0], event_row["l"][0])
+                or event_row["l"][0] > min(event_row["o"][0], event_row["c"][0], event_row["h"][0])
+            ):
+                raise ValueError("OHLC candle M15 penutup tidak valid.")
+
             history = await self.rest.get_klines(
                 trade.pair, "15m", self._kline_history_limit(9, 14),
-                volumatic.TIMEFRAME_MS["M15"], force_refresh=False,
+                interval_ms, force_refresh=False,
             )
             if history is None or len(history) < 20:
-                return
+                history = await self.rest.get_klines(
+                    trade.pair, "15m", self._kline_history_limit(9, 14),
+                    interval_ms, force_refresh=True,
+                )
+            if history is None or len(history) < 20:
+                raise RuntimeError("History M15 tidak cukup untuk menghitung SuperTrend ATR14.")
+
+            # Retain only data through this exact candle; if the cache is stale,
+            # insert/replace the x=True WS row as the last indicator input.
+            matches = np.flatnonzero(np.asarray(history["t"], dtype=np.int64) == event_open)
+            if matches.size:
+                history = np.asarray(history[:int(matches[-1]) + 1], dtype=KLINE_CACHE_DTYPE).copy()
+                history[-1] = event_row[0]
+            elif int(history["t"][-1]) < event_open and int(history["t"][-1]) + interval_ms == event_open:
+                history = np.concatenate((history, event_row))
+            else:
+                history = await self.rest.get_klines(
+                    trade.pair, "15m", self._kline_history_limit(9, 14),
+                    interval_ms, force_refresh=True,
+                )
+                if history is None or len(history) < 20:
+                    raise RuntimeError("REST refresh M15 gagal mengembalikan history yang cukup.")
+                matches = np.flatnonzero(np.asarray(history["t"], dtype=np.int64) == event_open)
+                if not matches.size:
+                    raise RuntimeError(
+                        f"Candle WS open={event_open} tidak ditemukan di history REST dan tidak bisa disambung tanpa gap."
+                    )
+                history = np.asarray(history[:int(matches[-1]) + 1], dtype=KLINE_CACHE_DTYPE).copy()
+                history[-1] = event_row[0]
+
+            if int(history["t"][-1]) != event_open:
+                raise RuntimeError("Candle M15 terakhir bukan candle yang memicu trailing.")
+            if len(history) > 1 and np.any(np.diff(history["t"]) != interval_ms):
+                raise RuntimeError("History M15 mengandung gap; trailing ditahan sampai data lengkap.")
+
             line, _direction = volumatic.calculate_supertrend(
                 history, atr_length=14, factor=2.5
             )
-            interval_ms = volumatic.TIMEFRAME_MS["M15"]
+            latest_st_float = float(line[-1]) if len(line) else float("nan")
+            if not math.isfinite(latest_st_float) or latest_st_float <= 0:
+                raise RuntimeError("Nilai SuperTrend ATR14×2.5 candle terakhir tidak valid.")
+            latest_st = Decimal(str(latest_st_float))
+            latest_close = Decimal(str(history["c"][-1]))
+            if latest_close <= 0:
+                raise RuntimeError("Close candle M15 terakhir tidak valid.")
+
             candle_close_times = np.asarray(history["t"], dtype=np.int64) + interval_ms
-            candle_close_ms = int(candle_close_times[-1]) if len(candle_close_times) else 0
-            if candle_close_ms < int(close_ms):
-                return
+            if int(candle_close_times[-1]) != close_ms:
+                raise RuntimeError("Waktu close history M15 tidak sama dengan event WebSocket.")
             last_processed_ms = int(trade.trailing_last_close_ms or 0)
             if last_processed_ms <= 0 and trade.filled_at is not None:
                 fill_ms = int(trade.filled_at.timestamp() * 1000)
                 last_processed_ms = (fill_ms // interval_ms) * interval_ms
             eligible = np.flatnonzero(
                 (candle_close_times > last_processed_ms)
-                & (candle_close_times <= int(close_ms))
-                & np.isfinite(line)
-                & (line > 0)
+                & (candle_close_times <= close_ms)
+                & np.isfinite(line) & (line > 0)
             )
             if not eligible.size:
+                trade.trailing_last_st = latest_st
+                trade.trailing_last_reason = "NO_NEW_CLOSED_M15_CANDLE_AFTER_FILL"
+                trade.trailing_last_close_ms = close_ms
+                await self._save_active_state()
                 return
             processed_close_ms = int(candle_close_times[int(eligible[-1])])
+            if processed_close_ms != close_ms:
+                raise RuntimeError("Trailing replay belum mencapai candle M15 penutup terbaru.")
         except BinanceRateLimitError:
+            trade.trailing_last_reason = "WAITING_BINANCE_REST_COOLDOWN"
+            await self._save_active_state()
             return
         except Exception as exc:
-            log.warning("[TRAIL SL] %s ST calculation deferred: %s", trade.pair, exc)
+            trade.trailing_last_reason = f"M15_ST_CALCULATION_ERROR: {str(exc)[:110]}"
+            await self._save_active_state()
+            log.warning("[TRAIL SL] %s candle close %s tidak diproses: %s", trade.pair, close_ms, exc)
             return
 
         old_stop = trade.stop_loss or trade.reference_sl
         if old_stop is None:
+            trade.trailing_last_st = latest_st
+            trade.trailing_last_reason = "CURRENT_SL_NOT_AVAILABLE"
+            await self._save_active_state()
             return
-        live = self._current_price(trade.pair) or Decimal(str(history["c"][-1]))
-        # If REST was cooling down across multiple M15 closes, replay every
-        # missed SuperTrend level and select the tightest still-valid stop.
-        # This prevents a later, looser ST value from erasing an earlier trail.
-        trail_values = [Decimal(str(line[int(i)])) for i in eligible]
+        if trade.real_enabled and trade.trailing_pending_algo_client_id:
+            if not await self._resolve_pending_trailing_stop(trade):
+                trade.trailing_last_st = latest_st
+                await self._save_active_state()
+                return
+            old_stop = trade.stop_loss or trade.reference_sl or old_stop
+        live = self._current_price(trade.pair) or latest_close
+        # The user's rule is exact: each close uses this candle's own ST line.
+        # Do not substitute an older, more aggressive ST from a missed candle.
         if trade.direction == "LONG":
-            candidates = [value for value in trail_values if value > old_stop and value < live]
-            candidate = max(candidates) if candidates else Decimal("0")
+            candidate = latest_st if old_stop < latest_st < live else None
+            no_move_reason = (
+                "LATEST_ST_NOT_TIGHTER_THAN_CURRENT_SL" if latest_st <= old_stop else
+                "LATEST_ST_NOT_BELOW_LIVE_PRICE" if latest_st >= live else
+                "LATEST_ST_INVALID_FOR_TRAILING"
+            )
         else:
-            candidates = [value for value in trail_values if value < old_stop and value > live]
-            candidate = min(candidates) if candidates else Decimal("0")
-        if candidate <= 0:
+            candidate = latest_st if live < latest_st < old_stop else None
+            no_move_reason = (
+                "LATEST_ST_NOT_TIGHTER_THAN_CURRENT_SL" if latest_st >= old_stop else
+                "LATEST_ST_NOT_ABOVE_LIVE_PRICE" if latest_st <= live else
+                "LATEST_ST_INVALID_FOR_TRAILING"
+            )
+
+        if candidate is None:
+            trade.trailing_last_st = latest_st
+            trade.trailing_last_reason = no_move_reason
             trade.trailing_last_close_ms = processed_close_ms
+            await self._record_event(
+                "TRAILING_SL_NOT_MOVED", trade,
+                current_sl=decimal_to_str(old_stop), latest_m15_st=decimal_to_str(latest_st),
+                latest_m15_close=decimal_to_str(latest_close), live_price=decimal_to_str(live),
+                reason=no_move_reason, m15_close_time_ms=close_ms,
+                detail="Trailing hanya memperketat SL; ST yang tidak lebih ketat tidak mengganti SL aktif.",
+            )
+            log.info(
+                "[TRAIL SL] %s %s unchanged | current=%s | latest M15 ST=%s | live=%s | reason=%s",
+                trade.pair, trade.direction, old_stop, latest_st, live, no_move_reason,
+            )
             await self._save_active_state()
             return
 
@@ -9941,43 +10274,76 @@ class TradingEngine:
             try:
                 filters = await self.rest.get_symbol_filters(trade.pair)
                 tick = Decimal(str(filters.get("tick_size") or "0"))
+            except BinanceRateLimitError:
+                trade.trailing_last_st = latest_st
+                trade.trailing_last_reason = "WAITING_TICKSIZE_BINANCE_REST_COOLDOWN"
+                await self._save_active_state()
+                return
             except Exception as exc:
+                trade.trailing_last_st = latest_st
+                trade.trailing_last_reason = f"TICKSIZE_LOOKUP_ERROR: {str(exc)[:100]}"
+                await self._save_active_state()
                 log.warning("[TRAIL SL] %s tickSize unavailable: %s", trade.pair, exc)
                 return
         else:
             tick = meta.tick_size
         if tick <= 0:
+            trade.trailing_last_st = latest_st
+            trade.trailing_last_reason = "INVALID_TICK_SIZE"
+            await self._save_active_state()
             return
         new_stop = (
             quantized_price(candidate, tick) if trade.direction == "LONG"
             else quantized_price_ceiling(candidate, tick)
         )
-        if trade.direction == "LONG" and not (old_stop < new_stop < live):
-            trade.trailing_last_close_ms = processed_close_ms
-            await self._save_active_state()
-            return
-        if trade.direction == "SHORT" and not (live < new_stop < old_stop):
+        valid_new_stop = (
+            old_stop < new_stop < live if trade.direction == "LONG"
+            else live < new_stop < old_stop
+        )
+        if not valid_new_stop:
+            trade.trailing_last_st = latest_st
+            trade.trailing_last_reason = "CANDIDATE_INVALID_AFTER_TICKSIZE_ROUNDING"
             trade.trailing_last_close_ms = processed_close_ms
             await self._save_active_state()
             return
 
         if not trade.real_enabled:
             trade.stop_loss = new_stop
+            trade.trailing_last_st = latest_st
+            trade.trailing_last_reason = "UPDATED_PAPER_FROM_LATEST_M15_ST"
             trade.trailing_last_close_ms = processed_close_ms
             await self._record_event(
                 "PAPER_TRAILING_SL_UPDATED", trade,
                 previous_sl=decimal_to_str(old_stop), new_sl=decimal_to_str(new_stop),
-                m15_close_time_ms=int(close_ms),
+                latest_m15_st=decimal_to_str(latest_st),
+                candidate_st=decimal_to_str(candidate), m15_close_time_ms=close_ms,
             )
             await self._save_active_state()
+            log.info(
+                "[TRAIL SL] %s PAPER updated %s -> %s | latest M15 ST=%s",
+                trade.pair, old_stop, new_stop, latest_st,
+            )
             return
 
         if self._binance_cooldown_remaining() > 0 or self._real_ip_permission_blocked_for_current_route():
+            trade.trailing_last_st = latest_st
+            trade.trailing_last_reason = "WAITING_BINANCE_REST_OR_IP_PERMISSION"
+            await self._save_active_state()
             return
         if trade.retired_sl_algo_orders:
             if not await self._cleanup_retired_trailing_stops(trade):
+                trade.trailing_last_st = latest_st
+                trade.trailing_last_reason = "WAITING_OLD_SL_CANCELLATION_CONFIRMATION"
+                await self._save_active_state()
                 return
         if trade.protection_state != "ACTIVE" or trade.sl_algo_id is None:
+            trade.trailing_last_st = latest_st
+            trade.trailing_last_reason = f"BINANCE_PROTECTION_NOT_ACTIVE: {trade.protection_state}"
+            await self._save_active_state()
+            log.warning(
+                "[TRAIL SL] %s skip update; protection=%s sl_algo_id=%s",
+                trade.pair, trade.protection_state, trade.sl_algo_id,
+            )
             return
 
         # Install the tighter stop FIRST. Only after Binance acknowledges it do
@@ -9985,41 +10351,54 @@ class TradingEngine:
         previous_id = trade.sl_algo_id
         previous_client = trade.sl_client_algo_id
         new_client = f"VTSL{uuid4().hex[:28]}"[:36]
+        # Durable intent before POST: if the response is lost or process restarts,
+        # the same clientAlgoId is looked up rather than sending a duplicate SL.
+        trade.trailing_pending_algo_client_id = new_client
+        trade.trailing_pending_algo_trigger = new_stop
+        trade.trailing_last_reason = "TRAILING_SL_SUBMITTING"
+        await self._save_active_state()
         close_side = "SELL" if trade.direction == "LONG" else "BUY"
         try:
             response = await self.real.place_algo_order(
-                symbol=trade.pair,
-                side=close_side,
-                order_type="STOP_MARKET",
-                trigger_price=new_stop,
-                position_side=trade.position_side or "BOTH",
-                client_algo_id=new_client,
-                working_type="CONTRACT_PRICE",
+                symbol=trade.pair, side=close_side, order_type="STOP_MARKET",
+                trigger_price=new_stop, position_side=trade.position_side or "BOTH",
+                client_algo_id=new_client, working_type="CONTRACT_PRICE",
             )
             new_id = response.get("algoId", response.get("ai"))
             new_status = str(response.get("algoStatus") or response.get("status") or "NEW").upper()
         except BinanceRateLimitError:
+            trade.trailing_last_st = latest_st
+            trade.trailing_last_reason = "BINANCE_RATE_LIMIT_WHILE_UPDATING_SL_PENDING_LOOKUP_REQUIRED"
+            await self._save_active_state()
             return
         except Exception as submit_exc:
-            # Transport ambiguity is resolved by clientAlgoId lookup only; do not
-            # submit another stop with a different identifier.
             try:
                 found = await self.real.get_algo_order(
                     symbol=trade.pair, client_algo_id=new_client
                 )
                 new_id = found.get("algoId", found.get("ai"))
                 new_status = str(found.get("algoStatus") or found.get("status") or "UNKNOWN").upper()
-            except Exception:
+            except Exception as lookup_exc:
+                trade.trailing_last_st = latest_st
+                trade.trailing_last_reason = f"NEW_SL_ACK_UNKNOWN: {str(lookup_exc)[:90]}"
+                await self._save_active_state()
                 log.warning("[TRAIL SL] %s new SL acknowledgement unknown; old SL kept: %s", trade.pair, submit_exc)
                 return
 
-        if new_id is None or new_status in {"REJECTED", "CANCELED", "EXPIRED", "FINISHED", "TRIGGERED"}:
+        terminal_sl_statuses = {"REJECTED", "CANCELED", "EXPIRED", "FINISHED", "TRIGGERED"}
+        if new_id is None or new_status not in {"NEW", "WORKING"}:
+            trade.trailing_last_st = latest_st
+            trade.trailing_last_reason = f"NEW_SL_NOT_CONFIRMED: {new_status}"
+            if new_status in terminal_sl_statuses:
+                trade.trailing_pending_algo_client_id = None
+                trade.trailing_pending_algo_trigger = None
+                trade.trailing_last_close_ms = processed_close_ms
+                if new_status in {"FINISHED", "TRIGGERED"}:
+                    trade.protection_exit_reason = "STOP_LOSS"
+            await self._save_active_state()
             log.warning("[TRAIL SL] %s new SL not confirmed (%s); old SL kept.", trade.pair, new_status)
             return
 
-        # Persist the old stop in the retirement ledger BEFORE overwriting its
-        # active ID. This closes the restart window in which the wider old SL
-        # could remain live but no longer be referenced by local state.
         if previous_id is not None or previous_client:
             already_retired = any(
                 (previous_id is not None and item.get("algo_id") == previous_id)
@@ -10032,23 +10411,32 @@ class TradingEngine:
         trade.sl_algo_id = int(new_id)
         trade.sl_client_algo_id = new_client
         trade.sl_algo_status = new_status
+        trade.trailing_pending_algo_client_id = None
+        trade.trailing_pending_algo_trigger = None
         trade.stop_loss = new_stop
+        trade.trailing_last_st = latest_st
+        trade.trailing_last_reason = "UPDATED_REAL_FROM_LATEST_M15_ST"
         trade.trailing_last_close_ms = processed_close_ms
         trade.protection_state = "ACTIVE"
         trade.protection_error = None
         await self._record_event(
             "REAL_TRAILING_SL_UPDATED", trade,
             previous_sl=decimal_to_str(old_stop), new_sl=decimal_to_str(new_stop),
+            latest_m15_st=decimal_to_str(latest_st), candidate_st=decimal_to_str(candidate),
             previous_algo_id=previous_id, new_algo_id=trade.sl_algo_id,
-            m15_close_time_ms=int(close_ms),
+            m15_close_time_ms=close_ms,
         )
         await self._save_active_state()
+        log.info(
+            "[TRAIL SL] %s REAL updated %s -> %s | latest M15 ST=%s | new algo=%s",
+            trade.pair, old_stop, new_stop, latest_st, trade.sl_algo_id,
+        )
 
-        # New tighter SL is live. The previous wider order is now durably listed;
-        # remove it and keep its ID until Binance confirms a terminal status.
         if trade.retired_sl_algo_orders:
             cleaned = await self._cleanup_retired_trailing_stops(trade)
             if not cleaned:
+                trade.trailing_last_reason = "UPDATED_REAL_OLD_SL_CLEANUP_PENDING"
+                await self._save_active_state()
                 log.warning(
                     "[TRAIL SL] %s new SL active at %s; old SL cleanup remains pending and will be retried.",
                     trade.pair, new_stop,
@@ -10269,6 +10657,11 @@ class TradingEngine:
         return
 
     async def _retry_signals(self) -> None:
+        if not self.scan_enabled:
+            if self._signal_retries:
+                self._signal_retries.clear()
+                await self._save_runtime_settings()
+            return
         if (
             not self._signal_retries
             or self._real_route_waiting_user
@@ -10662,12 +11055,15 @@ class TradingEngine:
         await self._check_signal_trace_touch(symbol, price)
 
     async def _check_signal_trace_touch(self, symbol: str, price: Decimal) -> None:
-        """Watch target retests independently of scanner execution."""
+        """Watch target retests independently while new-entry scanning is armed."""
+        if not self.scan_enabled:
+            return
         now = now_utc()
         for trade in list(self.active_trades.values()):
             if (
                 trade.pair != symbol or trade.status != "PENDING"
                 or trade.entry_inflight or trade.real_enabled or trade.entry_touch_missed
+                or trade.pending_cancel_reason == "SCANNER_OFF"
                 or trade.strategy_version != volumatic.STRATEGY_VERSION
             ):
                 continue
@@ -10734,8 +11130,8 @@ class TradingEngine:
 
     def _schedule_paper_touch_entry(self, trade: Trade, price: Decimal, source: str) -> None:
         if (
-            not self._running or trade.status != "PENDING" or trade.entry_inflight
-            or trade.real_intent or trade.real_enabled
+            not self._running or not self.scan_enabled or trade.status != "PENDING" or trade.entry_inflight
+            or trade.real_intent or trade.real_enabled or trade.pending_cancel_reason == "SCANNER_OFF"
         ):
             return
         trade.entry_inflight = True
@@ -10752,6 +11148,9 @@ class TradingEngine:
         try:
             async with self._entry_exec_lock:
                 if trade.status != "PENDING":
+                    return
+                if trade.pending_cancel_reason == "SCANNER_OFF" or not self.scan_enabled:
+                    await self._cancel_pending_trade(trade, "SCANNER_OFF_BEFORE_PAPER_ENTRY")
                     return
                 if now_utc() >= trade.expires_at:
                     await self._cancel_pending_trade(trade, "SIGNAL_TRACE_EXPIRED_BEFORE_PAPER_FILL")
@@ -10777,6 +11176,9 @@ class TradingEngine:
                 # PAPER simulates a MARKET order at the observed touch tick,
                 # not a resting LIMIT fill at the theoretical target. TP is then
                 # calculated from this simulated average fill and initial risk.
+                if not self.scan_enabled or trade.pending_cancel_reason == "SCANNER_OFF":
+                    await self._cancel_pending_trade(trade, "SCANNER_OFF_BEFORE_PAPER_COMMIT")
+                    return
                 market_fill = trade.entry_trigger_price or trade.entry
                 stop = trade.reference_sl or trade.stop_loss
                 if stop is None or (
@@ -10800,6 +11202,11 @@ class TradingEngine:
             log.exception("[PAPER ENTRY] %s gagal diproses: %s", trade.pair, exc)
         finally:
             trade.entry_inflight = False
+            if (not self.scan_enabled or trade.pending_cancel_reason == "SCANNER_OFF") and trade.status == "PENDING":
+                try:
+                    await self._cancel_pending_trade(trade, "SCANNER_OFF")
+                except Exception as exc:
+                    log.warning("[SCAN OFF] deferred PAPER trace cleanup %s failed: %s", trade.pair, exc)
 
     @staticmethod
     def _exchange_event_time(row: dict[str, Any]) -> datetime:
@@ -11818,7 +12225,7 @@ class TradingEngine:
             await self.reply(
                 "VOLUMATIC SCAN STATUS\n\n"
                 f"State: {state}\n"
-                "Strategy: H4 ST10×2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual bubble\n"
+                "Strategy: ALT H4 ST10×2.5 + EMA100; BTC H4 filter " + ("ON" if self.btc_filter_enabled else "OFF") + "; M15 Volumatic LEN9\n"
                 "Entry: close candle marker → retest → MARKET; trace 4 candles total\n"
                 "SL: M15 ST14×2.5 trailing per candle close · TP: fixed 2R\n"
                 f"Active positions: {positions}/{self.max_active_trades}\n"
@@ -11936,8 +12343,8 @@ class TradingEngine:
             )
             return
 
-        self.scan_enabled = enable
         if enable:
+            self.scan_enabled = True
             # Manual /scan on and a pending schedule can coexist. The schedule
             # remains armed and will execute /scan on again at its selected slot.
             await self.ws.start()
@@ -11948,23 +12355,97 @@ class TradingEngine:
                 ",".join(self.scan_schedule_slots) if self.scan_schedule_waiting else "none",
             )
             await self.reply(
-                f"🟢 Scanner ON • M15 Volumatic / H4 EMA • batch {SCAN_MAX_PAIRS_PER_CYCLE} "
-                "• Strategy v4: H4 ST10×2.5 + EMA100; M15 Volumatic LEN9 retest entry; ST14×2.5 trailing SL; fixed TP 2R. Pending trace tidak memakai slot; scanner tetap memindai saat MAX penuh."
+                f"🟢 Scanner ON • batch {SCAN_MAX_PAIRS_PER_CYCLE} • BTC H4 filter {'ON' if self.btc_filter_enabled else 'OFF'}\n"
+                "ALT H4: ST10×2.5 + EMA100; M15 Volumatic LEN9 retest → MARKET; M15 ST14×2.5 trailing SL; fixed TP 2R. Pending trace tidak memakai slot; scanner tetap memindai saat MAX penuh."
             )
         else:
-            self._scanner_symbols.clear()
-            self._scan_trigger_now = False
-            self.scan_schedule_waiting = False
-            self.scan_schedule_slots = ()
-            self.scan_schedule_armed_at = None
-            self.scan_schedule_activated_at = None
-            self._scan_schedule_last_fired_minute = None
+            # Acquire the same lock used by _handle_signal so no new trace can be
+            # inserted after OFF has been committed and pending cleanup begins.
+            async with self._trade_lock:
+                self.scan_enabled = False
+                self._scanner_symbols.clear()
+                self._scan_trigger_now = False
+                self._signal_retries.clear()
+                self.scan_schedule_waiting = False
+                self.scan_schedule_slots = ()
+                self.scan_schedule_armed_at = None
+                self.scan_schedule_activated_at = None
+                self._scan_schedule_last_fired_minute = None
+                pending_to_cancel = [
+                    trade for trade in self.active_trades.values()
+                    if trade.status == "PENDING"
+                ]
+                for pending_trade in pending_to_cancel:
+                    pending_trade.pending_cancel_reason = "SCANNER_OFF"
+
+            canceled = 0
+            in_flight = 0
+            failed: list[str] = []
+            for pending_trade in pending_to_cancel:
+                if pending_trade.status != "PENDING":
+                    continue
+                if pending_trade.entry_inflight:
+                    # A MARKET POST already past its synchronous commit point
+                    # cannot be recalled. The task is gated before any not-yet-
+                    # submitted POST; a committed order remains exchange-managed.
+                    in_flight += 1
+                    continue
+                try:
+                    await self._cancel_pending_trade(pending_trade, "SCANNER_OFF")
+                    if pending_trade.status != "PENDING":
+                        canceled += 1
+                    else:
+                        failed.append(pending_trade.pair)
+                except BinanceRateLimitError:
+                    failed.append(pending_trade.pair)
+                except Exception as exc:
+                    failed.append(pending_trade.pair)
+                    log.warning("[SCAN OFF] pending %s cancellation not confirmed: %s", pending_trade.pair, exc)
+            await self._save_active_state()
+            details = (
+                f"Pending setup/order dibatalkan: {canceled}."
+                + (f" In-flight execution: {in_flight} (sedang direkonsiliasi; order yang sudah dikirim tidak bisa ditarik dari sisi lokal)." if in_flight else "")
+                + (f" Belum terkonfirmasi dibatalkan: {', '.join(sorted(set(failed)))}." if failed else "")
+            )
             await self.reply(
-                "🟡 Scanner OFF. Bubble baru tidak dipindai; posisi dan pending order "
-                "tetap dimonitor via WebSocket/maintenance. Jadwal tertunda dibersihkan."
+                "🟡 SCANNER OFF — ENTRY BARU DIKUNCI\n"
+                f"{details}\n"
+                "Posisi FILLED tetap dikelola: WebSocket, TP/SL Binance, dan trailing M15 tetap aktif. "
+                "Jadwal dan retry signal dibersihkan."
             )
         await self._sync_ws_symbols()
         await self._save_runtime_settings()
+
+    async def _handle_btc_filter(self, text: str) -> None:
+        parts = str(text or "").split()
+        action = parts[1].lower() if len(parts) > 1 else "status"
+        if action == "status":
+            await self.reply(
+                f"BTC H4 TREND FILTER: {'ON' if self.btc_filter_enabled else 'OFF'}\n"
+                "Rule sama dengan ALT H4: LONG jika EMA100 < ST10×2.5 < Close; "
+                "SHORT jika Close < ST10×2.5 < EMA100.\n"
+                "Jika ON, arah BTC H4 wajib sama dengan trend ALT dan bubble M15. "
+                "Jika OFF, hanya gerbang BTC yang dilewati; filter ALT tetap wajib.\n"
+                "Command: /BTC ON atau /BTC OFF"
+            )
+            return
+        if action not in {"on", "off"} or len(parts) != 2:
+            await self.reply("Gunakan /BTC ON, /BTC OFF, atau /BTC untuk melihat status.")
+            return
+        enabled = action == "on"
+        if enabled == self.btc_filter_enabled:
+            await self.reply(f"BTC H4 Trend Filter sudah {'ON' if enabled else 'OFF'}; tidak ada perubahan.")
+            return
+        self.btc_filter_enabled = enabled
+        self._scan_resume_cursor = 0
+        self._scan_resume_boundary_ms = 0
+        self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+        await self._save_runtime_settings()
+        await self.reply(
+            f"{'🟢' if enabled else '🟡'} BTC H4 TREND FILTER {'ON' if enabled else 'OFF'}.\n"
+            + ("Pair ALT hanya lolos jika arah BTC H4 sejalan dengan trend ALT dan bubble M15." if enabled
+               else "Filter BTC dilewati. Filter trend H4 ALT tetap wajib aktif.")
+        )
 
     async def _handle_max(self, text: str) -> None:
         parts = text.split()
@@ -12221,7 +12702,9 @@ class TradingEngine:
             format_wib(datetime.fromtimestamp(trade.trailing_last_close_ms / 1000.0, tz=timezone.utc))
             if trade.trailing_last_close_ms else "menunggu close M15 pertama"
         )
-        return f"TRAILING SL: M15 SuperTrend ATR14×2.5 • last update: {last}"
+        latest_st = fmt_price(trade.trailing_last_st) if trade.trailing_last_st is not None else "belum dihitung"
+        reason = str(trade.trailing_last_reason or "menunggu candle close berikutnya")
+        return f"TRAILING SL: M15 SuperTrend ATR14×2.5 • last update: {last} • ST terakhir: {latest_st} • state: {reason}"
 
     async def show_trades(self) -> None:
         snapshot_note = await self._refresh_exchange_open_orders_for_trade_view()
@@ -12879,7 +13362,9 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            "Trend filter: H4 SuperTrend ATR10×2.5 + EMA100 close\nVolumatic: M15 LEN9 visual marker (Pine offset -1)\nEntry: close candle marker ketika retest; MARKET segera; trace 4 candle total\nSL: M15 SuperTrend ATR14×2.5, trailing setiap close M15\nTP: fixed 2R dari actual fill dan initial risk\nScanner: " + ('ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')) + "\n"
+            "ALT trend filter: H4 SuperTrend ATR10×2.5 + EMA100 close\n"
+            f"BTC H4 trend filter: {'ON' if self.btc_filter_enabled else 'OFF'} (/BTC ON|OFF)\n"
+            "Volumatic: M15 LEN9 visual marker (Pine offset -1)\nEntry: close candle marker ketika retest; MARKET segera; trace 4 candle total\nSL: M15 SuperTrend ATR14×2.5, trailing setiap close M15\nTP: fixed 2R dari actual fill dan initial risk\nScanner: " + ('ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')) + "\n"
             f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending setups (not counted): {pending} | Active positions: {filled}/{self.max_active_trades} | Live LIMITs: {live_limits}\n"
@@ -12978,6 +13463,7 @@ class TradingEngine:
             "COMMAND VOLUMATIC TREND V4\n\n"
             "/scan on|off|status - aktifkan/nonaktifkan/cek scanner\n"
             "/scan schedule - jadwal scanner WIB; pilih dengan /scan schedule 1,3,6\n"
+            "/BTC ON|OFF|status - aktif/nonaktif filter trend BTC H4\n"
             "/timeframe - lihat timeframe dan parameter strategi yang dikunci\n"
             "/max [angka] - batas posisi aktif Binance/PAPER\n"
             "/trade - lihat retest trace, posisi, TP/SL, dan trailing stop\n"
@@ -13001,6 +13487,7 @@ class TradingEngine:
             "/resetstats - arsipkan lalu reset statistik trade\n"
             "/reset CONFIRM - reset history/event/catatan (tanpa mengubah posisi)\n"
             "/status - status sistem\n/help - bantuan\n\n"
+            f"BTC H4 FILTER: {'ON' if self.btc_filter_enabled else 'OFF'} (/BTC ON|OFF). Jika ON, arah BTC harus sama dengan ALT.\n"
             "STRATEGI TERKUNCI: SHORT jika Close H4 < ST10×2.5 < EMA100; LONG jika EMA100 < ST10×2.5 < Close H4. "
             "H4 selain kondisi tersebut dianggap konsolidasi. Pada M15, bubble Volumatic LEN9 harus searah trend. "
             "Entry adalah close candle visual marker (Pine offset -1), hanya ketika harga retest dari sisi pendekatan yang benar. "
@@ -13019,6 +13506,7 @@ class TradingEngine:
             return
         if command == "/timeframe": await self._handle_timeframe(text)
         elif command == "/scan": await self._handle_scan(text)
+        elif command == "/btc": await self._handle_btc_filter(text)
         elif command == "/max": await self._handle_max(text)
         elif command == "/margin": await self._handle_margin(text)
         elif command == "/min": await self._handle_min(text)
