@@ -294,3 +294,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T02:18:40.045753+00:00 | Reason: SIZE_REJECTED
+## APTUSDT LONG — CANCELED
+- Trade ID: `APTUSDT-20261124-091900-472A8C`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T02:19:06.257263+00:00 | Reason: SIZE_REJECTED
