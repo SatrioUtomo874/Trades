@@ -18,3 +18,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T18:30:00.123994+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## 0GUSDT SHORT — EXPIRED
+- Trade ID: `0GUSDT-20261125-010004-A7CAF3`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T18:30:00.308887+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
