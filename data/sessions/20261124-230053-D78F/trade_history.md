@@ -930,3 +930,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T22:15:40.265680+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## LQTYUSDT SHORT — EXPIRED
+- Trade ID: `LQTYUSDT-20261125-045131-669574`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T22:15:51.940395+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
