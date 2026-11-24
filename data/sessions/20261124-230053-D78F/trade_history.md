@@ -1110,3 +1110,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:31:50.573184+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PIXELUSDT SHORT — EXPIRED
+- Trade ID: `PIXELUSDT-20261125-060406-6A9689`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:32:13.767321+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
