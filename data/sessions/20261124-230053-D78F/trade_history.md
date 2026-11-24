@@ -1068,3 +1068,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T23:26:11.706969+00:00 | Reason: SIGNAL_TRACE_PRICE_GAP_MISSED
+## EIGENUSDT SHORT — CANCELED
+- Trade ID: `EIGENUSDT-20261125-062134-A1E911`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T23:26:32.533285+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
