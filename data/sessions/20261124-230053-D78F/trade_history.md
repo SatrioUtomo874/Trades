@@ -402,3 +402,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T19:30:02.040029+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BELUSDT SHORT — EXPIRED
+- Trade ID: `BELUSDT-20261125-020436-C1C5C4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T19:30:16.701422+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
