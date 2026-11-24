@@ -96,3 +96,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-24T01:43:13.126985+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
+## BASEDUSDT LONG — CANCELED
+- Trade ID: `BASEDUSDT-20261124-084331-CDDF66`
+- Timeframe: M15 | Signal: EMA9_21_VP_POC
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-24T01:43:35.460802+00:00 | Reason: WAITING_UNCERTAIN_MARKET_ENTRY
