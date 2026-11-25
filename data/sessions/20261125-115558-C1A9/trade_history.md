@@ -186,3 +186,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:44:27.627998+00:00 | Reason: SCANNER_OFF
+## BATUSDT SHORT — CANCELED
+- Trade ID: `BATUSDT-20261125-143219-794CD4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:44:38.318615+00:00 | Reason: SCANNER_OFF
