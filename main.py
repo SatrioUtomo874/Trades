@@ -4859,12 +4859,22 @@ class BinanceUserDataWebSocket:
 
 
 class GitHubStore:
+    """Serialized, rate-aware GitHub Contents API client.
+
+    All mutating requests are serialized and paced. Transient 5xx/network errors,
+    GitHub rate limits, and repository-rule timeout responses receive bounded
+    retries. Durable queuing is owned by TradingEngine, so this client never
+    silently treats a failed remote write as success.
+    """
+
     def __init__(self) -> None:
         self.token = GITHUB_TOKEN
         self.repo_name = REPO_NAME
         self.branch = GITHUB_BRANCH
-
         self._write_lock = asyncio.Lock()
+        self._last_mutation_at = 0.0
+        self._minimum_mutation_spacing = 1.0
+        self._request_attempts = 5
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -4874,319 +4884,224 @@ class GitHubStore:
         }
 
     def _url(self, path: str) -> str:
-        encoded = "/".join(
-            quote(part, safe="")
-            for part in path.strip("/").split("/")
-        )
+        encoded = "/".join(quote(part, safe="") for part in path.strip("/").split("/"))
+        return f"{GITHUB_API}/repos/{self.repo_name}/contents/{encoded}"
 
-        return (
-            f"{GITHUB_API}/repos/"
-            f"{self.repo_name}/contents/{encoded}"
-        )
+    @staticmethod
+    def _retry_delay(response: requests.Response | None, attempt: int, *, rate_limit: bool = False) -> float:
+        headers = response.headers if response is not None else {}
+        retry_after = headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(1.0, min(900.0, float(retry_after)))
+            except (TypeError, ValueError):
+                pass
+        remaining = str(headers.get("X-RateLimit-Remaining") or "").strip()
+        if remaining == "0":
+            try:
+                reset_at = float(headers.get("X-RateLimit-Reset") or 0)
+                if reset_at > 0:
+                    return max(1.0, min(3600.0, reset_at - time.time()))
+            except (TypeError, ValueError):
+                pass
+        if rate_limit:
+            # GitHub recommends at least one minute for secondary rate limits
+            # when Retry-After / primary reset headers are absent.
+            return min(900.0, 60.0 * (2 ** max(0, attempt - 1)))
+        return min(60.0, 1.5 * (2 ** max(0, attempt - 1)))
 
-    async def get_file(
-        self,
-        path: str,
-    ) -> tuple[bytes | None, str | None]:
-        def request() -> tuple[bytes | None, str | None]:
-            response = requests.get(
-                self._url(path),
-                headers=self._headers(),
-                params={"ref": self.branch},
-                timeout=GITHUB_REQUEST_SECONDS,
+    def _request_with_retry(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        last_error: Exception | None = None
+        for attempt in range(1, self._request_attempts + 1):
+            response: requests.Response | None = None
+            try:
+                response = requests.request(method, url, **kwargs)
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt >= self._request_attempts:
+                    break
+                delay = self._retry_delay(None, attempt)
+                log.info("[GITHUB] %s transport error (%d/%d); retry %.1fs: %s", method, attempt, self._request_attempts, delay, exc)
+                time.sleep(delay)
+                continue
+
+            status = int(response.status_code)
+            if status == 409:
+                # Contents API conflicts require a fresh SHA, handled by caller.
+                return response
+
+            body_lower = str(response.text or "").lower()
+            retryable_5xx = status in {500, 502, 503, 504}
+            rate_limited = status == 429 or (
+                status == 403 and (
+                    response.headers.get("Retry-After") is not None
+                    or str(response.headers.get("X-RateLimit-Remaining") or "") == "0"
+                    or "rate limit" in body_lower
+                    or "secondary rate limit" in body_lower
+                    or "abuse detection" in body_lower
+                )
             )
+            rules_timeout = status == 403 and (
+                "rule did not run because of a timeout" in body_lower
+                or ("rule" in body_lower and "timeout" in body_lower)
+            )
+            if (retryable_5xx or rate_limited or rules_timeout) and attempt < self._request_attempts:
+                delay = self._retry_delay(response, attempt, rate_limit=rate_limited)
+                if rules_timeout and not rate_limited:
+                    delay = min(60.0, 5.0 * (2 ** (attempt - 1)))
+                log.info(
+                    "[GITHUB] %s HTTP %s (%d/%d); retry in %.1fs",
+                    method, status, attempt, self._request_attempts, delay,
+                )
+                time.sleep(delay)
+                continue
+            return response
 
+        detail = str(last_error) if last_error else "request retry limit reached"
+        raise RuntimeError(f"GitHub {method} transport gagal setelah retry: {detail}")
+
+    async def _pace_mutation(self) -> None:
+        delay = self._minimum_mutation_spacing - (time.monotonic() - self._last_mutation_at)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        self._last_mutation_at = time.monotonic()
+
+    async def get_file(self, path: str) -> tuple[bytes | None, str | None]:
+        def request() -> tuple[bytes | None, str | None]:
+            response = self._request_with_retry(
+                "GET", self._url(path), headers=self._headers(),
+                params={"ref": self.branch}, timeout=GITHUB_REQUEST_SECONDS,
+            )
             if response.status_code == 404:
                 return None, None
-
             if response.status_code >= 400:
-                raise RuntimeError(
-                    f"GitHub GET {path}: HTTP "
-                    f"{response.status_code}: "
-                    f"{response.text[:500]}"
-                )
-
+                raise RuntimeError(f"GitHub GET {path}: HTTP {response.status_code}: {response.text[:700]}")
             body = response.json()
-
             if body.get("type") != "file":
-                raise RuntimeError(
-                    f"GitHub path bukan file: {path}"
-                )
-
-            content = str(
-                body.get("content") or ""
-            ).replace("\n", "")
-
+                raise RuntimeError(f"GitHub path bukan file: {path}")
+            content = str(body.get("content") or "").replace("\n", "")
+            sha = str(body.get("sha") or "")
             if not content and int(body.get("size") or 0) > 0:
-                # File >1 MB: kolom content kosong, ambil isi lewat media type raw.
                 raw_headers = dict(self._headers())
                 raw_headers["Accept"] = "application/vnd.github.raw+json"
-                raw_response = requests.get(
-                    self._url(path),
-                    headers=raw_headers,
-                    params={"ref": self.branch},
-                    timeout=GITHUB_REQUEST_SECONDS,
+                raw_response = self._request_with_retry(
+                    "GET", self._url(path), headers=raw_headers,
+                    params={"ref": self.branch}, timeout=GITHUB_REQUEST_SECONDS,
                 )
                 if raw_response.status_code >= 400:
-                    raise RuntimeError(
-                        f"GitHub GET raw {path}: HTTP "
-                        f"{raw_response.status_code}: {raw_response.text[:500]}"
-                    )
-                return raw_response.content, str(body.get("sha") or "")
-
+                    raise RuntimeError(f"GitHub GET raw {path}: HTTP {raw_response.status_code}: {raw_response.text[:700]}")
+                return raw_response.content, sha
             try:
-                decoded = base64.b64decode(
-                    content
-                )
+                decoded = base64.b64decode(content)
             except Exception as exc:
-                raise RuntimeError(
-                    f"GitHub file {path} gagal di-decode."
-                ) from exc
-
-            return (
-                decoded,
-                str(body.get("sha") or ""),
-            )
-
+                raise RuntimeError(f"GitHub file {path} gagal di-decode.") from exc
+            return decoded, sha
         return await asyncio.to_thread(request)
 
     async def list_dir(self, path: str) -> list[str]:
         def request() -> list[str]:
-            response = requests.get(
-                self._url(path),
-                headers=self._headers(),
-                params={"ref": self.branch},
-                timeout=GITHUB_REQUEST_SECONDS,
+            response = self._request_with_retry(
+                "GET", self._url(path), headers=self._headers(),
+                params={"ref": self.branch}, timeout=GITHUB_REQUEST_SECONDS,
             )
             if response.status_code == 404:
                 return []
             if response.status_code >= 400:
-                raise RuntimeError(f"GitHub LIST {path}: HTTP {response.status_code}: {response.text[:300]}")
+                raise RuntimeError(f"GitHub LIST {path}: HTTP {response.status_code}: {response.text[:500]}")
             body = response.json()
             if not isinstance(body, list):
                 return []
             return [str(item.get("name")) for item in body if item.get("type") == "file"]
-
         return await asyncio.to_thread(request)
 
-    async def delete_file(
-        self,
-        path: str,
-        commit_message: str,
-    ) -> bool:
-        """Hapus satu file GitHub. Return False jika file memang tidak ada."""
+    async def delete_file(self, path: str, commit_message: str) -> bool:
         async with self._write_lock:
-            for _attempt in range(3):
+            for _attempt in range(5):
                 _current, sha = await self.get_file(path)
-
                 if not sha:
                     return False
-
-                payload = {
-                    "message": commit_message,
-                    "sha": sha,
-                    "branch": self.branch,
-                }
-
-                def request() -> bool:
-                    response = requests.delete(
-                        self._url(path),
-                        headers=self._headers(),
-                        json=payload,
+                payload = {"message": commit_message, "sha": sha, "branch": self.branch}
+                await self._pace_mutation()
+                def request() -> requests.Response:
+                    return self._request_with_retry(
+                        "DELETE", self._url(path), headers=self._headers(), json=payload,
                         timeout=GITHUB_REQUEST_SECONDS,
                     )
+                response = await asyncio.to_thread(request)
+                if response.status_code == 404:
+                    return False
+                if response.status_code == 409:
+                    await asyncio.sleep(min(0.5 * (2 ** _attempt), 4.0))
+                    continue
+                if response.status_code >= 400:
+                    raise RuntimeError(f"GitHub DELETE {path}: HTTP {response.status_code}: {response.text[:700]}")
+                return True
+            raise RuntimeError(f"GitHub gagal menghapus {path}: SHA conflict berulang.")
 
-                    if response.status_code == 404:
-                        return False
-
-                    if response.status_code == 409:
-                        raise RuntimeError("GITHUB_CONFLICT")
-
-                    if response.status_code >= 400:
-                        raise RuntimeError(
-                            f"GitHub DELETE {path}: HTTP "
-                            f"{response.status_code}: "
-                            f"{response.text[:700]}"
-                        )
-
-                    return True
-
-                try:
-                    return await asyncio.to_thread(request)
-                except RuntimeError as exc:
-                    if str(exc) != "GITHUB_CONFLICT":
-                        raise
-                    await asyncio.sleep(0.5)
-
-            raise RuntimeError(
-                f"GitHub gagal menghapus {path}: conflict berulang."
-            )
-
-    async def replace_file(
-        self,
-        path: str,
-        content: bytes,
-        commit_message: str,
-    ) -> str:
-        """
-        Create/update satu file GitHub secara serial.
-
-        Retry conflict 409 dilakukan dengan mengambil SHA terbaru.
-        """
+    async def replace_file(self, path: str, content: bytes, commit_message: str) -> str:
+        """Create/update one Contents API file, serially and with fresh-SHA retries."""
         async with self._write_lock:
-            last_error: Exception | None = None
-
-            for _attempt in range(3):
-                current, sha = await self.get_file(
-                    path
-                )
-
-                # current sengaja tidak digunakan; SHA yang dibutuhkan
-                # untuk update sudah diambil dari GitHub.
-                del current
-
+            for attempt in range(5):
+                _current, sha = await self.get_file(path)
                 payload = {
                     "message": commit_message,
-                    "content": base64.b64encode(
-                        content
-                    ).decode("ascii"),
+                    "content": base64.b64encode(content).decode("ascii"),
                     "branch": self.branch,
                 }
-
                 if sha:
                     payload["sha"] = sha
-
-                def request() -> str:
-                    response = requests.put(
-                        self._url(path),
-                        headers=self._headers(),
-                        json=payload,
+                await self._pace_mutation()
+                def request() -> requests.Response:
+                    return self._request_with_retry(
+                        "PUT", self._url(path), headers=self._headers(), json=payload,
                         timeout=GITHUB_REQUEST_SECONDS,
                     )
+                response = await asyncio.to_thread(request)
+                if response.status_code == 409:
+                    delay = min(0.75 * (2 ** attempt), 8.0)
+                    log.info("[GITHUB] SHA conflict %s; refetching latest SHA in %.2fs", path, delay)
+                    await asyncio.sleep(delay)
+                    continue
+                if response.status_code >= 400:
+                    raise RuntimeError(f"GitHub PUT {path}: HTTP {response.status_code}: {response.text[:900]}")
+                body = response.json()
+                return str((body.get("commit") or {}).get("sha") or "")
+            raise RuntimeError(f"GitHub PUT {path}: SHA conflict tetap terjadi setelah 5 percobaan.")
 
-                    if response.status_code == 409:
-                        raise RuntimeError(
-                            "GITHUB_CONFLICT"
-                        )
-
-                    if response.status_code >= 400:
-                        raise RuntimeError(
-                            f"GitHub PUT {path}: HTTP "
-                            f"{response.status_code}: "
-                            f"{response.text[:700]}"
-                        )
-
-                    body = response.json()
-
-                    return str(
-                        (body.get("commit") or {}).get("sha")
-                        or ""
-                    )
-
-                try:
-                    return await asyncio.to_thread(
-                        request
-                    )
-
-                except RuntimeError as exc:
-                    last_error = exc
-
-                    if str(exc) != "GITHUB_CONFLICT":
-                        raise
-
-                    await asyncio.sleep(0.5)
-
-            if last_error:
-                raise last_error
-
-            raise RuntimeError(
-                f"GitHub gagal meng-update {path}."
-            )
-
-    async def append_text_file(
-        self,
-        path: str,
-        addition: str,
-        commit_message: str,
-    ) -> str:
+    async def append_text_file(self, path: str, addition: str, commit_message: str) -> str:
+        """Atomic read/append/write for callers that still use a remote-only journal."""
         async with self._write_lock:
-            last_error: Exception | None = None
-
-            for _attempt in range(3):
+            for attempt in range(5):
                 current, sha = await self.get_file(path)
-
                 if current is None:
                     content = "# Trading Journal\n\n" + addition.lstrip("\n")
                 else:
-                    old_text = current.decode(
-                        "utf-8",
-                        errors="replace",
-                    )
-
+                    old_text = current.decode("utf-8", errors="replace")
                     if old_text and not old_text.endswith("\n"):
                         old_text += "\n"
-
                     content = old_text + addition
-
                 payload = {
                     "message": commit_message,
-                    "content": base64.b64encode(
-                        content.encode("utf-8")
-                    ).decode("ascii"),
+                    "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
                     "branch": self.branch,
                 }
-
                 if sha:
                     payload["sha"] = sha
-
-                def request() -> str:
-                    response = requests.put(
-                        self._url(path),
-                        headers=self._headers(),
-                        json=payload,
+                await self._pace_mutation()
+                def request() -> requests.Response:
+                    return self._request_with_retry(
+                        "PUT", self._url(path), headers=self._headers(), json=payload,
                         timeout=GITHUB_REQUEST_SECONDS,
                     )
-
-                    if response.status_code == 409:
-                        raise RuntimeError(
-                            "GITHUB_CONFLICT"
-                        )
-
-                    if response.status_code >= 400:
-                        raise RuntimeError(
-                            f"GitHub PUT {path}: HTTP "
-                            f"{response.status_code}: "
-                            f"{response.text[:700]}"
-                        )
-
-                    body = response.json()
-
-                    return str(
-                        (body.get("commit") or {}).get("sha")
-                        or ""
-                    )
-
-                try:
-                    return await asyncio.to_thread(
-                        request
-                    )
-                except RuntimeError as exc:
-                    last_error = exc
-
-                    if str(exc) != "GITHUB_CONFLICT":
-                        raise
-
-                    await asyncio.sleep(0.5)
-
-            if last_error:
-                raise last_error
-
-            raise RuntimeError(
-                f"GitHub gagal meng-append {path}."
-            )
-
-
-
+                response = await asyncio.to_thread(request)
+                if response.status_code == 409:
+                    await asyncio.sleep(min(0.75 * (2 ** attempt), 8.0))
+                    continue
+                if response.status_code >= 400:
+                    raise RuntimeError(f"GitHub PUT {path}: HTTP {response.status_code}: {response.text[:900]}")
+                body = response.json()
+                return str((body.get("commit") or {}).get("sha") or "")
+            raise RuntimeError(f"GitHub append {path}: SHA conflict tetap terjadi setelah 5 percobaan.")
 
 
 
@@ -5200,6 +5115,20 @@ class TradingEngine:
         # Signal-dedupe DB is configured later in __init__, so this must exist first.
         self._local_data_dir = BASE_DIR / "data"
         self._local_data_dir.mkdir(parents=True, exist_ok=True)
+        # Durable GitHub write-ahead outbox. It is stored beside the local
+        # fallback data so failed remote writes survive /try and process restarts.
+        self._github_outbox_dir = self._local_data_dir / ".github_outbox"
+        self._github_outbox_dir.mkdir(parents=True, exist_ok=True)
+        self._github_outbox_lock = asyncio.Lock()
+        self._github_outbox_drain_lock = asyncio.Lock()
+        self._github_sync_wakeup = asyncio.Event()
+        self._github_sync_task: asyncio.Task | None = None
+        self._github_sync_last_error: str | None = None
+        self._github_sync_last_success_at: datetime | None = None
+        self._github_sync_last_success_path: str | None = None
+        self._github_sync_last_attempt_at: datetime | None = None
+        self._github_sync_notice_at = 0.0
+        self._github_sync_failed_writes = 0
         self.chat_id = int(context.get("chat_id") or ALLOWED_USER_ID)
         self.user_id = int(context.get("user_id") or ALLOWED_USER_ID)
         self.send_message = context["send_message"]
@@ -5351,6 +5280,7 @@ class TradingEngine:
         self._signal_dedupe_loaded = False
         self._signal_dedupe_db_path = self._local_data_dir / SIGNAL_DEDUPE_DB_NAME
         self._history_lock = asyncio.Lock()
+        self._journal_lock = asyncio.Lock()
         self._settings_lock = asyncio.Lock()
         self._telegram_error_handler = TelegramErrorHandler(self)
         self._telegram_error_handler_added = False
@@ -5395,7 +5325,283 @@ class TradingEngine:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _github_outbox_record_path(self, remote_path: str) -> Path:
+        key = hashlib.sha256(str(remote_path).encode("utf-8")).hexdigest()
+        return self._github_outbox_dir / f"{key}.json"
+
+    @staticmethod
+    def _atomic_local_write(path: Path, content: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            with temp.open("wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _read_github_outbox_record(self, path: Path) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or not payload.get("remote_path") or "content_b64" not in payload:
+                return None
+            return payload
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _github_outbox_records(self) -> list[tuple[Path, dict[str, Any]]]:
+        output: list[tuple[Path, dict[str, Any]]] = []
+        for path in self._github_outbox_dir.glob("*.json"):
+            record = self._read_github_outbox_record(path)
+            if record is not None:
+                output.append((path, record))
+        output.sort(key=lambda item: float(item[1].get("queued_epoch") or 0.0))
+        return output
+
+    async def _queue_github_write(self, remote_path: str, content: bytes, message: str) -> None:
+        """Durably enqueue the newest complete snapshot for one GitHub path.
+
+        Writes to the same path are coalesced: the latest snapshot replaces an
+        older pending snapshot, while append-only journals are converted to a
+        complete local snapshot before arriving here.
+        """
+        path = self._github_outbox_record_path(remote_path)
+        content_b64 = base64.b64encode(content).decode("ascii")
+        content_hash = hashlib.sha256(content).hexdigest()
+        async with self._github_outbox_lock:
+            old = self._read_github_outbox_record(path)
+            if old and old.get("content_sha256") == content_hash:
+                self._github_sync_wakeup.set()
+                return
+            record = {
+                "record_id": uuid4().hex,
+                "remote_path": str(remote_path),
+                "content_b64": content_b64,
+                "content_sha256": content_hash,
+                "message": str(message or "volumatic: persist state"),
+                "queued_at": iso_utc(),
+                "queued_epoch": time.time(),
+                "attempts": 0,
+                "next_retry_epoch": 0.0,
+                "blocked": False,
+                "last_error": None,
+            }
+            encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self._atomic_local_write(path, encoded)
+            self._history_dirty = True
+        self._github_sync_wakeup.set()
+
+    def _github_outbox_summary(self) -> dict[str, Any]:
+        records = self._github_outbox_records()
+        now_epoch = time.time()
+        pending_bytes = 0
+        blocked = 0
+        due = 0
+        oldest_epoch = None
+        next_retry = None
+        for path, record in records:
+            try:
+                pending_bytes += path.stat().st_size
+            except OSError:
+                pass
+            queued = float(record.get("queued_epoch") or 0.0)
+            oldest_epoch = queued if oldest_epoch is None else min(oldest_epoch, queued)
+            if bool(record.get("blocked")):
+                blocked += 1
+                continue
+            retry_at = float(record.get("next_retry_epoch") or 0.0)
+            if retry_at <= now_epoch:
+                due += 1
+            else:
+                next_retry = retry_at if next_retry is None else min(next_retry, retry_at)
+        return {
+            "pending": len(records), "pending_bytes": pending_bytes,
+            "blocked": blocked, "due": due, "oldest_epoch": oldest_epoch,
+            "next_retry_epoch": next_retry,
+        }
+
+    def _is_permanent_github_error(self, error: str) -> bool:
+        message = str(error or "").lower()
+        if any(token in message for token in ("http 401", "http 404", "http 422", "bad credentials", "resource not accessible")):
+            return True
+        if "http 403" in message and not any(token in message for token in (
+            "timeout", "rate limit", "secondary rate limit", "retry-after", "rule did not run",
+        )):
+            return True
+        return False
+
+    async def _flush_github_outbox_once(self, *, limit: int = 1, force: bool = False) -> int:
+        """Upload due outbox items serially. Successful items are removed only
+        when the on-disk record is still the exact revision that was uploaded.
+        """
+        uploaded = 0
+        async with self._github_outbox_drain_lock:
+            records = self._github_outbox_records()
+            for record_path, record in records:
+                if uploaded >= max(1, int(limit)):
+                    break
+                if bool(record.get("blocked")) and not force:
+                    continue
+                retry_epoch = float(record.get("next_retry_epoch") or 0.0)
+                if not force and retry_epoch > time.time():
+                    continue
+                remote_path = str(record.get("remote_path") or "")
+                record_id = str(record.get("record_id") or "")
+                self._github_sync_last_attempt_at = now_utc()
+                try:
+                    content = base64.b64decode(str(record.get("content_b64") or ""), validate=True)
+                    if not remote_path or not content and record.get("content_sha256") != hashlib.sha256(b"").hexdigest():
+                        raise ValueError("Outbox item path/content invalid.")
+                    await self.github.replace_file(
+                        remote_path, content,
+                        str(record.get("message") or "volumatic: sync local outbox"),
+                    )
+                except Exception as exc:
+                    error_text = f"{type(exc).__name__}: {exc}"[:1200]
+                    attempts = int(record.get("attempts") or 0) + 1
+                    permanent = self._is_permanent_github_error(error_text)
+                    # Backoff is durable across restarts. It grows to 15 minutes
+                    # and never spins on a persistent GitHub outage.
+                    delay = min(900.0, 15.0 * (2 ** min(max(0, attempts - 1), 6)))
+                    async with self._github_outbox_lock:
+                        latest = self._read_github_outbox_record(record_path)
+                        if latest and str(latest.get("record_id") or "") == record_id:
+                            latest["attempts"] = attempts
+                            latest["last_error"] = error_text
+                            latest["blocked"] = bool(permanent)
+                            latest["next_retry_epoch"] = 0.0 if permanent else time.time() + delay
+                            latest["last_attempt_at"] = iso_utc()
+                            self._atomic_local_write(
+                                record_path,
+                                json.dumps(latest, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                            )
+                    self._github_sync_last_error = error_text
+                    self._github_sync_failed_writes += 1
+                    now_mono = time.monotonic()
+                    if now_mono - self._github_sync_notice_at >= 300.0:
+                        self._github_sync_notice_at = now_mono
+                        log.warning(
+                            "[GITHUB OUTBOX] upload ditunda | path=%s | attempt=%s | retry=%s | blocked=%s | %s",
+                            remote_path, attempts, ("manual /sync" if permanent else f"{delay:.0f}s"), permanent, error_text,
+                        )
+                    # Stop after first failure. Repeated requests during a GitHub
+                    # outage/rate limit only worsen secondary throttling.
+                    break
+                else:
+                    removed = False
+                    async with self._github_outbox_lock:
+                        latest = self._read_github_outbox_record(record_path)
+                        if latest and str(latest.get("record_id") or "") == record_id:
+                            try:
+                                record_path.unlink(missing_ok=True)
+                                removed = True
+                            except OSError:
+                                log.exception("[GITHUB OUTBOX] gagal menghapus item yang sudah tersinkron: %s", record_path)
+                    self._github_sync_last_success_at = now_utc()
+                    self._github_sync_last_success_path = remote_path
+                    self._github_sync_last_error = None
+                    if removed:
+                        uploaded += 1
+                        log.info("[GITHUB OUTBOX] synced | path=%s | remaining=%s", remote_path, self._github_outbox_summary()["pending"])
+                    else:
+                        # A newer snapshot arrived while this revision was in
+                        # flight. Keep it queued and let the next pass upload it.
+                        log.info("[GITHUB OUTBOX] newer revision retained | path=%s", remote_path)
+                        break
+        summary = self._github_outbox_summary()
+        self._history_dirty = summary["pending"] > 0
+        return uploaded
+
+    async def _github_sync_loop(self) -> None:
+        """Background GitHub persistence worker; no trading REST is involved."""
+        while self._running:
+            self._github_sync_wakeup.clear()
+            try:
+                await self._flush_github_outbox_once(limit=1)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("[GITHUB OUTBOX] worker error; queued data retained")
+            if not self._running:
+                break
+            summary = self._github_outbox_summary()
+            if summary["pending"] == 0:
+                timeout = 60.0
+            elif summary["due"] > 0:
+                timeout = 1.0  # Contents API mutations are paced to >=1s each.
+            elif summary["next_retry_epoch"] is not None:
+                timeout = max(1.0, min(300.0, float(summary["next_retry_epoch"]) - time.time()))
+            else:
+                timeout = 300.0  # only permanently blocked items remain
+            if self._github_sync_wakeup.is_set():
+                continue
+            try:
+                await asyncio.wait_for(self._github_sync_wakeup.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _handle_github_sync(self, text: str) -> None:
+        parts = str(text or "").split()
+        action = parts[1].lower() if len(parts) > 1 else "retry"
+        summary = self._github_outbox_summary()
+        if action in {"status", "info"}:
+            oldest = "-"
+            if summary["oldest_epoch"]:
+                oldest = datetime.fromtimestamp(float(summary["oldest_epoch"]), tz=timezone.utc).astimezone(TZ).strftime("%d-%m %H:%M:%S WIB")
+            last_ok = format_wib(self._github_sync_last_success_at) if self._github_sync_last_success_at else "-"
+            await self.reply(
+                "╔══ GITHUB PERSISTENCE ══╗\n"
+                f"STATE       : {'SYNCED' if summary['pending'] == 0 else 'PENDING'}\n"
+                f"OUTBOX      : {summary['pending']} file · {summary['pending_bytes']:,} bytes\n"
+                f"READY       : {summary['due']} · BLOCKED: {summary['blocked']}\n"
+                f"OLDEST      : {oldest}\n"
+                f"LAST SUCCESS: {last_ok}\n"
+                f"LAST PATH   : {self._github_sync_last_success_path or '-'}\n"
+                f"LAST ERROR  : {(self._github_sync_last_error or '-')[:500]}\n"
+                "────────────────────────\n"
+                "Gunakan /sync untuk mencoba ulang antrean."
+            )
+            return
+        if action not in {"retry", "now", "force"}:
+            await self.reply("Gunakan /sync, /sync status, atau /sync retry.")
+            return
+        blocked_released = 0
+        async with self._github_outbox_lock:
+            for record_path, record in self._github_outbox_records():
+                if bool(record.get("blocked")):
+                    blocked_released += 1
+                record["blocked"] = False
+                record["next_retry_epoch"] = 0.0
+                record["last_manual_retry_at"] = iso_utc()
+                self._atomic_local_write(
+                    record_path,
+                    json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                )
+        self._github_sync_wakeup.set()
+        summary = self._github_outbox_summary()
+        await self.reply(
+            "⟳ GITHUB SYNC RETRY QUEUED\n"
+            f"Pending files: {summary['pending']}\n"
+            f"Blocked released: {blocked_released} (akan dicoba ulang)\n"
+            "Upload berjalan serial di background. Gunakan /sync status untuk memantau."
+        )
+
     async def _remote_or_local(self, remote_path: str) -> bytes | None:
+        # If a snapshot is still in the durable outbox, it is newer than GitHub
+        # by definition. Prefer it even for append-only/session files without an
+        # updated_at field, otherwise a restart could resurrect an older remote copy.
+        queued_path = self._github_outbox_record_path(remote_path)
+        queued = self._read_github_outbox_record(queued_path)
+        if queued and str(queued.get("remote_path") or "") == str(remote_path):
+            try:
+                return base64.b64decode(str(queued.get("content_b64") or ""), validate=True)
+            except Exception:
+                log.exception("[GITHUB OUTBOX] queued content invalid; fallback to local file: %s", remote_path)
         local = self._local_path(remote_path)
         local_data: bytes | None = None
         try:
@@ -5430,18 +5636,20 @@ class TradingEngine:
         return local_data
 
     async def _persist_bytes(self, remote_path: str, content: bytes, message: str) -> None:
+        """Write a durable outbox record, then refresh the normal local snapshot.
+
+        The outbox is written first so a process crash between the two local
+        writes cannot leave a newer session journal without a retry record.
+        Trading callbacks never wait on GitHub; the background worker serializes
+        uploads and retries transient failures without losing snapshots.
+        """
+        await self._queue_github_write(remote_path, content, message)
         local = self._local_path(remote_path)
-        temp = local.with_suffix(local.suffix + ".tmp")
         try:
-            temp.write_bytes(content)
-            temp.replace(local)
+            self._atomic_local_write(local, content)
         except OSError:
-            log.exception("Local fallback write gagal: %s", local)
-        try:
-            await self.github.replace_file(remote_path, content, message)
-        except Exception as exc:
-            self._history_dirty = True
-            log.error("GitHub persistence gagal untuk %s; local fallback tersimpan: %s", remote_path, exc)
+            log.exception("Local fallback snapshot write gagal (outbox tetap tersimpan): %s", local)
+            raise
 
     async def _load_banned_symbols(self) -> None:
         """Load permanent symbol bans independently from fresh-session settings."""
@@ -6262,11 +6470,11 @@ class TradingEngine:
             updated = float(payload.get("updated_epoch") or 0.0)
             if updated <= self._last_cooldown_github_update:
                 return
-            await self.github.replace_file(
+            await self._queue_github_write(
                 BINANCE_COOLDOWN_PATH, raw, "volumatic: persist Binance IP cooldown"
             )
             self._last_cooldown_github_update = updated
-            log.info("[BINANCE] cooldown marker tersinkron ke GitHub untuk recovery lintas-restart.")
+            log.info("[BINANCE] cooldown marker masuk GitHub outbox untuk recovery lintas-restart.")
         except FileNotFoundError:
             return
         except Exception as exc:
@@ -6400,7 +6608,11 @@ class TradingEngine:
 
     async def save_setups(self) -> None:
         await self._save_active_state()
-        await self.reply(f"✅ {sum(t.status in {'PENDING','FILLED'} for t in self.active_trades.values())} trade aktif disimpan ke GitHub.")
+        summary = self._github_outbox_summary()
+        await self.reply(
+            f"✅ {sum(t.status in {'PENDING','FILLED'} for t in self.active_trades.values())} trade aktif tersimpan lokal dan masuk antrean GitHub.\n"
+            f"Outbox pending: {summary['pending']} file. Gunakan /sync status untuk melihat konfirmasi upload."
+        )
 
     async def open_setups(self) -> None:
         if self.active_trades:
@@ -6558,6 +6770,8 @@ class TradingEngine:
             self._autostop_data_hold = False
             self._autostop_source = None
 
+        self._github_sync_wakeup.set()
+        self._github_sync_task = asyncio.create_task(self._github_sync_loop(), name="volumatic-github-outbox")
         self._maintenance_task = asyncio.create_task(self._maintenance_loop(), name="volumatic-maintenance")
         self._scan_task = asyncio.create_task(self._scan_loop(), name="volumatic-scanner")
         log.info(
@@ -6578,6 +6792,7 @@ class TradingEngine:
             f"Max positions : {self.max_active_trades}\n"
             "Scanner       : OFF — menunggu /scan on atau /scan schedule\n"
             "REAL          : OFF — menunggu /real on\n"
+            f"GitHub outbox : {self._github_outbox_summary()['pending']} pending file (auto-retry background)\n"
             "Active        : 0\n"
             "Market WS     : OFF — aktif saat scanner dimulai\n"
             "Private WS    : OFF — aktif setelah /real on\n"
@@ -6615,7 +6830,7 @@ class TradingEngine:
         # to stop. EMA initialization tasks remain tracked for older restored states so they cannot
         # outlive /end or a Render redeploy and mutate a fresh engine instance.
         ema_workers = list(self._ema_exit_init_tasks.values())
-        workers = [self._scan_task, self._maintenance_task, self.ws._task, self.user_ws._task, self._stats_live_task, *ema_workers]
+        workers = [self._scan_task, self._maintenance_task, self._github_sync_task, self.ws._task, self.user_ws._task, self._stats_live_task, *ema_workers]
         for component in (self.ws, self.user_ws):
             try:
                 component._stop.set()
@@ -6662,6 +6877,7 @@ class TradingEngine:
 
         self._scan_task = None
         self._maintenance_task = None
+        self._github_sync_task = None
         self._ema_exit_init_tasks.clear()
         self._ema_exit_close_locks.clear()
         self._ema_exit_close_last_check.clear()
@@ -9106,12 +9322,16 @@ class TradingEngine:
         ]
         addition = "\n".join(lines)
         try:
-            await self.github.append_text_file(self.session_history_markdown_path, addition, "volumatic: session trade closed")
-            local = self._local_path(self.session_history_markdown_path)
-            old = local.read_text(encoding="utf-8") if local.exists() else "# Volumatic Trend Trade Journal\n\n"
-            local.write_text(old + addition, encoding="utf-8")
+            async with self._journal_lock:
+                local = self._local_path(self.session_history_markdown_path)
+                old = local.read_text(encoding="utf-8") if local.exists() else "# Volumatic Trend Trade Journal\n\n"
+                journal = (old + addition).encode("utf-8")
+                await self._persist_bytes(
+                    self.session_history_markdown_path, journal,
+                    "volumatic: session trade journal snapshot",
+                )
         except Exception as exc:
-            log.error("Markdown journal GitHub gagal; detail tetap ada di session trades.json: %s", exc)
+            log.error("Markdown journal local/outbox persistence gagal; detail tetap ada di session trades.json: %s", exc)
 
     async def _expire_due_pending(self) -> None:
         now = now_utc()
@@ -14247,6 +14467,11 @@ class TradingEngine:
         )
         equity_peak = fmt_num(self._equity_peak, 4) if self._equity_peak is not None else "—"
         equity_floor = fmt_num(self._autostop_floor(), 4) if self._autostop_floor() is not None else "—"
+        github_sync = self._github_outbox_summary()
+        github_sync_line = (
+            f"GITHUB OUTBOX {github_sync['pending']} pending · {github_sync['blocked']} blocked"
+            + (f" · {github_sync['pending_bytes']:,} bytes" if github_sync["pending"] else " · synced")
+        )
         latest_event = self.history_events[-1] if self.history_events else None
         if isinstance(latest_event, dict):
             last_event_text = str(latest_event.get("event") or "EVENT")
@@ -14313,6 +14538,7 @@ class TradingEngine:
             f"BINANCE API 60s {api_count_60} req  •  WEIGHT {api_weight_60}/{BINANCE_IP_WEIGHT_LIMIT} (header {weight_header})",
             f"RATE LIMIT HITS {API_STATS.limit_hits} lifetime  •  REST COOLDOWN {cooldown:.0f}s",
             f"LAST EVENT {last_event_text[:110]}",
+            github_sync_line,
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "[ CONTROL ] /stats off = freeze  •  /stats refresh = update now",
             "[ DATA ] Harga/uPnL dari cache; balance dari REST snapshot terakhir. PnL ledger dapat berbeda dari fee/funding aktual.",
@@ -14549,7 +14775,8 @@ class TradingEngine:
             "/unbanned PAIR ... - hapus ban permanen\n"
             "/stats - buka live dashboard robotik (auto-refresh 15 detik)\n"
             "/stats off - bekukan dashboard | /stats once - snapshot\n"
-            "/setup - simpan snapshot trade aktif ke GitHub\n"
+            "/sync - retry antrean persistence GitHub | /sync status - kondisi antrean\n"
+            "/setup - simpan snapshot trade aktif ke local outbox lalu GitHub\n"
             "/open - pulihkan snapshot secara manual\n"
             "/del PAIR|all - batalkan pending trace/order\n"
             "/close PAIR|all - tutup posisi atau batalkan pending\n"
@@ -14602,6 +14829,7 @@ class TradingEngine:
         elif command in {"/banned", "/ban"}: await self._handle_banned(text)
         elif command in {"/unbanned", "/unban"}: await self._handle_unbanned(text)
         elif command == "/stats": await self.show_stats(text)
+        elif command == "/sync": await self._handle_github_sync(text)
         elif command == "/status": await self.show_status()
         elif command in {"/help", "/start"}: await self.show_help()
         elif command == "/setup": await self.save_setups()
