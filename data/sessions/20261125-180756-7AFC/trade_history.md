@@ -144,3 +144,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T12:30:00.886301+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## WLFIUSDT SHORT — EXPIRED
+- Trade ID: `WLFIUSDT-20261125-191236-F1F18D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T12:30:01.548159+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
