@@ -504,3 +504,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:26:11.943901+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AIXBTUSDT SHORT — EXPIRED
+- Trade ID: `AIXBTUSDT-20261125-210051-84BB18`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:30:01.916898+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
