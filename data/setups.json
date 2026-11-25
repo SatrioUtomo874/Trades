@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T07:15:13.010866+00:00",
+  "updated_at": "2026-11-25T07:15:14.921567+00:00",
   "active_trades": [
     {
       "trade_id": "ROSEUSDT-20261125-130126-C0ECD7",
@@ -235,7 +235,7 @@
       "trailing_replace_old_algo_id": 4000002203874419,
       "trailing_replace_old_client_id": "VTSLSDT-20261125-134514-8E4FB8",
       "trailing_replace_old_trigger": "0.09244",
-      "trailing_replace_submit_ambiguous": false,
+      "trailing_replace_submit_ambiguous": true,
       "trailing_conflict_warning_sent": false,
       "exchange_algo_sync_complete": false,
       "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; fixed 2R TP; M15 close trailing SL",
