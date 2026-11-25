@@ -210,3 +210,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:45:11.065533+00:00 | Reason: SCANNER_OFF
+## PENDLEUSDT SHORT — CANCELED
+- Trade ID: `PENDLEUSDT-20261125-143434-3E800C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:45:37.650157+00:00 | Reason: SCANNER_OFF
