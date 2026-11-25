@@ -54,3 +54,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T11:45:38.807803+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SOLUSDT SHORT — CANCELED
+- Trade ID: `SOLUSDT-20261125-183428-6ED6ED`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T11:51:48.477830+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
