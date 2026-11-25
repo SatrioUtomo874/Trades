@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """VOLUMATIC TREND v4.0.0.
 
-H4 trend filter: SuperTrend ATR10 Factor2.5 plus EMA100 close.
+H4 trend filter: strict three-price order: LONG EMA100 < ST10x2.5 < Close;
+SHORT Close < ST10x2.5 < EMA100. Any other order is consolidation.
 M15 signal: Pine-compatible Volumatic LEN9 visual marker (plotshape offset=-1).
 Entry target: close of the candle carrying that visual marker; a live retest
 triggers MARKET execution within a four-candle M15 lifetime.
@@ -945,7 +946,7 @@ __all__ = [
     "reference_risk", "trade_result_r", "ema_sma_seeded", "ema_cross_direction",
     "H4_SUPERTREND_ATR_LENGTH", "H4_SUPERTREND_FACTOR", "H4_EMA_LENGTH",
     "ENTRY_RR", "SIGNAL_TRACE_CANDLES", "calculate_supertrend", "calculate_ema_tv",
-    "detect_new_strategy_signal",
+    "classify_h4_trend", "detect_new_strategy_signal",
 ]
 
 
@@ -2198,6 +2199,32 @@ def calculate_ema_tv(values: Any, length: int) -> np.ndarray:
     return _ema_tv(np.asarray(values, dtype=np.float64), int(length))
 
 
+def classify_h4_trend(close_price: Any, supertrend_price: Any, ema100_price: Any) -> str:
+    """Classify H4 trend using the strict three-price ordering shared by ALT/BTC.
+
+    BULLISH: EMA100 < SuperTrend < candle close.
+    BEARISH: candle close < SuperTrend < EMA100.
+    Every other arrangement, including equality, is CONSOLIDATION.
+
+    This deliberately preserves both parts of the rule: SuperTrend must be on
+    the correct side of close (trend direction), and SuperTrend must also be
+    on the correct side of EMA100 (EMA trend-zone confirmation).
+    """
+    try:
+        close_value, st_value, ema_value = map(
+            float, (close_price, supertrend_price, ema100_price)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return "CONSOLIDATION"
+    if not all(np.isfinite(value) and value > 0 for value in (close_value, st_value, ema_value)):
+        return "CONSOLIDATION"
+    if ema_value < st_value < close_value:
+        return "BULLISH"
+    if close_value < st_value < ema_value:
+        return "BEARISH"
+    return "CONSOLIDATION"
+
+
 def _h4_trend_snapshot(
     candles: Any, confirmation_close_ms: int,
 ) -> dict[str, Any] | None:
@@ -2230,9 +2257,8 @@ def _h4_trend_snapshot(
     st_value = float(st[-1]) if len(st) else float("nan")
     if not all(np.isfinite(x) and x > 0 for x in (close_value, ema_value, st_value)):
         return None
-    bullish = close_value > st_value and ema_value < st_value
-    bearish = close_value < st_value and ema_value > st_value
-    trend = "BULLISH" if bullish else "BEARISH" if bearish else "CONSOLIDATION"
+    # One canonical strict classifier is used for both the ALT and BTC H4 gates.
+    trend = classify_h4_trend(close_value, st_value, ema_value)
     return {
         "trend": trend,
         "open_time_ms": int(ts[h4_index]),
