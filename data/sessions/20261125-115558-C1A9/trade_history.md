@@ -222,3 +222,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:46:04.054289+00:00 | Reason: SCANNER_OFF
+## SOLUSDT SHORT — CANCELED
+- Trade ID: `SOLUSDT-20261125-143543-192D71`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:46:21.536492+00:00 | Reason: SCANNER_OFF
