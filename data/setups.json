@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T12:12:41.619975+00:00",
+  "updated_at": "2026-11-25T12:12:51.293083+00:00",
   "active_trades": [
     {
       "trade_id": "SLXUSDT-20261125-180826-2DC309",
@@ -2124,8 +2124,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-25T12:12:51.094050+00:00",
+      "entry_trigger_price": "0.1098",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
