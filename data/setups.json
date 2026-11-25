@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T03:53:33.425042+00:00",
+  "updated_at": "2026-11-25T03:53:37.139273+00:00",
   "active_trades": [
     {
       "trade_id": "FETUSDT-20261125-092151-A5C89C",
@@ -1259,12 +1259,12 @@
       "liquidity_pool_timeframe": null,
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
-      "sl_algo_id": null,
+      "sl_algo_id": 4000002203239908,
       "tp_algo_id": null,
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSLSDT-20261125-104554-F7E4D8",
       "tp_client_algo_id": "VTTPSDT-20261125-104554-F7E4D8",
-      "sl_algo_status": "NOT_PLACED",
+      "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "WAITING_FOR_EXCHANGE",
       "protection_error": null,
