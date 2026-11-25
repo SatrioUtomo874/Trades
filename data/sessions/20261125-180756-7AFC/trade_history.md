@@ -438,3 +438,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:20:25.755009+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## HAEDALUSDT SHORT — EXPIRED
+- Trade ID: `HAEDALUSDT-20261125-205156-4ED60A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:20:41.410977+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
