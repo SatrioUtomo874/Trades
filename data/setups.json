@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T03:00:13.816302+00:00",
+  "updated_at": "2026-11-25T03:00:19.628764+00:00",
   "active_trades": [
     {
       "trade_id": "FETUSDT-20261125-092151-A5C89C",
@@ -891,9 +891,9 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795574700000,
-      "trailing_last_st": null,
-      "trailing_last_reason": null,
+      "trailing_last_close_ms": 1795575600000,
+      "trailing_last_st": "0.0035710323857863864",
+      "trailing_last_reason": "CANDIDATE_INVALID_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; fixed 2R TP; M15 close trailing SL",
