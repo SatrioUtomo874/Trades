@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T05:02:32.237770+00:00",
+  "updated_at": "2026-11-25T05:02:38.034593+00:00",
   "active_trades": [
     {
       "trade_id": "ATHUSDT-20261125-115630-FA34B8",
@@ -32,7 +32,7 @@
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSLSDT-20261125-093722-A403FD",
       "tp_client_algo_id": "VTTPSDT-20261125-093722-A403FD",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "CANCELED",
       "tp_algo_status": "NEW",
       "protection_state": "ACTIVE",
       "protection_error": null,
