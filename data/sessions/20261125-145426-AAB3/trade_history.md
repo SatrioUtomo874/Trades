@@ -114,3 +114,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:45:16.114887+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ATHUSDT SHORT — EXPIRED
+- Trade ID: `ATHUSDT-20261125-161847-AB2690`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:45:27.267043+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
