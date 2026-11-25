@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T16:25:56.647830+00:00",
+  "updated_at": "2026-11-25T16:26:06.089580+00:00",
   "active_trades": [
     {
       "trade_id": "POLUSDT-20261125-223110-02A7C0",
@@ -442,7 +442,7 @@
       "target_notional": "6",
       "actual_notional": "5.4312",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 1197311139,
       "entry_client_order_id": "VT3cd736e90d8fc51e00d6070835ec",
