@@ -252,3 +252,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T13:30:00.037916+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MERLUSDT SHORT — EXPIRED
+- Trade ID: `MERLUSDT-20261125-200303-19B4AA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T13:30:01.729697+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
