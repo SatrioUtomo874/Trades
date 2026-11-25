@@ -450,3 +450,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:20:52.999171+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HEMIUSDT SHORT — EXPIRED
+- Trade ID: `HEMIUSDT-20261125-205215-65B4DA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:21:03.394614+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
