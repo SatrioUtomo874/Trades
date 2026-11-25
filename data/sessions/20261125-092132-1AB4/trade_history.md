@@ -102,3 +102,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T04:10:44.365735+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SYNUSDT SHORT — CANCELED
+- Trade ID: `SYNUSDT-20261125-111037-63705E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T04:11:28.526836+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
