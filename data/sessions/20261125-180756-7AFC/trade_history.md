@@ -348,3 +348,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:16:24.294030+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## LINKUSDT SHORT — EXPIRED
+- Trade ID: `LINKUSDT-20261125-205320-1827DA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:16:38.544162+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
