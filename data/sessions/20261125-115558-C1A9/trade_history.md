@@ -42,3 +42,9 @@
 - Entry: 0.0792 | Exit: 0.0792
 - PnL: 0 USDT (0%) | R: None
 - Closed: 2026-11-25T05:01:35.727394+00:00 | Reason: EXTERNAL_CLOSE_RECONCILED
+## ARKMUSDT SHORT — CLOSED
+- Trade ID: `ARKMUSDT-20261125-115627-6B6710`
+- Timeframe: M15 | Signal: RED
+- Entry: 0.0702 | Exit: 0.0702
+- PnL: 0 USDT (0%) | R: None
+- Closed: 2026-11-25T05:01:51.338410+00:00 | Reason: MANUAL_CLOSE
