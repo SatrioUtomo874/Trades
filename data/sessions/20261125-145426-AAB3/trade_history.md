@@ -42,3 +42,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T08:15:47.342864+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## GPSUSDT LONG — EXPIRED
+- Trade ID: `GPSUSDT-20261125-151840-F72674`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T08:45:00.842007+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
