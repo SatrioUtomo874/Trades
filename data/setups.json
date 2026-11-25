@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T07:30:12.746698+00:00",
+  "updated_at": "2026-11-25T07:30:14.804683+00:00",
   "active_trades": [
     {
       "trade_id": "ROSEUSDT-20261125-130126-C0ECD7",
@@ -1817,7 +1817,7 @@
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSLSDT-20261125-142349-8D0CBA",
       "tp_client_algo_id": "VTTPSDT-20261125-142349-8D0CBA",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "CANCELED",
       "tp_algo_status": "NEW",
       "protection_state": "TRAILING_REPLACE_PENDING",
       "protection_error": null,
@@ -1894,10 +1894,10 @@
       "entry_touch_missed": false,
       "trailing_last_close_ms": 1795591800000,
       "trailing_last_st": "0.03492065272737539",
-      "trailing_last_reason": "TRAILING_SL_CANCEL_OLD_FIRST",
+      "trailing_last_reason": "OLD_SL_CANCEL_CONFIRMED_SUBMITTING_NEW",
       "trailing_pending_algo_client_id": "VTSLe91fcae5f60842fdae3f408d3746",
       "trailing_pending_algo_trigger": "0.03493",
-      "trailing_replace_phase": "CANCEL_OLD",
+      "trailing_replace_phase": "SUBMIT_NEW",
       "trailing_replace_old_algo_id": 4000002203954580,
       "trailing_replace_old_client_id": "VTSLSDT-20261125-142349-8D0CBA",
       "trailing_replace_old_trigger": "0.03501",
