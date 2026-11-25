@@ -312,3 +312,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T13:45:27.882828+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## LITUSDT SHORT — EXPIRED
+- Trade ID: `LITUSDT-20261125-205338-418DC5`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:15:02.090070+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
