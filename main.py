@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """Volumatic strategy v4 live engine.
 
-Analysis: H4 SuperTrend(10, 2.5) + EMA100 alignment; M15 Volumatic LEN9
+Analysis: H4 SuperTrend(10, 3.0) + EMA100 alignment; M15 Volumatic LEN9
 visual marker (Pine offset=-1) with a four-candle retest window at the visual
 marker candle's close. A valid retest sends one MARKET order. Initial SL and
 M15-close trailing uses SuperTrend(14, 2.5); TP uses the runtime-configured RR
@@ -195,6 +195,17 @@ WS_RECONNECT_MIN = 2
 WS_RECONNECT_MAX = 60
 PRICE_STALE_SECONDS = 15
 HISTORY_REFRESH_SECONDS = 30
+# BTCUSDT USD-M Futures volatility circuit-breaker. Wilder ATR(14) is
+# calculated from CLOSED M5 candles. ALERT requires current ATR >= 2.5x the
+# immediately preceding closed M5 ATR. Counter-trend movement is then watched
+# tick-by-tick from the BTC price captured when ALERT activates.
+BTC_GUARD_SYMBOL = "BTCUSDT"
+BTC_GUARD_ATR_LENGTH = 14
+BTC_GUARD_ATR_SPIKE_MULTIPLE = Decimal("2.5")
+BTC_GUARD_COUNTER_MOVE_PCT = Decimal("0.8")
+BTC_GUARD_M5_HISTORY = 80
+BTC_GUARD_H4_HISTORY = 120
+BTC_GUARD_RETRY_SECONDS = 5.0
 AUTOSTOP_CHECK_SECONDS = 5.0
 AUTOSTOP_BALANCE_REFRESH_SECONDS = 60.0
 AUTOSTOP_PERSIST_SECONDS = 60.0
@@ -892,7 +903,7 @@ class Trade:
             "trailing_replace_submit_ambiguous": bool(self.trailing_replace_submit_ambiguous),
             "trailing_conflict_warning_sent": bool(self.trailing_conflict_warning_sent),
             "exchange_algo_sync_complete": bool(self.exchange_algo_sync_complete),
-            "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
+            "entry_reason": "H4 SuperTrend10/3.0 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
             ),
@@ -1110,7 +1121,9 @@ ENDPOINT_WEIGHTS = {
     "/fapi/v3/balance": 5,
     "/fapi/v2/account": 5,
     "/fapi/v1/accountConfig": 5,
-    "/fapi/v1/openAlgoOrders": 1,
+    "/fapi/v1/openAlgoOrders": 1,  # 40 when queried account-wide; handled by estimator below
+    "/fapi/v1/openOrders": 1,  # 40 when queried account-wide; handled by estimator below
+    "/fapi/v1/batchOrders": 5,
     "/fapi/v1/klines": 2,  # fallback; estimator below accounts for the requested limit
     "/fapi/v1/exchangeInfo": 1,
     "/fapi/v1/time": 1,
@@ -1135,6 +1148,8 @@ def estimate_request_weight(path: str, params: dict[str, Any] | None = None) -> 
         return 10
     if path == "/fapi/v1/ticker/24hr" and params.get("symbol"):
         return 1
+    if path in {"/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"} and not params.get("symbol"):
+        return 40
     if path == "/fapi/v2/positionRisk" and not params.get("symbol"):
         return 10
     return max(1, int(ENDPOINT_WEIGHTS.get(path, 1)))
@@ -2410,6 +2425,7 @@ class BinanceREST:
     def _interval_ms(interval: str) -> int:
         token = str(interval or "").strip().lower()
         aliases = {
+            "1": 60_000, "1m": 60_000,
             "5": 300_000, "5m": 300_000, "15": 900_000, "15m": 900_000,
             "60": 3_600_000, "1h": 3_600_000, "240": 14_400_000,
             "4h": 14_400_000, "d": 86_400_000, "1d": 86_400_000,
@@ -2421,7 +2437,7 @@ class BinanceREST:
     @staticmethod
     def _binance_interval(interval: str) -> str:
         token = str(interval or "").strip()
-        aliases = {"5": "5m", "15": "15m", "60": "1h", "240": "4h", "D": "1d"}
+        aliases = {"1": "1m", "5": "5m", "15": "15m", "60": "1h", "240": "4h", "D": "1d"}
         return aliases.get(token, aliases.get(token.upper(), token.lower()))
 
     @staticmethod
@@ -3777,6 +3793,47 @@ class BinanceRealClient:
             raise BinanceAPIError("Respons cancel order Binance tidak valid.", endpoint="/fapi/v1/order")
         return payload
 
+    async def cancel_batch_orders(
+        self, symbol: str, *, order_ids: list[int] | None = None,
+        client_order_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Cancel up to ten standard USD-M orders for one symbol in one request."""
+        ids = [int(value) for value in (order_ids or []) if int(value) > 0]
+        client_ids = [str(value).strip() for value in (client_order_ids or []) if str(value).strip()]
+        if bool(ids) == bool(client_ids):
+            raise ValueError("Pilih tepat satu: order_ids atau client_order_ids.")
+        if len(ids or client_ids) > 10:
+            raise ValueError("Binance batch cancel maksimal 10 order per request.")
+        params: dict[str, Any] = {"symbol": normalize_symbol(symbol)}
+        if ids:
+            params["orderIdList"] = json.dumps(ids, separators=(",", ":"))
+        else:
+            params["origClientOrderIdList"] = json.dumps(client_ids, separators=(",", ":"))
+        payload = await self._request("DELETE", "/fapi/v1/batchOrders", params)
+        if not isinstance(payload, list):
+            raise BinanceAPIError("Respons batch cancel Binance tidak berbentuk list.", endpoint="/fapi/v1/batchOrders")
+        return [dict(item) if isinstance(item, dict) else {"error": "INVALID_BATCH_CANCEL_RESULT"} for item in payload]
+
+    async def cancel_all_open_orders(self, symbol: str) -> dict[str, Any]:
+        """Cancel every regular open USD-M order for one symbol."""
+        pair = normalize_symbol(symbol)
+        if not pair:
+            raise ValueError("Symbol wajib diisi untuk cancel all open orders.")
+        payload = await self._request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": pair})
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons cancel all open orders tidak valid.", endpoint="/fapi/v1/allOpenOrders")
+        return payload
+
+    async def cancel_all_open_algo_orders(self, symbol: str) -> dict[str, Any]:
+        """Cancel every open USD-M conditional Algo Order for one symbol."""
+        pair = normalize_symbol(symbol)
+        if not pair:
+            raise ValueError("Symbol wajib diisi untuk cancel all Algo Orders.")
+        payload = await self._request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": pair})
+        if not isinstance(payload, dict):
+            raise BinanceAPIError("Respons cancel all Algo Orders tidak valid.", endpoint="/fapi/v1/algoOpenOrders")
+        return payload
+
     async def place_algo_order(
         self, *, symbol: str, side: str, order_type: str, trigger_price: Decimal,
         position_side: str, client_algo_id: str, working_type: str = "CONTRACT_PRICE",
@@ -3814,17 +3871,15 @@ class BinanceRealClient:
             raise BinanceAPIError("Respons query Algo Order Binance tidak valid.", endpoint="/fapi/v1/algoOrder")
         return payload
 
-    async def get_open_algo_orders(self, symbol: str) -> list[dict[str, Any]]:
-        """List live USD-M conditional Algo Orders for one symbol (weight 1)."""
-        pair = normalize_symbol(symbol)
-        if not pair:
-            raise ValueError("Symbol wajib diisi untuk openAlgoOrders.")
-        # The USD-M endpoint takes only the symbol filter (plus the signed
-        # request metadata injected by _request); algoType is not a documented
-        # request parameter for GET /openAlgoOrders.
+    async def get_open_algo_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """List live USD-M conditional Algo Orders; omit symbol for account-wide inventory."""
+        pair = normalize_symbol(symbol) if symbol else ""
+        # Binance supports an account-wide snapshot when symbol is omitted
+        # (higher request weight than a single-symbol query). Emergency cleanup
+        # uses this once to discover every symbol without N serial lookups.
+        params = {"symbol": pair} if pair else None
         payload = await self._request(
-            "GET", "/fapi/v1/openAlgoOrders",
-            {"symbol": pair},
+            "GET", "/fapi/v1/openAlgoOrders", params,
         )
         if not isinstance(payload, list):
             raise BinanceAPIError(
@@ -3973,6 +4028,56 @@ class BinanceRealClient:
         if not isinstance(payload, dict):
             raise BinanceAPIError("Respons market close Binance tidak valid.", endpoint="/fapi/v1/order")
         return payload
+
+    async def place_market_close_batch(
+        self, positions: list[dict[str, Any]], *, client_id_prefix: str = "BTCGC",
+    ) -> list[dict[str, Any]]:
+        """Close up to five USD-M positions with one concurrent batch request.
+
+        Each input must contain symbol, positionSide/positionAmt and the
+        normalized direction. Binance processes batch orders concurrently.
+        One-way mode uses reduceOnly; Hedge Mode uses positionSide and omits
+        reduceOnly as required by the exchange.
+        """
+        if not positions:
+            return []
+        if len(positions) > 5:
+            raise ValueError("Binance USD-M batchOrders maksimal 5 order per request.")
+        dual = await self.ensure_position_mode()
+        nonce = int(time.time() * 1000) % 10_000_000_000
+        batch: list[dict[str, Any]] = []
+        for index, row in enumerate(positions):
+            symbol = normalize_symbol(str(row.get("symbol") or ""))
+            direction = str(row.get("direction") or "").upper()
+            raw_amount = row.get("_abs_position_amt")
+            if raw_amount is None:
+                amount = abs(parse_signed_decimal(str(row.get("positionAmt") or "0")))
+            else:
+                amount = parse_decimal(str(raw_amount))
+            if not symbol or direction not in {"LONG", "SHORT"} or amount <= 0:
+                raise ValueError(f"Posisi batch close tidak valid: {symbol} {direction} {amount}")
+            order: dict[str, Any] = {
+                "symbol": symbol,
+                "side": "SELL" if direction == "LONG" else "BUY",
+                "type": "MARKET",
+                "quantity": format_qty(amount),
+                "newOrderRespType": "RESULT",
+                "newClientOrderId": f"{client_id_prefix}{nonce}{index}",
+            }
+            if dual:
+                order["positionSide"] = direction
+            else:
+                order["positionSide"] = "BOTH"
+                order["reduceOnly"] = "true"
+            batch.append(order)
+
+        payload = await self._request(
+            "POST", "/fapi/v1/batchOrders",
+            {"batchOrders": json.dumps(batch, separators=(",", ":"))},
+        )
+        if not isinstance(payload, list):
+            raise BinanceAPIError("Respons batch market close Binance tidak berbentuk list.", endpoint="/fapi/v1/batchOrders")
+        return [dict(item) if isinstance(item, dict) else {"error": "INVALID_BATCH_RESULT"} for item in payload]
 
 
 # ============================================================
@@ -4308,6 +4413,16 @@ class BinanceWebSocket:
                     break
                 await self._send_subscribe(symbols[start:start + batch_size], stream_type)
                 await asyncio.sleep(0.25)
+
+        # One BTCUSDT USD-M feed protects the whole ALT universe. These two
+        # fixed streams are intentionally independent of the scanner universe.
+        if not self._stop.is_set():
+            # If BTC is also an active position, its M5 protection subscription
+            # above already includes the guard feed; avoid duplicate SUBSCRIBE.
+            if BTC_GUARD_SYMBOL not in self._desired_protection_symbols:
+                await self._send_subscribe([BTC_GUARD_SYMBOL], "kline_5m")
+                await asyncio.sleep(0.25)
+            await self._send_subscribe([BTC_GUARD_SYMBOL], "kline_4h")
 
     async def _handle_market_event(self, data: dict[str, Any]) -> None:
         event_type = str(data.get("e") or "")
@@ -5152,6 +5267,27 @@ class TradingEngine:
         self.ws = BinanceWebSocket(self._on_price, self._on_kline)
         self.user_ws = BinanceUserDataWebSocket(self.real, self._on_user_data_event)
 
+        # BTCUSDT volatility guard state. M5 ATR14 is evaluated only on closed
+        # candles; price reversal is watched tick-by-tick from the alert baseline.
+        self._btc_guard_rows: deque[tuple[int, float, float, float, float]] = deque(maxlen=256)
+        self._btc_guard_history_ready = False
+        self._btc_guard_init_task: asyncio.Task | None = None
+        self._btc_guard_init_lock = asyncio.Lock()
+        self._btc_guard_last_m5_open_ms = 0
+        self._btc_guard_price_m5_open_ms = 0
+        self._btc_guard_last_atr: float | None = None
+        self._btc_guard_last_h4_open_ms = 0
+        self._btc_guard_h4_trend = "CONSOLIDATION"
+        self._btc_guard_mode = "NORMAL"  # NORMAL -> ALERT -> LIQUIDATING
+        self._btc_guard_reference_price: Decimal | None = None
+        self._btc_guard_alert_trend: str | None = None
+        self._btc_guard_alert_started_at: datetime | None = None
+        self._btc_guard_alert_atr_multiple: Decimal | None = None
+        self._btc_emergency_active = False
+        self._btc_forced_close_task: asyncio.Task | None = None
+        self._btc_forced_close_lock = asyncio.Lock()
+        self._btc_guard_last_notice_at = 0.0
+
         self.real_mode = False  # New REAL entries always require explicit /real on.
         self.margin_usdt = DEFAULT_MARGIN_USDT
         self.leverage = DEFAULT_LEVERAGE
@@ -5160,7 +5296,7 @@ class TradingEngine:
         self.timeframe = "M15"
         self.trend_length = 9
         self.ema_filter_length: int | tuple[int, int] | None = None
-        self.btc_filter_enabled = True  # Optional BTC H4 ST10x2.5 + EMA100 trend alignment gate
+        self.btc_filter_enabled = True  # Optional BTC H4 ST10x3.0 + EMA100 trend alignment gate
         self.h1_enabled = False  # Legacy compatibility field; H1 is not used by strategy v4
         self._h1_toggle_generation = 0
         self.supertrend_atr_length = 14
@@ -6775,7 +6911,7 @@ class TradingEngine:
         self._maintenance_task = asyncio.create_task(self._maintenance_loop(), name="volumatic-maintenance")
         self._scan_task = asyncio.create_task(self._scan_loop(), name="volumatic-scanner")
         log.info(
-            "[START] FRESH Volumatic v4 session | scanner=OFF | M15 LEN9 | H4 ST10x2.5 + EMA100 | "
+            "[START] FRESH Volumatic v4 session | scanner=OFF | M15 LEN9 | H4 ST10x3.0 + EMA100 | "
             "M15 ST14x2.5 | permanent bans loaded=%s",
             len(self.banned_symbols),
         )
@@ -6783,7 +6919,7 @@ class TradingEngine:
             "🟢 VOLUMATIC TREND V4 / FRESH SESSION\n\n"
             "Runtime state : CLEAN (trade/sesi lama tidak dimuat otomatis)\n"
             f"Permanent bans: {len(self.banned_symbols)} simbol dimuat\n"
-            "Trend filter  : H4 SuperTrend ATR10 Factor2.5 + EMA100 Close\n"
+            "Trend filter  : H4 SuperTrend ATR10 Factor3.0 + EMA100 Close\n"
             "Signal        : M15 Volumatic LEN9 visual marker (Pine offset -1)\n"
             "Entry         : close candle marker saat retest → MARKET\n"
             "Signal trace  : 4 candle M15 total termasuk candle marker\n"
@@ -6830,7 +6966,11 @@ class TradingEngine:
         # to stop. EMA initialization tasks remain tracked for older restored states so they cannot
         # outlive /end or a Render redeploy and mutate a fresh engine instance.
         ema_workers = list(self._ema_exit_init_tasks.values())
-        workers = [self._scan_task, self._maintenance_task, self._github_sync_task, self.ws._task, self.user_ws._task, self._stats_live_task, *ema_workers]
+        workers = [
+            self._scan_task, self._maintenance_task, self._github_sync_task,
+            self.ws._task, self.user_ws._task, self._stats_live_task,
+            self._btc_guard_init_task, self._btc_forced_close_task, *ema_workers,
+        ]
         for component in (self.ws, self.user_ws):
             try:
                 component._stop.set()
@@ -6994,7 +7134,7 @@ class TradingEngine:
         unknown = int(stats.get("unknown", 0))
         lines = [
             "╔══ VOL / SCAN BATCH REPORT ══╗",
-            f"ENGINE    : M15 VOLUMATIC VISUAL MARKER LEN9 · H4 ST10×2.5 + EMA100 · M15 ST14×2.5",
+            f"ENGINE    : M15 VOLUMATIC VISUAL MARKER LEN9 · H4 ST10×3.0 + EMA100 · M15 ST14×2.5",
             "ENTRY     : close candle visual bubble → retest → MARKET · trace 4 candles total",
             f"TP / SL    : fixed RR 1:{decimal_to_str(rr_min)} from actual fill/initial SL · M15 SuperTrend trailing SL",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
@@ -7007,8 +7147,8 @@ class TradingEngine:
             f"BUBBLES   : BLUE {blue}  ·  RED {red}  ·  NONE {no_signal}",
             f"REJECTED  : {rejected}",
             f"EXECUTION : NEW {created}  ·  FILLED {filled}  ·  DEFERRED {deferred}  ·  UNKNOWN {unknown}",
-            "ALT H4 FILTER: LONG EMA100 < ST10×2.5 < Close; SHORT Close < ST10×2.5 < EMA100; other/equal = SKIP",
-            f"BTC H4 FILTER: {stats.get('btc_filter_status', 'UNKNOWN')} (same ST10×2.5 + EMA100 rule)",
+            "ALT H4 FILTER: LONG EMA100 < ST10×3.0 < Close; SHORT Close < ST10×3.0 < EMA100; other/equal = SKIP",
+            f"BTC H4 FILTER: {stats.get('btc_filter_status', 'UNKNOWN')} (same ST10×3.0 + EMA100 rule)",
             f"ENTRY GUARD: MAX BLOCK {int(stats.get('max_blocked', 0))}",
             f"OTHER     : DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
             f"DURATION  : {elapsed:.1f}s",
@@ -7135,6 +7275,9 @@ class TradingEngine:
                 if not self.scan_enabled:
                     await asyncio.sleep(SCAN_POLL_SECONDS)
                     continue
+                if self._btc_emergency_active:
+                    await asyncio.sleep(SCAN_POLL_SECONDS)
+                    continue
                 if self.autostop_percent is not None and self._autostop_data_hold:
                     await asyncio.sleep(SCAN_POLL_SECONDS)
                     continue
@@ -7182,6 +7325,9 @@ class TradingEngine:
 
     async def _run_scan_cycle(self, boundary_ms: int) -> None:
         """Scan the universe using the locked v4 H4/M15 strategy only."""
+        if self._btc_emergency_active:
+            log.info("[SCAN] held by BTC volatility forced-close guard; scanner remains armed.")
+            return
         if self.autostop_percent is not None and self._autostop_data_hold:
             log.info("[SCAN] held by AUTOSTOP data guard; equity snapshot belum fresh.")
             return
@@ -7244,7 +7390,7 @@ class TradingEngine:
                 except Exception as exc:
                     log.warning("[SCAN V4] BTC H4 filter unavailable; all new entries fail closed: %s", exc)
             log.info(
-                "[SCAN V4] start | M15 Volumatic LEN9 | ALT H4 ST10x2.5 + EMA100 | "
+                "[SCAN V4] start | M15 Volumatic LEN9 | ALT H4 ST10x3.0 + EMA100 | "
                 "BTC H4 filter=%s | M15 ST14x2.5 | pairs=%s | batch_size=%s | cursor=%s",
                 "ON" if btc_filter_enabled else "OFF", len(universe),
                 SCAN_MAX_PAIRS_PER_CYCLE, self._scan_resume_cursor,
@@ -7252,7 +7398,7 @@ class TradingEngine:
             await self._expire_due_pending()
             offset = self._scan_resume_cursor
             while offset < len(universe):
-                if not self._running or not self.scan_enabled:
+                if not self._running or not self.scan_enabled or self._btc_emergency_active:
                     break
                 if self._binance_cooldown_remaining() > 0:
                     self._scan_interrupted_by_cooldown = True
@@ -7277,7 +7423,7 @@ class TradingEngine:
                 configuration_changed = False
                 for local_index, symbol in enumerate(batch):
                     absolute_index = offset + local_index
-                    if not self._running or not self.scan_enabled:
+                    if not self._running or not self.scan_enabled or self._btc_emergency_active:
                         break
                     if bool(self.btc_filter_enabled) != btc_filter_enabled:
                         configuration_changed = True
@@ -7551,6 +7697,10 @@ class TradingEngine:
         """Return scanner state; reaching max blocks entries, not signal analysis."""
         if self._autostop_triggered:
             return "LOCKED AUTOSTOP"
+        if self._btc_emergency_active:
+            return "PAUSED — BTC FORCED CLOSE"
+        if self._btc_guard_mode == "ALERT":
+            return "ON — BTC VOLATILITY ALERT" if self.scan_enabled else "OFF — BTC VOLATILITY ALERT"
         if not self.scan_enabled:
             return "WAITING SCHEDULE" if self.scan_schedule_waiting else "OFF"
         if self._binance_cooldown_remaining() > 0:
@@ -7758,6 +7908,8 @@ class TradingEngine:
 
     async def _handle_signal(self, signal: dict[str, Any], expiry_ms: int) -> str:
         """Create a local retest watch at the visual Volumatic candle close."""
+        if self._btc_emergency_active:
+            return "BTC_FORCED_CLOSE_ACTIVE"
         if not self.scan_enabled:
             return "SCANNER_OFF"
         if (
@@ -7801,6 +7953,8 @@ class TradingEngine:
         await self._cancel_opposite_signal_trace(pair, bubble)
 
         async with self._trade_lock:
+            if self._btc_emergency_active:
+                return "BTC_FORCED_CLOSE_ACTIVE"
             if not self.scan_enabled:
                 return "SCANNER_OFF"
             if (
@@ -7948,7 +8102,7 @@ class TradingEngine:
             await self.ws.add_symbol(pair)
             await self.reply(
                 f"{'🔵' if direction == 'LONG' else '🔴'} SIGNAL TRACE {direction} • {pair}\n"
-                f"H4 trend: {signal.get('trend')} | ST10×2.5 + EMA100\n"
+                f"H4 trend: {signal.get('trend')} | ST10×3.0 + EMA100\n"
                 f"M15: Volumatic LEN9 visual marker\n"
                 f"Bubble candle: {format_wib(bubble_time)}\n"
                 f"TARGET ENTRY: {fmt_price(entry)} (close candle pembentuk bubble)\n"
@@ -8015,7 +8169,7 @@ class TradingEngine:
         never start a second MARKET execution.
         """
         if (
-            not self._running or not self.scan_enabled or self._real_route_waiting_user or trade.status != "PENDING" or not trade.real_intent
+            not self._running or not self.scan_enabled or self._btc_emergency_active or self._real_route_waiting_user or trade.status != "PENDING" or not trade.real_intent
             or trade.pending_cancel_reason == "SCANNER_OFF"
             or trade.real_enabled or trade.entry_inflight
         ):
@@ -8097,6 +8251,12 @@ class TradingEngine:
     async def _run_market_entry(self, trade: Trade, trigger_price: Decimal, source: str) -> None:
         if trade.status != "PENDING" or trade.real_enabled:
             return
+        if self._btc_emergency_active:
+            raise MarketEntryRejected(
+                "BTC_VOLATILITY_FORCED_CLOSE_ACTIVE",
+                "BTC volatility guard sedang menutup seluruh posisi; MARKET entry baru diblokir.",
+                result="CANCELED", notify=False,
+            )
         if trade.pending_cancel_reason == "SCANNER_OFF":
             raise MarketEntryRejected(
                 "SCANNER_OFF_BEFORE_ENTRY", "Setup dibuat sebelum scanner OFF; MARKET entry dibatalkan.",
@@ -9935,6 +10095,13 @@ class TradingEngine:
                 # Account Guard uses a one-time /real on wallet baseline, then local
                 # realized PnL + live floating PnL. No periodic wallet-balance REST poll.
 
+                # Forced-close owns order/position mutations until the account is
+                # verified flat. Do not let normal reconciliation or queued commands
+                # submit/replace orders while the emergency task is liquidating.
+                if self._btc_emergency_active:
+                    await asyncio.sleep(1.0)
+                    continue
+
                 # Commands are FIFO and only one API-dependent command per pass. /real off
                 # remains immediate and can cancel a queued /real on.
                 await self._process_deferred_commands()
@@ -10241,7 +10408,7 @@ class TradingEngine:
 
     async def _handle_closed_m15_bubble(self, symbol: str, kline: dict[str, Any]) -> None:
         """Consume each closed M15 bar for opposite-bubble cancellation and trailing SL."""
-        if kline.get("x") is not True or str(kline.get("i") or "").lower() != "15m":
+        if self._btc_emergency_active or kline.get("x") is not True or str(kline.get("i") or "").lower() != "15m":
             return
         pair = normalize_symbol(symbol)
         # A permanent ban blocks new entries only. Existing positions must still
@@ -11347,7 +11514,7 @@ class TradingEngine:
 
     async def _process_m5_position_candle(self, symbol: str, kline: dict[str, Any]) -> None:
         """Consume one closed M5 candle for active-position SL/TP and exit ordering."""
-        if not isinstance(kline, dict) or kline.get("x") is not True or str(kline.get("i") or "").lower() != "5m":
+        if self._btc_emergency_active or not isinstance(kline, dict) or kline.get("x") is not True or str(kline.get("i") or "").lower() != "5m":
             return
         pair = normalize_symbol(symbol)
         try:
@@ -11828,16 +11995,630 @@ class TradingEngine:
         """Compatibility no-op. No H1 kline is consumed for position exits."""
         return
 
+    @staticmethod
+    def _btc_guard_atr_pair(
+        rows: deque[tuple[int, float, float, float, float]] | list[tuple[int, float, float, float, float]],
+    ) -> tuple[float | None, float | None]:
+        """Return (previous closed ATR14, latest closed ATR14) using Wilder RMA."""
+        if len(rows) < BTC_GUARD_ATR_LENGTH + 1:
+            return None, None
+        data = np.asarray(list(rows), dtype=np.float64)
+        high, low, close = data[:, 2], data[:, 3], data[:, 4]
+        tr = np.empty(len(data), dtype=np.float64)
+        tr[0] = high[0] - low[0]
+        if len(data) > 1:
+            tr[1:] = np.maximum.reduce((
+                high[1:] - low[1:],
+                np.abs(high[1:] - close[:-1]),
+                np.abs(low[1:] - close[:-1]),
+            ))
+        period = BTC_GUARD_ATR_LENGTH
+        atr = np.full(len(tr), np.nan, dtype=np.float64)
+        atr[period - 1] = float(np.mean(tr[:period]))
+        for index in range(period, len(tr)):
+            atr[index] = (atr[index - 1] * (period - 1) + tr[index]) / period
+        if len(atr) < 2 or not (np.isfinite(atr[-1]) and np.isfinite(atr[-2])):
+            return None, None
+        return float(atr[-2]), float(atr[-1])
+
+    @staticmethod
+    def _btc_guard_h4_trend_from_rows(rows: np.ndarray) -> tuple[str, int]:
+        """Use the strategy's exact H4 EMA100 + ST10x3.0 classifier."""
+        if not isinstance(rows, np.ndarray) or len(rows) < volumatic.H4_EMA_LENGTH:
+            return "CONSOLIDATION", 0
+        close = np.asarray(rows["c"], dtype=np.float64)
+        ema = volumatic.calculate_ema_tv(close, volumatic.H4_EMA_LENGTH)
+        st, _direction = volumatic.calculate_supertrend(
+            rows,
+            atr_length=volumatic.H4_SUPERTREND_ATR_LENGTH,
+            factor=volumatic.H4_SUPERTREND_FACTOR,
+        )
+        trend = volumatic.classify_h4_trend(close[-1], st[-1], ema[-1])
+        return str(trend), int(rows["t"][-1])
+
+    async def _initialize_btc_guard_history(self) -> None:
+        """Warm BTC M5 ATR14 and H4 trend from USD-M Futures public klines."""
+        async with self._btc_guard_init_lock:
+            if self._btc_guard_history_ready or not self._running:
+                return
+            try:
+                m5_rows, h4_rows = await asyncio.gather(
+                    self.rest.get_klines(BTC_GUARD_SYMBOL, "5m", BTC_GUARD_M5_HISTORY),
+                    self.rest.get_klines(BTC_GUARD_SYMBOL, "4h", BTC_GUARD_H4_HISTORY),
+                )
+                if not isinstance(m5_rows, np.ndarray) or len(m5_rows) < BTC_GUARD_ATR_LENGTH + 1:
+                    raise RuntimeError("History BTC M5 belum cukup untuk ATR14.")
+                self._btc_guard_rows.clear()
+                for row in m5_rows:
+                    self._btc_guard_rows.append((
+                        int(row["t"]), float(row["o"]), float(row["h"]),
+                        float(row["l"]), float(row["c"]),
+                    ))
+                previous_atr, latest_atr = self._btc_guard_atr_pair(self._btc_guard_rows)
+                if latest_atr is None:
+                    raise RuntimeError("ATR14 BTC M5 belum valid.")
+                self._btc_guard_last_m5_open_ms = int(self._btc_guard_rows[-1][0])
+                self._btc_guard_last_atr = latest_atr
+                trend, h4_open_ms = self._btc_guard_h4_trend_from_rows(h4_rows)
+                self._btc_guard_h4_trend = trend
+                self._btc_guard_last_h4_open_ms = h4_open_ms
+                self._btc_guard_history_ready = True
+                log.info(
+                    "[BTC GUARD] ready | symbol=%s | M5 ATR14=%s | H4 trend=%s | H4 open=%s",
+                    BTC_GUARD_SYMBOL, fmt_num(latest_atr, 8), trend, h4_open_ms,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._btc_guard_history_ready = False
+                log.warning("[BTC GUARD] initial history belum siap; akan dicoba ulang: %s", exc)
+
+    async def _refresh_btc_guard_h4_trend(self) -> None:
+        """Refresh only on a newly closed BTC H4 candle."""
+        try:
+            rows = await self.rest.get_klines(BTC_GUARD_SYMBOL, "4h", BTC_GUARD_H4_HISTORY)
+            trend, open_ms = self._btc_guard_h4_trend_from_rows(rows)
+            if open_ms <= self._btc_guard_last_h4_open_ms:
+                return
+            previous = self._btc_guard_h4_trend
+            self._btc_guard_h4_trend = trend
+            self._btc_guard_last_h4_open_ms = open_ms
+            log.info("[BTC GUARD] H4 trend refresh | %s -> %s | open=%s", previous, trend, open_ms)
+            # In alert mode, the confirmed H4 regime remains authoritative. If
+            # it flips (or becomes consolidation), re-arm the 0.8% reference from
+            # the current BTC price so the trigger always opposes the latest H4 trend.
+            if self._btc_guard_mode == "ALERT" and trend != self._btc_guard_alert_trend:
+                price = self._current_price(BTC_GUARD_SYMBOL)
+                self._btc_guard_alert_trend = trend
+                self._btc_guard_reference_price = (
+                    price if trend in {"BULLISH", "BEARISH"} else None
+                )
+                if trend in {"BULLISH", "BEARISH"} and price is not None:
+                    log.info("[BTC GUARD] H4 alert direction re-armed | trend=%s | price=%s", trend, fmt_price(price))
+                    await self.reply(
+                        "⚠️ BTC VOLATILITY GUARD · H4 TREND DIPERBARUI\n"
+                        f"BTCUSDT Futures H4: {trend}\n"
+                        f"Harga acuan baru: {fmt_price(price)}\n"
+                        "Pemantauan gerak berlawanan 0.8% memakai arah H4 terbaru."
+                    )
+                else:
+                    log.info("[BTC GUARD] H4 trend became %s; 0.8%% counter-move trigger waits for a directional H4 regime.", trend)
+        except BinanceRateLimitError:
+            raise
+        except Exception as exc:
+            log.warning("[BTC GUARD] H4 trend refresh gagal: %s", exc)
+
+    async def _handle_btc_guard_kline(self, interval: str, kline: dict[str, Any]) -> None:
+        """Use closed BTC M5 candles for ATR and current M5 open for price risk."""
+        is_closed = kline.get("x") is True
+        if interval == "4h":
+            if not is_closed:
+                return
+            if not self._btc_guard_history_ready:
+                task = self._btc_guard_init_task
+                if task is None or task.done():
+                    self._btc_guard_init_task = asyncio.create_task(
+                        self._initialize_btc_guard_history(), name="btc-volatility-guard-init"
+                    )
+                return
+            await self._refresh_btc_guard_h4_trend()
+            return
+        if interval != "5m":
+            return
+
+        # The M5 price threshold is measured inside each M5 candle (open -> live
+        # aggTrade), not accumulated across multiple 5-minute candles. This is
+        # separate from ATR, which is always calculated only after candle close.
+        if not is_closed:
+            if not self._btc_guard_history_ready:
+                task = self._btc_guard_init_task
+                if task is None or task.done():
+                    self._btc_guard_init_task = asyncio.create_task(
+                        self._initialize_btc_guard_history(), name="btc-volatility-guard-init"
+                    )
+                return
+            if self._btc_guard_mode == "ALERT":
+                try:
+                    open_ms = int(kline["t"])
+                    if open_ms > self._btc_guard_price_m5_open_ms:
+                        self._btc_guard_price_m5_open_ms = open_ms
+                        trend = self._btc_guard_h4_trend
+                        self._btc_guard_alert_trend = trend
+                        if trend in {"BULLISH", "BEARISH"}:
+                            self._btc_guard_reference_price = Decimal(str(kline["o"]))
+                            log.info(
+                                "[BTC GUARD] new M5 price window | trend=%s | open=%s | reference=%s",
+                                trend, open_ms, fmt_price(self._btc_guard_reference_price),
+                            )
+                        else:
+                            self._btc_guard_reference_price = None
+                except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+                    log.debug("[BTC GUARD] M5 forming candle baseline not ready: %s", exc)
+            return
+
+        if not self._btc_guard_history_ready:
+            task = self._btc_guard_init_task
+            if task is None or task.done():
+                self._btc_guard_init_task = asyncio.create_task(
+                    self._initialize_btc_guard_history(), name="btc-volatility-guard-init"
+                )
+            return
+        try:
+            open_ms = int(kline["t"])
+            if open_ms <= self._btc_guard_last_m5_open_ms:
+                return
+            if self._btc_guard_last_m5_open_ms and open_ms != self._btc_guard_last_m5_open_ms + 300_000:
+                # A WS gap invalidates a one-candle ATR comparison; reload a
+                # short contiguous REST tail instead of fabricating missing bars.
+                self._btc_guard_history_ready = False
+                task = self._btc_guard_init_task
+                if task is None or task.done():
+                    self._btc_guard_init_task = asyncio.create_task(
+                        self._initialize_btc_guard_history(), name="btc-volatility-guard-reload"
+                    )
+                log.warning("[BTC GUARD] M5 stream gap; ATR comparison paused until history is refreshed.")
+                return
+            row = (
+                open_ms, float(kline["o"]), float(kline["h"]),
+                float(kline["l"]), float(kline["c"]),
+            )
+            if not all(math.isfinite(value) and value > 0 for value in row[1:]):
+                return
+            previous_atr = self._btc_guard_last_atr
+            previous_close = float(self._btc_guard_rows[-1][4]) if self._btc_guard_rows else float(row[4])
+            true_range = max(
+                row[2] - row[3],
+                abs(row[2] - previous_close),
+                abs(row[3] - previous_close),
+            )
+            self._btc_guard_rows.append(row)
+            self._btc_guard_last_m5_open_ms = open_ms
+            if previous_atr is None or previous_atr <= 0:
+                _previous, seeded_atr = self._btc_guard_atr_pair(self._btc_guard_rows)
+                if seeded_atr is None:
+                    return
+                self._btc_guard_last_atr = seeded_atr
+                return
+            latest_atr = (float(previous_atr) * (BTC_GUARD_ATR_LENGTH - 1) + true_range) / BTC_GUARD_ATR_LENGTH
+            if not math.isfinite(latest_atr) or latest_atr <= 0:
+                return
+            self._btc_guard_last_atr = latest_atr
+            atr_multiple = Decimal(str(latest_atr)) / Decimal(str(previous_atr))
+            # Both conditions are mandatory: ATR must reach 2.5x first, then
+            # the live BTC price must move >0.8% against the open of an M5 bar.
+            if atr_multiple < BTC_GUARD_ATR_SPIKE_MULTIPLE or self._btc_guard_mode != "NORMAL":
+                return
+            reference = self._current_price(BTC_GUARD_SYMBOL) or Decimal(str(row[4]))
+            self._btc_guard_mode = "ALERT"
+            self._btc_guard_reference_price = reference
+            self._btc_guard_alert_trend = self._btc_guard_h4_trend
+            self._btc_guard_alert_started_at = now_utc()
+            self._btc_guard_alert_atr_multiple = atr_multiple
+            # Prime the next M5 window; its first forming event carries this
+            # same open timestamp, so it will not overwrite the trigger baseline.
+            self._btc_guard_price_m5_open_ms = open_ms + 300_000
+            log.warning(
+                "[BTC GUARD] ALERT | ATR14 M5 multiple=%sx | ATR prev=%s current=%s | H4=%s | reference=%s",
+                fmt_num(atr_multiple, 3), fmt_num(previous_atr, 8), fmt_num(latest_atr, 8),
+                self._btc_guard_alert_trend, fmt_price(reference),
+            )
+            await self.reply(
+                "⚠️ BTC VOLATILITY GUARD · MODE WASPADA\n"
+                f"Market: BTCUSDT USD-M Futures\n"
+                f"ATR(14) M5: {fmt_num(atr_multiple, 3)}× ATR sebelumnya (ambang 2.5×)\n"
+                f"Trend H4 (EMA100 + ST10×3.0): {self._btc_guard_alert_trend}\n"
+                f"Harga acuan sementara: {fmt_price(reference)}\n"
+                "Syarat pertama terpenuhi. Forced Close menunggu BTC bergerak >0.8% melawan trend H4 dalam satu candle M5."
+            )
+        except BinanceRateLimitError:
+            raise
+        except Exception as exc:
+            log.warning("[BTC GUARD] M5 kline processing gagal: %s", exc, exc_info=True)
+
+    def _check_btc_guard_price(self, price: Decimal) -> None:
+        """Trigger if live BTC price moves >0.8% against the current M5 open and H4 trend."""
+        if self._btc_guard_mode != "ALERT" or self._btc_emergency_active:
+            return
+        trend = self._btc_guard_alert_trend
+        reference = self._btc_guard_reference_price
+        if trend not in {"BULLISH", "BEARISH"} or reference is None or reference <= 0:
+            return
+        if trend == "BULLISH":
+            move_pct = (reference - price) / reference * Decimal("100")
+        else:
+            move_pct = (price - reference) / reference * Decimal("100")
+        if move_pct <= BTC_GUARD_COUNTER_MOVE_PCT:
+            return
+        self._btc_guard_mode = "LIQUIDATING"
+        self._btc_emergency_active = True
+        self._scan_trigger_now = False
+        self._signal_retries.clear()
+        log.critical(
+            "[BTC GUARD] FORCED CLOSE TRIGGERED | trend=%s | reference=%s | BTC=%s | counter_move=%s%%",
+            trend, fmt_price(reference), fmt_price(price), fmt_num(move_pct, 3),
+        )
+        task = self._btc_forced_close_task
+        if task is None or task.done():
+            self._btc_forced_close_task = asyncio.create_task(
+                self._run_btc_forced_close(price, move_pct), name="btc-volatility-forced-close"
+            )
+
+    @staticmethod
+    def _btc_guard_position_rows(account: dict[str, Any]) -> list[dict[str, Any]]:
+        """Normalize all live non-zero USD-M positions from /fapi/v2/account."""
+        output: list[dict[str, Any]] = []
+        for raw in (account.get("positions") or []):
+            if not isinstance(raw, dict):
+                continue
+            symbol = normalize_symbol(str(raw.get("symbol") or ""))
+            try:
+                amount = parse_signed_decimal(str(raw.get("positionAmt") or "0"))
+            except ValueError:
+                continue
+            if not symbol or amount == 0:
+                continue
+            direction = str(raw.get("positionSide") or "BOTH").upper()
+            if direction not in {"LONG", "SHORT"}:
+                direction = "LONG" if amount > 0 else "SHORT"
+            row = dict(raw)
+            row["symbol"] = symbol
+            row["direction"] = direction
+            row["_position_amount_decimal"] = amount
+            row["_abs_position_amt"] = abs(amount)
+            output.append(row)
+        return output
+
+    async def _run_btc_forced_close(self, trigger_price: Decimal, move_pct: Decimal) -> None:
+        """Bulk-close USD-M exposure and verify every trace/order/position is gone.
+
+        New entries are gated immediately by _btc_emergency_active. The REAL
+        liquidation uses batch MARKET reduce-only orders (max five per request),
+        cancels pending entry orders before taking the post-cancel position
+        snapshot, and only removes protective Algo Orders after the account is
+        confirmed flat. Scanner ON/OFF is never modified.
+        """
+        async with self._btc_forced_close_lock:
+            if not self._running:
+                return
+            trend = self._btc_guard_alert_trend or "UNKNOWN"
+            reference = self._btc_guard_reference_price
+            reason = "BTC_M5_ATR14_X2_5_H4_COUNTER_MOVE"
+            real_cleanup_enabled = bool(
+                self.real_mode or self.exchange_positions
+                or any(t.real_enabled or t.exchange_adopted or t.real_intent for t in self.active_trades.values())
+            )
+            cleanup_symbols: set[str] = {
+                t.pair for t in self.active_trades.values()
+                if t.pair and (t.real_enabled or t.exchange_adopted)
+            }
+            last_progress_notice = 0.0
+            algo_inventory_loaded = False
+            await self.reply(
+                "🛑 BTC FORCED CLOSE DIMULAI\n"
+                f"Trend H4: {trend}\nHarga acuan: {fmt_price(reference)}\n"
+                f"Harga trigger: {fmt_price(trigger_price)} · gerak berlawanan {fmt_num(move_pct, 3)}%\n"
+                "Kondisi terpenuhi: ATR(14) M5 ≥2.5× ATR sebelumnya DAN harga BTC bergerak >0.8% berlawanan dari H4. Blokir entry, batalkan pending, lalu tutup seluruh posisi USD-M secara batch. Scanner tetap ON dan lanjut setelah verifikasi bersih."
+            )
+            # Let an in-progress signal-creation critical section finish before
+            # clearing traces. The emergency flag was already set synchronously.
+            async with self._trade_lock:
+                pass
+            entry_tasks = list(self._entry_tasks)
+            if entry_tasks:
+                try:
+                    done_tasks, still_running = await asyncio.wait(entry_tasks, timeout=30.0)
+                    for finished in done_tasks:
+                        try:
+                            finished.result()
+                        except Exception as entry_exc:
+                            log.warning("[BTC GUARD] entry task berhenti dengan error sebelum liquidation: %s", entry_exc)
+                    if still_running:
+                        log.warning("[BTC GUARD] %s MARKET entry task masih berjalan; emergency akan menunggu entry lock.", len(still_running))
+                except asyncio.TimeoutError:
+                    log.warning("[BTC GUARD] MARKET entry task belum selesai dalam 30 detik; entry lock tetap melindungi penutupan berikutnya.")
+
+            while self._running and self._btc_emergency_active:
+                cooldown = self._binance_cooldown_remaining()
+                if cooldown > 0:
+                    await asyncio.sleep(min(BTC_GUARD_RETRY_SECONDS, max(1.0, cooldown)))
+                    continue
+                try:
+                    # This lock serializes with the bot's MARKET entry executor.
+                    async with self._entry_exec_lock:
+                        pending = [t for t in list(self.active_trades.values()) if t.status == "PENDING"]
+                        for trade in pending:
+                            trade.pending_cancel_reason = reason
+                        if pending:
+                            results = await asyncio.gather(
+                                *(self._cancel_pending_trade(t, reason) for t in pending),
+                                return_exceptions=True,
+                            )
+                            for trade, result in zip(pending, results):
+                                if isinstance(result, Exception):
+                                    log.warning("[BTC GUARD] pending trace/order %s belum selesai dibatalkan: %s", trade.pair, result)
+
+                        remaining_positions: list[dict[str, Any]] = []
+                        remaining_open_orders: list[dict[str, Any]] = []
+                        remaining_algo_orders: list[tuple[str, int]] = []
+                        close_prices: dict[tuple[str, str], Decimal] = {}
+                        unresolved_protection: list[str] = []
+
+                        if real_cleanup_enabled:
+                            if not self.real.configured:
+                                raise RuntimeError("REAL exposure terdeteksi tetapi API Binance belum terkonfigurasi.")
+
+                            # Discover account-wide standard pending orders. Cancel
+                            # opening orders first so they cannot refill a position
+                            # after the market-close batch. Existing stop/TP exits
+                            # are left armed until the position is flat.
+                            open_rows = await self.real.get_open_orders(None)
+                            if not algo_inventory_loaded:
+                                # Discover every conditional order symbol account-wide
+                                # once. Keep these exits armed until all positions are flat.
+                                algo_inventory = await self.real.get_open_algo_orders(None)
+                                for algo_row in algo_inventory:
+                                    algo_pair = normalize_symbol(str(algo_row.get("symbol") or algo_row.get("s") or ""))
+                                    if algo_pair:
+                                        cleanup_symbols.add(algo_pair)
+                                algo_inventory_loaded = True
+                            live_rows = [
+                                row for row in open_rows
+                                if str(row.get("status") or row.get("X") or "NEW").upper()
+                                in {"NEW", "PARTIALLY_FILLED"}
+                            ]
+                            by_symbol: dict[str, list[dict[str, Any]]] = {}
+                            for row in live_rows:
+                                pair = normalize_symbol(str(row.get("symbol") or row.get("s") or ""))
+                                if not pair:
+                                    continue
+                                cleanup_symbols.add(pair)
+                                order_type = str(row.get("type") or row.get("o") or "LIMIT").upper()
+                                if order_type in {"STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET", "TRAILING_STOP_MARKET"}:
+                                    continue  # retain protective exits until flat
+                                by_symbol.setdefault(pair, []).append(row)
+
+                            for pair, pair_orders in by_symbol.items():
+                                for offset in range(0, len(pair_orders), 10):
+                                    chunk = pair_orders[offset:offset + 10]
+                                    order_ids: list[int] = []
+                                    client_ids: list[str] = []
+                                    for row in chunk:
+                                        try:
+                                            oid = int(row.get("orderId") or row.get("i") or 0)
+                                        except (TypeError, ValueError):
+                                            oid = 0
+                                        if oid > 0:
+                                            order_ids.append(oid)
+                                        else:
+                                            client_id = str(row.get("clientOrderId") or row.get("c") or "").strip()
+                                            if client_id:
+                                                client_ids.append(client_id)
+                                    try:
+                                        if order_ids:
+                                            await self.real.cancel_batch_orders(pair, order_ids=order_ids)
+                                        if client_ids:
+                                            await self.real.cancel_batch_orders(pair, client_order_ids=client_ids)
+                                    except Exception as cancel_exc:
+                                        log.warning("[BTC GUARD] batch cancel entry %s gagal; akan retry: %s", pair, cancel_exc)
+
+                            # Re-read positions after entry cancellations to catch
+                            # partial fills racing the cancel request.
+                            account = await self.real.get_account_info()
+                            positions = self._btc_guard_position_rows(account)
+                            for row in positions:
+                                cleanup_symbols.add(row["symbol"])
+
+                            # Binance batchOrders accepts max five orders and
+                            # processes orders in a batch concurrently.
+                            for offset in range(0, len(positions), 5):
+                                chunk = positions[offset:offset + 5]
+                                try:
+                                    responses = await self.real.place_market_close_batch(chunk, client_id_prefix="BTCGC")
+                                except Exception as batch_exc:
+                                    log.warning("[BTC GUARD] batch close request gagal untuk %s: %s", [p["symbol"] for p in chunk], batch_exc)
+                                    continue
+                                for position, response in zip(chunk, responses):
+                                    key = (position["symbol"], position["direction"])
+                                    try:
+                                        avg = Decimal(str(response.get("avgPrice") or "0"))
+                                    except (InvalidOperation, TypeError, ValueError):
+                                        avg = Decimal("0")
+                                    if avg.is_finite() and avg > 0:
+                                        close_prices[key] = avg
+                                    if response.get("code") is not None or response.get("error"):
+                                        log.warning("[BTC GUARD] batch close rejected %s %s: %s", *key, response)
+                                    else:
+                                        log.info(
+                                            "[BTC GUARD] batch close submitted %s %s status=%s avg=%s",
+                                            *key, str(response.get("status") or "UNKNOWN").upper(), fmt_price(avg),
+                                        )
+
+                            # The exchange account snapshot, not an order ACK,
+                            # determines whether exposure is actually flat.
+                            account_after = await self.real.get_account_info()
+                            remaining_positions = self._btc_guard_position_rows(account_after)
+                            if not remaining_positions:
+                                self.exchange_positions.clear()
+                                self.exchange_snapshot_at = now_utc()
+
+                        real_filled = [
+                            t for t in list(self.active_trades.values())
+                            if t.status == "FILLED" and (t.real_enabled or t.exchange_adopted)
+                        ]
+                        real_flat_keys = self._exchange_position_keys(remaining_positions)
+                        flat_real_trades = [
+                            t for t in real_filled if (t.pair, t.direction) not in real_flat_keys
+                        ]
+                        if flat_real_trades:
+                            protection_results = await asyncio.gather(
+                                *(self._cancel_real_protections(t) for t in flat_real_trades),
+                                return_exceptions=True,
+                            )
+                            for trade, result in zip(flat_real_trades, protection_results):
+                                if result is not True:
+                                    unresolved_protection.append(trade.pair)
+                                    if isinstance(result, Exception):
+                                        log.warning("[BTC GUARD] protection cleanup %s gagal: %s", trade.pair, result)
+                                    continue
+                                key = (trade.pair, trade.direction)
+                                exit_price = close_prices.get(key) or self._current_price(trade.pair) or trade.fill_price or trade.entry
+                                await self._finalize_trade(trade, "CLOSED", exit_price, reason)
+
+                        paper_filled = [
+                            t for t in list(self.active_trades.values())
+                            if t.status == "FILLED" and not (t.real_enabled or t.exchange_adopted)
+                        ]
+                        for trade in paper_filled:
+                            exit_price = self._current_price(trade.pair) or trade.fill_price or trade.entry
+                            if exit_price is not None and exit_price > 0:
+                                await self._finalize_trade(trade, "CLOSED", exit_price, reason)
+
+                        # Once the position snapshot is flat, cancel every remaining
+                        # ordinary and conditional order for all symbols discovered
+                        # from live positions, open orders, and the local trade book.
+                        if real_cleanup_enabled and not remaining_positions:
+                            all_symbols = set(cleanup_symbols)
+                            try:
+                                final_open_rows = await self.real.get_open_orders(None)
+                                for row in final_open_rows:
+                                    pair = normalize_symbol(str(row.get("symbol") or row.get("s") or ""))
+                                    if pair:
+                                        all_symbols.add(pair)
+                            except Exception as order_read_exc:
+                                log.warning("[BTC GUARD] openOrders final snapshot gagal: %s", order_read_exc)
+                                final_open_rows = []
+
+                            for pair in sorted(all_symbols):
+                                try:
+                                    await self.real.cancel_all_open_orders(pair)
+                                except Exception as cancel_exc:
+                                    log.warning("[BTC GUARD] cancel all open orders %s gagal: %s", pair, cancel_exc)
+                                try:
+                                    await self.real.cancel_all_open_algo_orders(pair)
+                                except BinanceAPIError as algo_exc:
+                                    # -2011/-2013 are treated as no live algo order
+                                    # only after the subsequent openAlgoOrders query.
+                                    log.warning("[BTC GUARD] cancel all Algo Orders %s belum terkonfirmasi: %s", pair, algo_exc)
+                                except Exception as algo_exc:
+                                    log.warning("[BTC GUARD] cancel all Algo Orders %s gagal: %s", pair, algo_exc)
+
+                            # Verify again after cancellations: a delayed entry fill
+                            # must keep the emergency lock active, never resume scan.
+                            account_final = await self.real.get_account_info()
+                            remaining_positions = self._btc_guard_position_rows(account_final)
+                            remaining_open_orders = [
+                                row for row in await self.real.get_open_orders(None)
+                                if str(row.get("status") or row.get("X") or "NEW").upper()
+                                in {"NEW", "PARTIALLY_FILLED"}
+                            ]
+                            # One account-wide Algo snapshot verifies every symbol.
+                            # If a late Algo order appears on a new symbol, keep the
+                            # lock and include that symbol in the next cleanup pass.
+                            algo_final_rows = await self.real.get_open_algo_orders(None)
+                            algo_counts: dict[str, int] = {}
+                            for algo_row in algo_final_rows:
+                                algo_pair = normalize_symbol(str(algo_row.get("symbol") or algo_row.get("s") or ""))
+                                algo_counts[algo_pair or "UNKNOWN"] = algo_counts.get(algo_pair or "UNKNOWN", 0) + 1
+                                if algo_pair:
+                                    cleanup_symbols.add(algo_pair)
+                            remaining_algo_orders.extend(sorted(algo_counts.items()))
+                            if not remaining_positions:
+                                self.exchange_positions.clear()
+                                self.exchange_snapshot_at = now_utc()
+
+                        still_active = [
+                            t for t in self.active_trades.values()
+                            if t.status in {"PENDING", "FILLED"}
+                        ]
+                        clean = (
+                            not still_active and not remaining_positions
+                            and not remaining_open_orders and not remaining_algo_orders
+                            and not unresolved_protection
+                        )
+                        if clean:
+                            break
+
+                        now_mono = time.monotonic()
+                        if now_mono - last_progress_notice >= 30.0:
+                            last_progress_notice = now_mono
+                            log.warning(
+                                "[BTC GUARD] liquidation pending | trades=%s | exchange_positions=%s | open_orders=%s | open_algo=%s | protection_cleanup=%s | cooldown=%ss",
+                                len(still_active), len(remaining_positions), len(remaining_open_orders),
+                                len(remaining_algo_orders), len(unresolved_protection),
+                                int(self._binance_cooldown_remaining()),
+                            )
+                    await asyncio.sleep(BTC_GUARD_RETRY_SECONDS)
+                except asyncio.CancelledError:
+                    raise
+                except BinanceRateLimitError as exc:
+                    self._was_in_binance_cooldown = True
+                    await self._notify_binance_cooldown(exc, source="BTC FORCED CLOSE")
+                    await asyncio.sleep(BTC_GUARD_RETRY_SECONDS)
+                except Exception as exc:
+                    log.exception("[BTC GUARD] emergency liquidation cycle gagal; tetap terkunci dan retry: %s", exc)
+                    await asyncio.sleep(BTC_GUARD_RETRY_SECONDS)
+
+            if not self._running:
+                return
+            # Only verified-flat accounts and terminal local traces may release
+            # the circuit breaker and re-arm the existing continuous scanner.
+            self._signal_retries.clear()
+            self._bubble_trace_states.clear()
+            self._live_signal_candles.clear()
+            self._live_signal_last_eval.clear()
+            self._live_signal_seen.clear()
+            self._scan_resume_cursor = 0
+            self._scan_resume_boundary_ms = 0
+            self._btc_guard_mode = "NORMAL"
+            self._btc_guard_reference_price = None
+            self._btc_guard_price_m5_open_ms = 0
+            self._btc_guard_alert_trend = None
+            self._btc_guard_alert_started_at = None
+            self._btc_guard_alert_atr_multiple = None
+            self._btc_emergency_active = False
+            self._scan_trigger_now = bool(self.scan_enabled and not self._autostop_triggered)
+            await self._sync_ws_symbols()
+            await self.reply(
+                "✅ BTC FORCED CLOSE SELESAI\n"
+                "Verifikasi: posisi USD-M flat, pending/signal trace strategi bersih, dan regular/algo orders terkonfirmasi bersih.\n"
+                f"Scanner: {'ON · scanning dilanjutkan' if self.scan_enabled and self._scan_trigger_now else ('ON' if self.scan_enabled else 'OFF')}\n"
+                "Mode BTC Guard kembali NORMAL."
+            )
+
     async def _on_kline(self, symbol: str, kline: dict[str, Any]) -> None:
-        """Route only confirmed M15 strategy and active-position M5 candles."""
+        """Route confirmed strategy candles and BTC volatility-guard candles."""
         if not isinstance(kline, dict):
             return
         self.rest.update_kline_from_ws(symbol, kline)
         interval = str(kline.get("i") or "").lower()
         pair = normalize_symbol(symbol)
+        if pair == BTC_GUARD_SYMBOL and interval in {"5m", "4h"}:
+            await self._handle_btc_guard_kline(interval, kline)
         if interval == "15m":
             await self._handle_closed_m15_bubble(pair, kline)
         elif interval == "5m":
+            # BTC is excluded from the ALT scanner, but if a BTC position is
+            # present, its normal M5 position-management stream must still run.
             await self._process_m5_position_candle(pair, kline)
 
     async def _on_price(self, symbol: str, price: Decimal, event_time_ms: int, aggregate_trade_id: int = -1) -> None:
@@ -11849,11 +12630,13 @@ class TradingEngine:
             return
         self._last_market_event_key[symbol] = key
         self.prices[symbol] = PriceSnapshot(symbol, price, int(event_time_ms), now_utc())
+        if symbol == BTC_GUARD_SYMBOL:
+            self._check_btc_guard_price(price)
         await self._check_signal_trace_touch(symbol, price)
 
     async def _check_signal_trace_touch(self, symbol: str, price: Decimal) -> None:
         """Watch target retests independently while new-entry scanning is armed."""
-        if not self.scan_enabled:
+        if not self.scan_enabled or self._btc_emergency_active:
             return
         now = now_utc()
         for trade in list(self.active_trades.values()):
@@ -12945,11 +13728,20 @@ class TradingEngine:
             t.pair for t in self.active_trades.values()
             if t.status == "FILLED" and t.timeframe == "M15"
         }
+        # BTCUSDT is not a strategy candidate (it remains excluded from the
+        # ALT universe), but its live trade price is required by the circuit-breaker.
+        trade_symbols.add(BTC_GUARD_SYMBOL)
         desired = trade_symbols | scanner_symbols | protection_symbols
         await self.ws.set_symbols(
             trade_symbols, scanner_symbols=scanner_symbols,
             protection_symbols=protection_symbols,
         )
+        if self._running and not self._btc_guard_history_ready:
+            task = self._btc_guard_init_task
+            if task is None or task.done():
+                self._btc_guard_init_task = asyncio.create_task(
+                    self._initialize_btc_guard_history(), name="btc-volatility-guard-init"
+                )
         for key in list(self._live_signal_candles):
             _tf, pair = key.split(":", 1)
             if pair not in desired:
@@ -13172,7 +13964,7 @@ class TradingEngine:
     async def _handle_timeframe(self, text: str) -> None:
         await self.reply(
             "Timeframe strategi dikunci:\n"
-            "H4: SuperTrend ATR10 Factor2.5 + EMA100 close sebagai filter arah.\n"
+            "H4: SuperTrend ATR10 Factor3.0 + EMA100 close sebagai filter arah.\n"
             "M15: Volumatic LEN9 visual marker; entry pada close candle marker saat retest.\n"
             "M15: SuperTrend ATR14 Factor2.5 sebagai initial SL dan trailing SL.\n"
             f"TP tetap RR 1:{decimal_to_str(self.rr_target)} dari fill aktual dan initial risk. Gunakan /RR untuk mengubah RR entry baru."
@@ -13193,7 +13985,7 @@ class TradingEngine:
             await self.reply(
                 "VOLUMATIC SCAN STATUS\n\n"
                 f"State: {state}\n"
-                "Strategy: ALT H4 ST10×2.5 + EMA100; BTC H4 filter " + ("ON" if self.btc_filter_enabled else "OFF") + "; M15 Volumatic LEN9\n"
+                "Strategy: ALT H4 ST10×3.0 + EMA100; BTC H4 filter " + ("ON" if self.btc_filter_enabled else "OFF") + "; M15 Volumatic LEN9\n"
                 "Entry: close candle marker → retest → MARKET; trace 4 candles total\n"
                 f"SL: M15 ST14×2.5 trailing per candle close · TP: fixed RR 1:{decimal_to_str(self.rr_target)}\n"
                 f"Active positions: {positions}/{self.max_active_trades}\n"
@@ -13316,6 +14108,7 @@ class TradingEngine:
             # Manual /scan on and a pending schedule can coexist. The schedule
             # remains armed and will execute /scan on again at its selected slot.
             await self.ws.start()
+            await self._sync_ws_symbols()
             self._scan_trigger_now = True
             log.info(
                 "[SCAN] explicitly armed by Telegram /scan on | tf=%s | batch=%s | pending_schedule=%s",
@@ -13324,7 +14117,7 @@ class TradingEngine:
             )
             await self.reply(
                 f"🟢 Scanner ON • batch {SCAN_MAX_PAIRS_PER_CYCLE} • BTC H4 filter {'ON' if self.btc_filter_enabled else 'OFF'}\n"
-                "ALT H4: ST10×2.5 + EMA100; M15 Volumatic LEN9 retest → MARKET; M15 ST14×2.5 trailing SL; fixed TP 2R. Pending trace tidak memakai slot; scanner tetap memindai saat MAX penuh."
+                "ALT H4: ST10×3.0 + EMA100; M15 Volumatic LEN9 retest → MARKET; M15 ST14×2.5 trailing SL; fixed TP 2R. Pending trace tidak memakai slot; scanner tetap memindai saat MAX penuh."
             )
         else:
             # Acquire the same lock used by _handle_signal so no new trace can be
@@ -13390,8 +14183,8 @@ class TradingEngine:
         if action == "status":
             await self.reply(
                 f"BTC H4 TREND FILTER: {'ON' if self.btc_filter_enabled else 'OFF'}\n"
-                "Rule sama dengan ALT H4: LONG jika EMA100 < ST10×2.5 < Close; "
-                "SHORT jika Close < ST10×2.5 < EMA100.\n"
+                "Rule sama dengan ALT H4: LONG jika EMA100 < ST10×3.0 < Close; "
+                "SHORT jika Close < ST10×3.0 < EMA100.\n"
                 "Jika ON, arah BTC H4 wajib sama dengan trend ALT dan bubble M15. "
                 "Jika OFF, hanya gerbang BTC yang dilewati; filter ALT tetap wajib.\n"
                 "Command: /BTC ON atau /BTC OFF"
@@ -13571,14 +14364,44 @@ class TradingEngine:
         if not matches:
             await self.reply("Tidak ada trade aktif untuk pair tersebut.")
             return
-        for trade in matches:
-            if trade.status == "PENDING":
-                await self._cancel_pending_trade(trade, "MANUAL_CANCEL")
-            elif trade.status == "FILLED":
-                price = self._current_price(trade.pair)
-                if price is None:
-                    price = await self.rest.get_price(trade.pair)
-                await self._close_trade(trade, price, "MANUAL_CLOSE")
+        pending = [trade for trade in matches if trade.status == "PENDING"]
+        for trade in pending:
+            trade.pending_cancel_reason = "MANUAL_CLOSE"
+        if pending:
+            cancel_results = await asyncio.gather(
+                *(self._cancel_pending_trade(trade, "MANUAL_CANCEL") for trade in pending),
+                return_exceptions=True,
+            )
+            for trade, result in zip(pending, cancel_results):
+                if isinstance(result, Exception):
+                    log.warning("[CLOSE] pending cancel %s belum terkonfirmasi: %s", trade.pair, result)
+        # Cancel reconciliation may discover a partial fill, so collect FILLED
+        # trades again after all pending cleanups have completed.
+        filled = [
+            trade for trade in list(self.active_trades.values())
+            if trade.status == "FILLED" and (target == "ALL" or trade.pair == normalize_symbol(target))
+        ]
+        async def close_one(trade: Trade) -> None:
+            price = self._current_price(trade.pair) or trade.fill_price or trade.entry
+            if price is None or price <= 0:
+                price = await self.rest.get_price(trade.pair)
+            await self._close_trade(
+                trade, price, "MANUAL_CLOSE", keep_protections_until_flat=True,
+            )
+        if filled:
+            close_results = await asyncio.gather(*(close_one(trade) for trade in filled), return_exceptions=True)
+            failed = [
+                f"{trade.pair}: {result}"
+                for trade, result in zip(filled, close_results)
+                if isinstance(result, Exception)
+            ]
+            unresolved = sum(trade.trade_id in self.active_trades for trade in filled)
+            if failed or unresolved:
+                await self.reply(
+                    f"CLOSE diproses paralel: {len(filled) - unresolved}/{len(filled)} posisi terkonfirmasi flat. "
+                    + ("Belum selesai: " + "; ".join(failed[:5]) if failed else "")
+                    + (f" · {unresolved} trade tetap ditahan untuk rekonsiliasi." if unresolved else "")
+                )
 
     async def _handle_remove(self, text: str) -> None:
         parts = text.split(maxsplit=1)
@@ -13748,7 +14571,7 @@ class TradingEngine:
         lines = [
             f"ACTIVE POSITIONS • {slot_count}/{self.max_active_trades}\n"
             f"PENDING SETUPS (NOT COUNTED): {pending_slots} • LIVE LIMITS (NOT COUNTED): {live_limits}\n"
-            "Strategy: H4 ST10×2.5 + EMA100 | M15 Volumatic LEN9 visual marker\n"
+            "Strategy: H4 ST10×3.0 + EMA100 | M15 Volumatic LEN9 visual marker\n"
             "Entry: marker-candle CLOSE retest → MARKET | SL: M15 ST14×2.5 trailing\n"
             f"TP: fixed RR 1:{decimal_to_str(self.rr_target)} from actual fill and initial SL\n"
             f"Permanent bans: {len(self.banned_symbols)}\n"
@@ -14665,7 +15488,7 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            "ALT H4 trend: LONG EMA100 < ST10×2.5 < Close; SHORT Close < ST10×2.5 < EMA100; other/equal = SKIP\n"
+            "ALT H4 trend: LONG EMA100 < ST10×3.0 < Close; SHORT Close < ST10×3.0 < EMA100; other/equal = SKIP\n"
             f"BTC H4 trend filter: {'ON' if self.btc_filter_enabled else 'OFF'} (/BTC ON|OFF)\n"
             f"Volumatic: M15 LEN9 visual marker (Pine offset -1)\nEntry: close candle marker ketika retest; MARKET segera; trace 4 candle total\nSL: M15 SuperTrend ATR14×2.5, trailing setiap close M15\nTP: fixed RR 1:{decimal_to_str(self.rr_target)} dari actual fill dan initial risk\nScanner: " + ('ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')) + "\n"
             f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
@@ -14795,7 +15618,7 @@ class TradingEngine:
             "/status - status sistem\n/help - bantuan\n\n"
             f"BTC H4 FILTER: {'ON' if self.btc_filter_enabled else 'OFF'} (/BTC ON|OFF). Jika ON, arah BTC harus sama dengan ALT.\n"
             f"TAKE PROFIT RR: 1:{decimal_to_str(self.rr_target)} (/RR angka; contoh /RR 1.5).\n"
-            "STRATEGI TERKUNCI: SHORT jika Close H4 < ST10×2.5 < EMA100; LONG jika EMA100 < ST10×2.5 < Close H4. "
+            "STRATEGI TERKUNCI: SHORT jika Close H4 < ST10×3.0 < EMA100; LONG jika EMA100 < ST10×3.0 < Close H4. "
             "H4 selain kondisi tersebut dianggap konsolidasi. Pada M15, bubble Volumatic LEN9 harus searah trend. "
             "Entry adalah close candle visual marker (Pine offset -1), hanya ketika harga retest dari sisi pendekatan yang benar. "
             "Signal trace berlaku 4 candle M15 total termasuk candle marker; gap melewati target dianggap terlewat. "
