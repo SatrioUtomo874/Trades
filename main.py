@@ -6791,7 +6791,7 @@ class TradingEngine:
             f"BUBBLES   : BLUE {blue}  ·  RED {red}  ·  NONE {no_signal}",
             f"REJECTED  : {rejected}",
             f"EXECUTION : NEW {created}  ·  FILLED {filled}  ·  DEFERRED {deferred}  ·  UNKNOWN {unknown}",
-            "ALT H4 FILTER: close/ST/EMA100 strict alignment; invalid or mixed = consolidation skip",
+            "ALT H4 FILTER: LONG EMA100 < ST10×2.5 < Close; SHORT Close < ST10×2.5 < EMA100; other/equal = SKIP",
             f"BTC H4 FILTER: {stats.get('btc_filter_status', 'UNKNOWN')} (same ST10×2.5 + EMA100 rule)",
             f"ENTRY GUARD: MAX BLOCK {int(stats.get('max_blocked', 0))}",
             f"OTHER     : DUPLICATE {int(stats.get('duplicate', 0))}  ·  ERRORS {int(stats.get('errors', 0))}",
@@ -14281,7 +14281,7 @@ class TradingEngine:
             f"POSITIONS {active_count}/{self.max_active_trades} {self._stats_bar(capacity_pct, 10)}   FREE SLOTS {remaining_slots}",
             f"PENDING TRACE {pending_count}   •   LIVE ENTRY ORDERS {live_limits}   •   PRICE STALE {stale_position_prices}",
             f"SCANNER {scan_line}",
-            f"ALT H4 ST10×2.5 + EMA100   •   BTC FILTER {btc_state}",
+            f"ALT H4: EMA100 < ST < Close / Close < ST < EMA100   •   BTC FILTER {btc_state}",
             f"M15 VT LEN9   •   SL ST14×2.5 TRAIL   •   TP RR 1:{decimal_to_str(self.rr_target)}",
         ]
         if positions_view:
@@ -14439,7 +14439,7 @@ class TradingEngine:
             "VOLUMATIC STATUS\n\n"
             f"Main: {'ONLINE' if self._running else 'OFFLINE'}\n"
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
-            "ALT trend filter: H4 SuperTrend ATR10×2.5 + EMA100 close\n"
+            "ALT H4 trend: LONG EMA100 < ST10×2.5 < Close; SHORT Close < ST10×2.5 < EMA100; other/equal = SKIP\n"
             f"BTC H4 trend filter: {'ON' if self.btc_filter_enabled else 'OFF'} (/BTC ON|OFF)\n"
             f"Volumatic: M15 LEN9 visual marker (Pine offset -1)\nEntry: close candle marker ketika retest; MARKET segera; trace 4 candle total\nSL: M15 SuperTrend ATR14×2.5, trailing setiap close M15\nTP: fixed RR 1:{decimal_to_str(self.rr_target)} dari actual fill dan initial risk\nScanner: " + ('ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')) + "\n"
             f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
