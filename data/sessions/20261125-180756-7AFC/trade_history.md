@@ -48,3 +48,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T11:45:29.522224+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PAXGUSDT SHORT — EXPIRED
+- Trade ID: `PAXGUSDT-20261125-182149-37D152`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T11:45:38.807803+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
