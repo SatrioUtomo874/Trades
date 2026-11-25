@@ -192,3 +192,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:44:38.318615+00:00 | Reason: SCANNER_OFF
+## ENSUSDT SHORT — CANCELED
+- Trade ID: `ENSUSDT-20261125-143329-376A94`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:44:47.916579+00:00 | Reason: SCANNER_OFF
