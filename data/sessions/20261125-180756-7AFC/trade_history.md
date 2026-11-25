@@ -456,3 +456,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:21:03.394614+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## QUSDT SHORT — CANCELED
+- Trade ID: `QUSDT-20261125-210849-44C2EC`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:21:18.321536+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
