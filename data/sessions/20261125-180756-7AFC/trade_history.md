@@ -36,3 +36,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T11:45:11.297321+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## FLOCKUSDT SHORT — EXPIRED
+- Trade ID: `FLOCKUSDT-20261125-182030-67CADD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T11:45:20.020218+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
