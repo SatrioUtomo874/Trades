@@ -186,3 +186,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:47:23.389593+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SUIUSDT SHORT — EXPIRED
+- Trade ID: `SUIUSDT-20261125-162611-6F8239`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:47:33.884909+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
