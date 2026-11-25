@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T09:32:35.072623+00:00",
+  "updated_at": "2026-11-25T09:32:42.751042+00:00",
   "active_trades": [
     {
       "trade_id": "SLXUSDT-20261125-145458-0EF60B",
@@ -392,7 +392,7 @@
       "sl_algo_status": "NEW",
       "tp_algo_status": "NOT_PLACED",
       "protection_state": "PARTIAL",
-      "protection_error": null,
+      "protection_error": "Exchange SL adopted; TP state is not present in openAlgoOrders.",
       "protection_warning_sent": false,
       "protection_exit_reason": null,
       "sl_submit_ambiguous": false,
@@ -466,7 +466,7 @@
       "entry_touch_missed": false,
       "trailing_last_close_ms": 1795599000000,
       "trailing_last_st": "0.07819137499993517",
-      "trailing_last_reason": "UPDATED_REAL_FROM_LATEST_M15_ST",
+      "trailing_last_reason": "EXCHANGE_SL_ADOPTED_TP_NOT_FOUND",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "trailing_replace_phase": null,
