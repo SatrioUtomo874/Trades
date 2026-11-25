@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T10:46:46.861243+00:00",
+  "updated_at": "2026-11-25T10:46:49.309875+00:00",
   "active_trades": [
     {
       "trade_id": "SLXUSDT-20261125-145458-0EF60B",
@@ -354,7 +354,7 @@
       "trailing_replace_old_algo_id": 4000002204047124,
       "trailing_replace_old_client_id": "VTSLe8fab5677c2c4449a5603d2484ae",
       "trailing_replace_old_trigger": "0.02467",
-      "trailing_replace_submit_ambiguous": false,
+      "trailing_replace_submit_ambiguous": true,
       "trailing_conflict_warning_sent": false,
       "exchange_algo_sync_complete": true,
       "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
