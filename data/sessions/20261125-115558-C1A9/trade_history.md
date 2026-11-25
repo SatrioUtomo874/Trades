@@ -228,3 +228,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:46:21.536492+00:00 | Reason: SCANNER_OFF
+## USELESSUSDT SHORT — CANCELED
+- Trade ID: `USELESSUSDT-20261125-143604-AD468E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:46:57.575976+00:00 | Reason: SCANNER_OFF
