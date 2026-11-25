@@ -498,3 +498,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:22:40.517294+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## IRYSUSDT SHORT — CANCELED
+- Trade ID: `IRYSUSDT-20261125-210405-117EBA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:26:11.943901+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
