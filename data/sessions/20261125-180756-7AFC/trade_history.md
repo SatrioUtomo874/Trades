@@ -372,3 +372,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:17:39.086185+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AWEUSDT SHORT — EXPIRED
+- Trade ID: `AWEUSDT-20261125-204909-4EAFD7`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:17:49.974997+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
