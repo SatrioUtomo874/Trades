@@ -174,3 +174,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:47:03.449135+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## METUSDT SHORT — EXPIRED
+- Trade ID: `METUSDT-20261125-162320-15134B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:47:13.849856+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
