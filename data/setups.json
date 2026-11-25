@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T03:00:22.050977+00:00",
+  "updated_at": "2026-11-25T03:00:25.469505+00:00",
   "active_trades": [
     {
       "trade_id": "FETUSDT-20261125-092151-A5C89C",
@@ -781,9 +781,9 @@
       "entry_touch_missed": false,
       "trailing_last_close_ms": 1795574700000,
       "trailing_last_st": null,
-      "trailing_last_reason": null,
-      "trailing_pending_algo_client_id": null,
-      "trailing_pending_algo_trigger": null,
+      "trailing_last_reason": "TRAILING_SL_SUBMITTING",
+      "trailing_pending_algo_client_id": "VTSLb5a4adc150ff468ebbfdeae9a12e",
+      "trailing_pending_algo_trigger": "0.0713",
       "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; fixed 2R TP; M15 close trailing SL",
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     },
