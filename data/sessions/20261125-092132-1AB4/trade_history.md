@@ -120,3 +120,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T04:15:00.126981+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SKRUSDT SHORT — CANCELED
+- Trade ID: `SKRUSDT-20261125-110931-1C5C03`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T04:16:00.642666+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
