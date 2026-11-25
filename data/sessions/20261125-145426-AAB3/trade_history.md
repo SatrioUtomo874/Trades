@@ -180,3 +180,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:47:13.849856+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MOVRUSDT SHORT — EXPIRED
+- Trade ID: `MOVRUSDT-20261125-162344-668076`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:47:23.389593+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
