@@ -6,3 +6,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T08:15:00.117898+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AEROUSDT SHORT — EXPIRED
+- Trade ID: `AEROUSDT-20261125-145636-6E1F1F`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T08:15:01.334280+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
