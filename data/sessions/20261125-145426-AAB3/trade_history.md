@@ -102,3 +102,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:45:01.407560+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## 4USDT SHORT — EXPIRED
+- Trade ID: `4USDT-20261125-161609-E17BBD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:45:01.809429+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
