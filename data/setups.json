@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T07:24:53.991215+00:00",
+  "updated_at": "2026-11-25T07:25:00.387123+00:00",
   "active_trades": [
     {
       "trade_id": "ROSEUSDT-20261125-130126-C0ECD7",
@@ -2057,7 +2057,7 @@
       "tp_client_algo_id": "VTTPSDT-20261125-142349-8D0CBA",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
