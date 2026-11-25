@@ -526,12 +526,14 @@
     "M15:ZRXUSDT": 1795581900000,
     "M15:\u5e01\u5b89\u4eba\u751fUSDT": 1795581900000,
     "M15:\u725b\u6765USDT": 1795581900000,
-    "M15:\u9f99\u867eUSDT": 1795581900000
+    "M15:\u9f99\u867eUSDT": 1795581900000,
+    "M15:DEEPUSDT": 1795581900000,
+    "M15:DEXEUSDT": 1795581900000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 150,
+  "scan_resume_cursor": 200,
   "scan_resume_boundary_ms": 1795582800000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-25T05:07:35.274747+00:00"
+  "updated_at": "2026-11-25T05:07:39.587467+00:00"
 }
