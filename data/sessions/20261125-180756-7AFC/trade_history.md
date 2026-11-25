@@ -564,3 +564,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:31:55.142404+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## TNSRUSDT SHORT — EXPIRED
+- Trade ID: `TNSRUSDT-20261125-211137-BCDEA5`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:32:06.488851+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
