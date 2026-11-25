@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T16:30:00.194429+00:00",
+  "updated_at": "2026-11-25T16:30:06.954837+00:00",
   "active_trades": [
     {
       "trade_id": "POLUSDT-20261125-223110-02A7C0",
@@ -107,7 +107,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795623300000,
+      "trailing_last_close_ms": 1795624200000,
       "trailing_last_st": "0.07444277875771399",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
