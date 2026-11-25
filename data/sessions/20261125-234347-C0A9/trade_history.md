@@ -90,3 +90,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T16:55:37.516637+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AVAXUSDT SHORT — CANCELED
+- Trade ID: `AVAXUSDT-20261125-234528-566273`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T16:57:17.199847+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
