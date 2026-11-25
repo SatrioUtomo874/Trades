@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T05:00:21.639607+00:00",
+  "updated_at": "2026-11-25T05:00:22.841979+00:00",
   "active_trades": [
     {
       "trade_id": "GRVTUSDT-20261125-115623-26BA84",
@@ -33,8 +33,8 @@
       "sl_client_algo_id": "VTSLSDT-20261125-094601-E83D21",
       "tp_client_algo_id": "VTTPSDT-20261125-094601-E83D21",
       "sl_algo_status": "CANCELED",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "tp_algo_status": "CANCELED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
