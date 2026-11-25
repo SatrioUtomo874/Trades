@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T04:15:24.029368+00:00",
+  "updated_at": "2026-11-25T04:15:26.301523+00:00",
   "active_trades": [
     {
       "trade_id": "FETUSDT-20261125-092151-A5C89C",
@@ -556,7 +556,7 @@
       "entry_touch_armed": true,
       "entry_touch_missed": false,
       "trailing_last_close_ms": 1795574700000,
-      "trailing_last_st": "0.07105472413262923",
+      "trailing_last_st": "0.07091510098029857",
       "trailing_last_reason": "PENDING_TRAILING_SL_ACK_UNKNOWN: HTTP 400 | code -2013 | /fapi/v1/algoOrder: Order does not exist.",
       "trailing_pending_algo_client_id": "VTSLb5a4adc150ff468ebbfdeae9a12e",
       "trailing_pending_algo_trigger": "0.0713",
