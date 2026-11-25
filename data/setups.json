@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T15:13:29.119880+00:00",
+  "updated_at": "2026-11-25T15:13:30.854153+00:00",
   "active_trades": [
     {
       "trade_id": "BLURUSDT-20261125-220301-41DCE1",
@@ -204,7 +204,7 @@
       "target_notional": "6",
       "actual_notional": "5.17251",
       "real_enabled": true,
-      "real_state": "REAL_FILLED",
+      "real_state": "REAL_PARTIALLY_FILLED",
       "position_side": "BOTH",
       "entry_order_id": 2767976844,
       "entry_client_order_id": "VT4e3fdf28235067273ee130fe96b9",
