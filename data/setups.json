@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T00:11:07.526624+00:00",
+  "updated_at": "2026-11-25T00:11:29.664802+00:00",
   "active_trades": [
     {
       "trade_id": "SOPHUSDT-20261125-004613-4ED906",
@@ -149,7 +149,7 @@
       "protection_state": "CANCEL_WAIT_API",
       "protection_error": "Pending trailing SL belum dapat dipastikan hilang (lookup code -2013); clientAlgoId dipertahankan untuk retry.",
       "protection_warning_sent": false,
-      "protection_exit_reason": null,
+      "protection_exit_reason": "EXCHANGE_POSITION_FLAT_WS",
       "sl_submit_ambiguous": false,
       "tp_submit_ambiguous": false,
       "entry": "0.0848",
