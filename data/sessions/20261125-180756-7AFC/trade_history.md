@@ -390,3 +390,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:18:36.028700+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BIRBUSDT SHORT — EXPIRED
+- Trade ID: `BIRBUSDT-20261125-204955-CCF6A9`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:18:47.718454+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
