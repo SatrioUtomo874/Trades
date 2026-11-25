@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T05:00:09.089928+00:00",
+  "updated_at": "2026-11-25T05:00:09.342576+00:00",
   "active_trades": [
     {
       "trade_id": "XRPUSDT-20261125-115621-0C5F3F",
@@ -33,8 +33,8 @@
       "sl_client_algo_id": "VTSLSDT-20261125-025509-BDC57E",
       "tp_client_algo_id": "VTTPSDT-20261125-025509-BDC57E",
       "sl_algo_status": "CANCELED",
-      "tp_algo_status": "NEW",
-      "protection_state": "ACTIVE",
+      "tp_algo_status": "CANCELED",
+      "protection_state": "CANCELED",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
