@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T06:14:39.811010+00:00",
+  "updated_at": "2026-11-25T06:14:42.127245+00:00",
   "active_trades": [
     {
       "trade_id": "LUNA2USDT-20261125-130052-2F795F",
@@ -37,7 +37,7 @@
       "protection_state": "CANCEL_WAIT_API",
       "protection_error": "SL: status tetap NEW",
       "protection_warning_sent": false,
-      "protection_exit_reason": null,
+      "protection_exit_reason": "EXCHANGE_POSITION_FLAT_WS",
       "sl_submit_ambiguous": false,
       "tp_submit_ambiguous": false,
       "entry": "0.03108",
