@@ -7,18 +7,20 @@
   "h1_enabled": false,
   "supertrend_atr_length": 14,
   "supertrend_factor": 2.5,
-  "rr_target": "2",
-  "rr_min": "2",
-  "rr_max": "2",
+  "rr_target": "1",
+  "rr_min": "1",
+  "rr_max": "1",
   "max_active_trades": 10,
   "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": false,
-  "last_processed_candles": {},
+  "last_processed_candles": {
+    "M15:0GUSDT": 1795591800000
+  },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 0,
-  "scan_resume_boundary_ms": 0,
+  "scan_resume_cursor": 1,
+  "scan_resume_boundary_ms": 1795592700000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-25T07:55:33.235891+00:00"
+  "updated_at": "2026-11-25T07:55:35.674887+00:00"
 }
