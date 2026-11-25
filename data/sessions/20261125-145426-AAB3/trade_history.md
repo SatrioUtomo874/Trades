@@ -330,3 +330,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T11:00:00.394907+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## VELVETUSDT LONG — EXPIRED
+- Trade ID: `VELVETUSDT-20261125-173320-4EE6D8`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T11:00:01.656817+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
