@@ -196,14 +196,15 @@ WS_RECONNECT_MAX = 60
 PRICE_STALE_SECONDS = 15
 HISTORY_REFRESH_SECONDS = 30
 # BTCUSDT USD-M Futures volatility circuit-breaker. Wilder ATR(14) is
-# calculated from CLOSED M5 candles. ALERT requires current ATR >= 2.5x the
-# immediately preceding closed M5 ATR. Counter-trend movement is then watched
-# tick-by-tick from the BTC price captured when ALERT activates.
+# calculated from CLOSED M1 candles. ALERT requires current ATR >= 2.5x the
+# mean of the previous 14 closed M1 ATR(14) readings. Counter-trend movement
+# is then watched tick-by-tick from the OPEN of the current M5 candle.
 BTC_GUARD_SYMBOL = "BTCUSDT"
 BTC_GUARD_ATR_LENGTH = 14
 BTC_GUARD_ATR_SPIKE_MULTIPLE = Decimal("2.5")
 BTC_GUARD_COUNTER_MOVE_PCT = Decimal("0.8")
-BTC_GUARD_M5_HISTORY = 80
+BTC_GUARD_M1_HISTORY = 100
+BTC_GUARD_ATR_BASELINE_COUNT = 14
 BTC_GUARD_H4_HISTORY = 120
 BTC_GUARD_RETRY_SECONDS = 5.0
 AUTOSTOP_CHECK_SECONDS = 5.0
@@ -4419,6 +4420,8 @@ class BinanceWebSocket:
         if not self._stop.is_set():
             # If BTC is also an active position, its M5 protection subscription
             # above already includes the guard feed; avoid duplicate SUBSCRIBE.
+            await self._send_subscribe([BTC_GUARD_SYMBOL], "kline_1m")
+            await asyncio.sleep(0.25)
             if BTC_GUARD_SYMBOL not in self._desired_protection_symbols:
                 await self._send_subscribe([BTC_GUARD_SYMBOL], "kline_5m")
                 await asyncio.sleep(0.25)
@@ -5267,13 +5270,16 @@ class TradingEngine:
         self.ws = BinanceWebSocket(self._on_price, self._on_kline)
         self.user_ws = BinanceUserDataWebSocket(self.real, self._on_user_data_event)
 
-        # BTCUSDT volatility guard state. M5 ATR14 is evaluated only on closed
-        # candles; price reversal is watched tick-by-tick from the alert baseline.
-        self._btc_guard_rows: deque[tuple[int, float, float, float, float]] = deque(maxlen=256)
+        # BTCUSDT volatility guard state: ATR14 M1 vs SMA of prior 14 ATR14
+        # readings; the >0.8% counter-move is measured from the live M5 open.
+        self._btc_guard_m1_rows: deque[tuple[int, float, float, float, float]] = deque(maxlen=256)
+        self._btc_guard_atr_history: deque[float] = deque(maxlen=BTC_GUARD_ATR_BASELINE_COUNT)
         self._btc_guard_history_ready = False
         self._btc_guard_init_task: asyncio.Task | None = None
         self._btc_guard_init_lock = asyncio.Lock()
-        self._btc_guard_last_m5_open_ms = 0
+        self._btc_guard_last_m1_open_ms = 0
+        self._btc_guard_current_m5_open_ms = 0
+        self._btc_guard_current_m5_open_price: Decimal | None = None
         self._btc_guard_price_m5_open_ms = 0
         self._btc_guard_last_atr: float | None = None
         self._btc_guard_last_h4_open_ms = 0
@@ -11996,12 +12002,12 @@ class TradingEngine:
         return
 
     @staticmethod
-    def _btc_guard_atr_pair(
+    def _btc_guard_atr_values(
         rows: deque[tuple[int, float, float, float, float]] | list[tuple[int, float, float, float, float]],
-    ) -> tuple[float | None, float | None]:
-        """Return (previous closed ATR14, latest closed ATR14) using Wilder RMA."""
-        if len(rows) < BTC_GUARD_ATR_LENGTH + 1:
-            return None, None
+    ) -> np.ndarray:
+        """Return finite Wilder ATR(14) values for chronological CLOSED M1 rows."""
+        if len(rows) < BTC_GUARD_ATR_LENGTH:
+            return np.asarray([], dtype=np.float64)
         data = np.asarray(list(rows), dtype=np.float64)
         high, low, close = data[:, 2], data[:, 3], data[:, 4]
         tr = np.empty(len(data), dtype=np.float64)
@@ -12017,9 +12023,7 @@ class TradingEngine:
         atr[period - 1] = float(np.mean(tr[:period]))
         for index in range(period, len(tr)):
             atr[index] = (atr[index - 1] * (period - 1) + tr[index]) / period
-        if len(atr) < 2 or not (np.isfinite(atr[-1]) and np.isfinite(atr[-2])):
-            return None, None
-        return float(atr[-2]), float(atr[-1])
+        return atr[np.isfinite(atr)]
 
     @staticmethod
     def _btc_guard_h4_trend_from_rows(rows: np.ndarray) -> tuple[str, int]:
@@ -12037,35 +12041,38 @@ class TradingEngine:
         return str(trend), int(rows["t"][-1])
 
     async def _initialize_btc_guard_history(self) -> None:
-        """Warm BTC M5 ATR14 and H4 trend from USD-M Futures public klines."""
+        """Warm BTC M1 ATR14 baseline and H4 trend from USD-M Futures klines."""
         async with self._btc_guard_init_lock:
             if self._btc_guard_history_ready or not self._running:
                 return
             try:
-                m5_rows, h4_rows = await asyncio.gather(
-                    self.rest.get_klines(BTC_GUARD_SYMBOL, "5m", BTC_GUARD_M5_HISTORY),
+                m1_rows, h4_rows = await asyncio.gather(
+                    self.rest.get_klines(BTC_GUARD_SYMBOL, "1m", BTC_GUARD_M1_HISTORY),
                     self.rest.get_klines(BTC_GUARD_SYMBOL, "4h", BTC_GUARD_H4_HISTORY),
                 )
-                if not isinstance(m5_rows, np.ndarray) or len(m5_rows) < BTC_GUARD_ATR_LENGTH + 1:
-                    raise RuntimeError("History BTC M5 belum cukup untuk ATR14.")
-                self._btc_guard_rows.clear()
-                for row in m5_rows:
-                    self._btc_guard_rows.append((
+                if not isinstance(m1_rows, np.ndarray) or len(m1_rows) < BTC_GUARD_ATR_LENGTH + BTC_GUARD_ATR_BASELINE_COUNT:
+                    raise RuntimeError("History BTC M1 belum cukup untuk ATR14 + SMA baseline 14.")
+                self._btc_guard_m1_rows.clear()
+                for row in m1_rows:
+                    self._btc_guard_m1_rows.append((
                         int(row["t"]), float(row["o"]), float(row["h"]),
                         float(row["l"]), float(row["c"]),
                     ))
-                previous_atr, latest_atr = self._btc_guard_atr_pair(self._btc_guard_rows)
-                if latest_atr is None:
-                    raise RuntimeError("ATR14 BTC M5 belum valid.")
-                self._btc_guard_last_m5_open_ms = int(self._btc_guard_rows[-1][0])
-                self._btc_guard_last_atr = latest_atr
+                atr_values = self._btc_guard_atr_values(self._btc_guard_m1_rows)
+                if len(atr_values) < BTC_GUARD_ATR_BASELINE_COUNT + 1:
+                    raise RuntimeError("Riwayat ATR14 BTC M1 belum cukup untuk SMA baseline 14.")
+                self._btc_guard_last_m1_open_ms = int(self._btc_guard_m1_rows[-1][0])
+                self._btc_guard_last_atr = float(atr_values[-1])
+                self._btc_guard_atr_history.clear()
+                self._btc_guard_atr_history.extend(float(value) for value in atr_values[-BTC_GUARD_ATR_BASELINE_COUNT:])
                 trend, h4_open_ms = self._btc_guard_h4_trend_from_rows(h4_rows)
                 self._btc_guard_h4_trend = trend
                 self._btc_guard_last_h4_open_ms = h4_open_ms
                 self._btc_guard_history_ready = True
+                baseline = float(np.mean(list(self._btc_guard_atr_history)))
                 log.info(
-                    "[BTC GUARD] ready | symbol=%s | M5 ATR14=%s | H4 trend=%s | H4 open=%s",
-                    BTC_GUARD_SYMBOL, fmt_num(latest_atr, 8), trend, h4_open_ms,
+                    "[BTC GUARD] ready | symbol=%s | M1 ATR14=%s | SMA14 ATR baseline=%s | H4 trend=%s | H4 open=%s",
+                    BTC_GUARD_SYMBOL, fmt_num(self._btc_guard_last_atr, 8), fmt_num(baseline, 8), trend, h4_open_ms,
                 )
             except asyncio.CancelledError:
                 raise
@@ -12090,16 +12097,18 @@ class TradingEngine:
             if self._btc_guard_mode == "ALERT" and trend != self._btc_guard_alert_trend:
                 price = self._current_price(BTC_GUARD_SYMBOL)
                 self._btc_guard_alert_trend = trend
+                m5_open = self._btc_guard_current_m5_open_price
                 self._btc_guard_reference_price = (
-                    price if trend in {"BULLISH", "BEARISH"} else None
+                    m5_open if trend in {"BULLISH", "BEARISH"} else None
                 )
-                if trend in {"BULLISH", "BEARISH"} and price is not None:
-                    log.info("[BTC GUARD] H4 alert direction re-armed | trend=%s | price=%s", trend, fmt_price(price))
+                self._btc_guard_price_m5_open_ms = self._btc_guard_current_m5_open_ms
+                if trend in {"BULLISH", "BEARISH"} and m5_open is not None:
+                    log.info("[BTC GUARD] H4 alert direction re-armed | trend=%s | M5 open=%s", trend, fmt_price(m5_open))
                     await self.reply(
                         "⚠️ BTC VOLATILITY GUARD · H4 TREND DIPERBARUI\n"
                         f"BTCUSDT Futures H4: {trend}\n"
-                        f"Harga acuan baru: {fmt_price(price)}\n"
-                        "Pemantauan gerak berlawanan 0.8% memakai arah H4 terbaru."
+                        f"Harga acuan OPEN M5: {fmt_price(m5_open)}\n"
+                        "Pemantauan gerak berlawanan 0.8% memakai OPEN candle M5 yang sedang berjalan."
                     )
                 else:
                     log.info("[BTC GUARD] H4 trend became %s; 0.8%% counter-move trigger waits for a directional H4 regime.", trend)
@@ -12109,7 +12118,7 @@ class TradingEngine:
             log.warning("[BTC GUARD] H4 trend refresh gagal: %s", exc)
 
     async def _handle_btc_guard_kline(self, interval: str, kline: dict[str, Any]) -> None:
-        """Use closed BTC M5 candles for ATR and current M5 open for price risk."""
+        """Evaluate ATR14 on closed M1 bars; watch counter-move from live M5 open."""
         is_closed = kline.get("x") is True
         if interval == "4h":
             if not is_closed:
@@ -12123,39 +12132,34 @@ class TradingEngine:
                 return
             await self._refresh_btc_guard_h4_trend()
             return
-        if interval != "5m":
-            return
 
-        # The M5 price threshold is measured inside each M5 candle (open -> live
-        # aggTrade), not accumulated across multiple 5-minute candles. This is
-        # separate from ATR, which is always calculated only after candle close.
-        if not is_closed:
-            if not self._btc_guard_history_ready:
-                task = self._btc_guard_init_task
-                if task is None or task.done():
-                    self._btc_guard_init_task = asyncio.create_task(
-                        self._initialize_btc_guard_history(), name="btc-volatility-guard-init"
-                    )
-                return
-            if self._btc_guard_mode == "ALERT":
+        if interval == "5m":
+            # Always capture the currently forming M5 candle open. If the ATR
+            # condition activates mid-candle, this is the correct 0.8% baseline.
+            if not is_closed:
                 try:
                     open_ms = int(kline["t"])
-                    if open_ms > self._btc_guard_price_m5_open_ms:
+                    if open_ms >= self._btc_guard_current_m5_open_ms:
+                        self._btc_guard_current_m5_open_ms = open_ms
+                        self._btc_guard_current_m5_open_price = Decimal(str(kline["o"]))
+                    if self._btc_guard_history_ready and self._btc_guard_mode == "ALERT" and open_ms > self._btc_guard_price_m5_open_ms:
                         self._btc_guard_price_m5_open_ms = open_ms
                         trend = self._btc_guard_h4_trend
                         self._btc_guard_alert_trend = trend
-                        if trend in {"BULLISH", "BEARISH"}:
-                            self._btc_guard_reference_price = Decimal(str(kline["o"]))
+                        self._btc_guard_reference_price = (
+                            self._btc_guard_current_m5_open_price if trend in {"BULLISH", "BEARISH"} else None
+                        )
+                        if self._btc_guard_reference_price is not None:
                             log.info(
-                                "[BTC GUARD] new M5 price window | trend=%s | open=%s | reference=%s",
+                                "[BTC GUARD] M5 price window | trend=%s | open=%s | reference=%s",
                                 trend, open_ms, fmt_price(self._btc_guard_reference_price),
                             )
-                        else:
-                            self._btc_guard_reference_price = None
                 except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
                     log.debug("[BTC GUARD] M5 forming candle baseline not ready: %s", exc)
             return
 
+        if interval != "1m" or not is_closed:
+            return
         if not self._btc_guard_history_ready:
             task = self._btc_guard_init_task
             if task is None or task.done():
@@ -12165,18 +12169,16 @@ class TradingEngine:
             return
         try:
             open_ms = int(kline["t"])
-            if open_ms <= self._btc_guard_last_m5_open_ms:
+            if open_ms <= self._btc_guard_last_m1_open_ms:
                 return
-            if self._btc_guard_last_m5_open_ms and open_ms != self._btc_guard_last_m5_open_ms + 300_000:
-                # A WS gap invalidates a one-candle ATR comparison; reload a
-                # short contiguous REST tail instead of fabricating missing bars.
+            if self._btc_guard_last_m1_open_ms and open_ms != self._btc_guard_last_m1_open_ms + 60_000:
                 self._btc_guard_history_ready = False
                 task = self._btc_guard_init_task
                 if task is None or task.done():
                     self._btc_guard_init_task = asyncio.create_task(
                         self._initialize_btc_guard_history(), name="btc-volatility-guard-reload"
                     )
-                log.warning("[BTC GUARD] M5 stream gap; ATR comparison paused until history is refreshed.")
+                log.warning("[BTC GUARD] M1 stream gap; ATR/SMA comparison paused until history is refreshed.")
                 return
             row = (
                 open_ms, float(kline["o"]), float(kline["h"]),
@@ -12185,55 +12187,62 @@ class TradingEngine:
             if not all(math.isfinite(value) and value > 0 for value in row[1:]):
                 return
             previous_atr = self._btc_guard_last_atr
-            previous_close = float(self._btc_guard_rows[-1][4]) if self._btc_guard_rows else float(row[4])
+            previous_close = float(self._btc_guard_m1_rows[-1][4]) if self._btc_guard_m1_rows else float(row[4])
             true_range = max(
                 row[2] - row[3],
                 abs(row[2] - previous_close),
                 abs(row[3] - previous_close),
             )
-            self._btc_guard_rows.append(row)
-            self._btc_guard_last_m5_open_ms = open_ms
-            if previous_atr is None or previous_atr <= 0:
-                _previous, seeded_atr = self._btc_guard_atr_pair(self._btc_guard_rows)
-                if seeded_atr is None:
+            self._btc_guard_m1_rows.append(row)
+            self._btc_guard_last_m1_open_ms = open_ms
+            if previous_atr is None or previous_atr <= 0 or len(self._btc_guard_atr_history) < BTC_GUARD_ATR_BASELINE_COUNT:
+                atr_values = self._btc_guard_atr_values(self._btc_guard_m1_rows)
+                if len(atr_values) < BTC_GUARD_ATR_BASELINE_COUNT + 1:
                     return
-                self._btc_guard_last_atr = seeded_atr
+                self._btc_guard_last_atr = float(atr_values[-1])
+                self._btc_guard_atr_history.clear()
+                self._btc_guard_atr_history.extend(float(value) for value in atr_values[-BTC_GUARD_ATR_BASELINE_COUNT:])
                 return
+
+            # Baseline is the mean of the 14 ATR14 readings immediately BEFORE
+            # this newly closed M1 bar. The candidate ATR is excluded.
+            baseline_atr = float(np.mean(list(self._btc_guard_atr_history)))
             latest_atr = (float(previous_atr) * (BTC_GUARD_ATR_LENGTH - 1) + true_range) / BTC_GUARD_ATR_LENGTH
-            if not math.isfinite(latest_atr) or latest_atr <= 0:
+            if not math.isfinite(latest_atr) or latest_atr <= 0 or not math.isfinite(baseline_atr) or baseline_atr <= 0:
                 return
             self._btc_guard_last_atr = latest_atr
-            atr_multiple = Decimal(str(latest_atr)) / Decimal(str(previous_atr))
-            # Both conditions are mandatory: ATR must reach 2.5x first, then
-            # the live BTC price must move >0.8% against the open of an M5 bar.
+            self._btc_guard_atr_history.append(latest_atr)
+            atr_multiple = Decimal(str(latest_atr)) / Decimal(str(baseline_atr))
             if atr_multiple < BTC_GUARD_ATR_SPIKE_MULTIPLE or self._btc_guard_mode != "NORMAL":
                 return
-            reference = self._current_price(BTC_GUARD_SYMBOL) or Decimal(str(row[4]))
+
             self._btc_guard_mode = "ALERT"
-            self._btc_guard_reference_price = reference
             self._btc_guard_alert_trend = self._btc_guard_h4_trend
+            self._btc_guard_reference_price = (
+                self._btc_guard_current_m5_open_price
+                if self._btc_guard_alert_trend in {"BULLISH", "BEARISH"} else None
+            )
             self._btc_guard_alert_started_at = now_utc()
             self._btc_guard_alert_atr_multiple = atr_multiple
-            # Prime the next M5 window; its first forming event carries this
-            # same open timestamp, so it will not overwrite the trigger baseline.
-            self._btc_guard_price_m5_open_ms = open_ms + 300_000
+            # Keep the current M5 open as the reference; if no M5 forming event
+            # has arrived yet, the next WS update will populate it.
+            self._btc_guard_price_m5_open_ms = self._btc_guard_current_m5_open_ms
             log.warning(
-                "[BTC GUARD] ALERT | ATR14 M5 multiple=%sx | ATR prev=%s current=%s | H4=%s | reference=%s",
-                fmt_num(atr_multiple, 3), fmt_num(previous_atr, 8), fmt_num(latest_atr, 8),
-                self._btc_guard_alert_trend, fmt_price(reference),
+                "[BTC GUARD] ALERT | ATR14 M1/SMA14=%sx | baseline=%s current=%s | H4=%s",
+                fmt_num(atr_multiple, 3), fmt_num(baseline_atr, 8), fmt_num(latest_atr, 8),
+                self._btc_guard_alert_trend,
             )
             await self.reply(
                 "⚠️ BTC VOLATILITY GUARD · MODE WASPADA\n"
                 f"Market: BTCUSDT USD-M Futures\n"
-                f"ATR(14) M5: {fmt_num(atr_multiple, 3)}× ATR sebelumnya (ambang 2.5×)\n"
+                f"ATR(14) M1: {fmt_num(atr_multiple, 3)}× rata-rata 14 ATR sebelumnya (ambang 2.5×)\n"
                 f"Trend H4 (EMA100 + ST10×3.0): {self._btc_guard_alert_trend}\n"
-                f"Harga acuan sementara: {fmt_price(reference)}\n"
-                "Syarat pertama terpenuhi. Forced Close menunggu BTC bergerak >0.8% melawan trend H4 dalam satu candle M5."
+                "Syarat pertama terpenuhi. Forced Close menunggu BTC bergerak >0.8% melawan tren H4 dari OPEN candle M5 yang sedang berjalan."
             )
         except BinanceRateLimitError:
             raise
         except Exception as exc:
-            log.warning("[BTC GUARD] M5 kline processing gagal: %s", exc, exc_info=True)
+            log.warning("[BTC GUARD] M1 kline processing gagal: %s", exc, exc_info=True)
 
     def _check_btc_guard_price(self, price: Decimal) -> None:
         """Trigger if live BTC price moves >0.8% against the current M5 open and H4 trend."""
@@ -12612,7 +12621,7 @@ class TradingEngine:
         self.rest.update_kline_from_ws(symbol, kline)
         interval = str(kline.get("i") or "").lower()
         pair = normalize_symbol(symbol)
-        if pair == BTC_GUARD_SYMBOL and interval in {"5m", "4h"}:
+        if pair == BTC_GUARD_SYMBOL and interval in {"1m", "5m", "4h"}:
             await self._handle_btc_guard_kline(interval, kline)
         if interval == "15m":
             await self._handle_closed_m15_bubble(pair, kline)
