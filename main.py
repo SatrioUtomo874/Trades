@@ -778,6 +778,18 @@ class Trade:
     # never submits a duplicate stop with a new client ID.
     trailing_pending_algo_client_id: str | None = None
     trailing_pending_algo_trigger: Decimal | None = None
+    # Durable cancel-confirm-replace state for Binance closePosition Algo SLs.
+    # Binance rejects overlapping closePosition conditional orders (-4130), so
+    # the previous stop must be confirmed terminal before a tighter one is sent.
+    trailing_replace_phase: str | None = None
+    trailing_replace_old_algo_id: int | None = None
+    trailing_replace_old_client_id: str | None = None
+    trailing_replace_old_trigger: Decimal | None = None
+    trailing_replace_submit_ambiguous: bool = False
+    trailing_conflict_warning_sent: bool = False
+    # Exchange-adopted positions must have their live Algo orders inventoried
+    # before the engine is allowed to install/replace a protective stop.
+    exchange_algo_sync_complete: bool = False
 
     @property
     def entry_side(self) -> str:
@@ -872,6 +884,13 @@ class Trade:
             "trailing_last_reason": self.trailing_last_reason,
             "trailing_pending_algo_client_id": self.trailing_pending_algo_client_id,
             "trailing_pending_algo_trigger": decimal_to_str(self.trailing_pending_algo_trigger),
+            "trailing_replace_phase": self.trailing_replace_phase,
+            "trailing_replace_old_algo_id": self.trailing_replace_old_algo_id,
+            "trailing_replace_old_client_id": self.trailing_replace_old_client_id,
+            "trailing_replace_old_trigger": decimal_to_str(self.trailing_replace_old_trigger),
+            "trailing_replace_submit_ambiguous": bool(self.trailing_replace_submit_ambiguous),
+            "trailing_conflict_warning_sent": bool(self.trailing_conflict_warning_sent),
+            "exchange_algo_sync_complete": bool(self.exchange_algo_sync_complete),
             "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; fixed 2R TP; M15 close trailing SL",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
@@ -1068,6 +1087,13 @@ class Trade:
             trailing_last_reason=(str(row.get("trailing_last_reason"))[:160] if row.get("trailing_last_reason") else None),
             trailing_pending_algo_client_id=(str(row.get("trailing_pending_algo_client_id") or "").strip() or None),
             trailing_pending_algo_trigger=dec("trailing_pending_algo_trigger"),
+            trailing_replace_phase=(str(row.get("trailing_replace_phase") or "").strip().upper() or None),
+            trailing_replace_old_algo_id=(int(row["trailing_replace_old_algo_id"]) if row.get("trailing_replace_old_algo_id") not in (None, "") else None),
+            trailing_replace_old_client_id=(str(row.get("trailing_replace_old_client_id") or "").strip() or None),
+            trailing_replace_old_trigger=dec("trailing_replace_old_trigger"),
+            trailing_replace_submit_ambiguous=bool(row.get("trailing_replace_submit_ambiguous", False)),
+            trailing_conflict_warning_sent=bool(row.get("trailing_conflict_warning_sent", False)),
+            exchange_algo_sync_complete=bool(row.get("exchange_algo_sync_complete", False)),
         )
 
 
@@ -1083,6 +1109,7 @@ ENDPOINT_WEIGHTS = {
     "/fapi/v3/balance": 5,
     "/fapi/v2/account": 5,
     "/fapi/v1/accountConfig": 5,
+    "/fapi/v1/openAlgoOrders": 1,
     "/fapi/v1/klines": 2,  # fallback; estimator below accounts for the requested limit
     "/fapi/v1/exchangeInfo": 1,
     "/fapi/v1/time": 1,
@@ -3786,6 +3813,25 @@ class BinanceRealClient:
             raise BinanceAPIError("Respons query Algo Order Binance tidak valid.", endpoint="/fapi/v1/algoOrder")
         return payload
 
+    async def get_open_algo_orders(self, symbol: str) -> list[dict[str, Any]]:
+        """List live USD-M conditional Algo Orders for one symbol (weight 1)."""
+        pair = normalize_symbol(symbol)
+        if not pair:
+            raise ValueError("Symbol wajib diisi untuk openAlgoOrders.")
+        # The USD-M endpoint takes only the symbol filter (plus the signed
+        # request metadata injected by _request); algoType is not a documented
+        # request parameter for GET /openAlgoOrders.
+        payload = await self._request(
+            "GET", "/fapi/v1/openAlgoOrders",
+            {"symbol": pair},
+        )
+        if not isinstance(payload, list):
+            raise BinanceAPIError(
+                "Respons openAlgoOrders Binance tidak berbentuk list.",
+                endpoint="/fapi/v1/openAlgoOrders",
+            )
+        return [item for item in payload if isinstance(item, dict)]
+
     async def cancel_algo_order(
         self, *, symbol: str, algo_id: int | None = None,
         client_algo_id: str | None = None,
@@ -5230,6 +5276,8 @@ class TradingEngine:
         # ORDER_TRADE_UPDATE. /trade reads this cache only; it never REST-polls.
         self.exchange_positions: dict[tuple[str, str], dict[str, Any]] = {}
         self.exchange_open_orders: dict[str, dict[str, Any]] = {}
+        self._exchange_algo_sync_at: dict[str, float] = {}
+        self._exchange_algo_orders_by_symbol: dict[str, list[dict[str, Any]]] = {}
         self.exchange_snapshot_at: datetime | None = None
         self._last_user_ws_reconnect_count = 0
         self.legacy_active_snapshot_count = 0
@@ -6419,6 +6467,8 @@ class TradingEngine:
         self._ema_exit_close_last_check.clear()
         self.exchange_positions.clear()
         self.exchange_open_orders.clear()
+        self._exchange_algo_sync_at.clear()
+        self._exchange_algo_orders_by_symbol.clear()
         self.exchange_snapshot_at = None
         self._last_user_ws_reconnect_count = 0
         self.history_records.clear()
@@ -9344,7 +9394,11 @@ class TradingEngine:
             await self._cancel_real_entry_remainder(trade, trade.pending_cancel_reason or "ENTRY_LIMIT_TIMEOUT_1H")
             if trade.status != "FILLED":
                 return
-        ws_covered = self.user_ws.status == "LIVE" and trade.protection_state == "ACTIVE" and trade.entry_order_terminal
+        ws_covered = (
+            self.user_ws.status == "LIVE" and trade.protection_state == "ACTIVE"
+            and trade.entry_order_terminal and not trade.trailing_replace_phase
+            and not trade.trailing_pending_algo_client_id
+        )
         reconcile_interval = REAL_RECONCILE_WS_COVERED_SECONDS if ws_covered else REAL_RECONCILE_INTERVAL_SECONDS
         if time.monotonic() - trade.last_real_check_monotonic < reconcile_interval:
             return
@@ -9391,6 +9445,21 @@ class TradingEngine:
             await self._finalize_trade(trade, "CLOSED", price, reason)
             return
 
+        # Exchange-adopted positions have no trustworthy local initial-risk
+        # snapshot. Adopt their live Algo Orders, then let the M15 close monitor
+        # create a first ST stop if none exists. Never fabricate an unknown TP.
+        if trade.exchange_adopted:
+            if (
+                not trade.exchange_algo_sync_complete
+                or time.monotonic() - self._exchange_algo_sync_at.get(trade.pair, 0.0) >= 30.0
+            ):
+                await self._sync_exchange_algo_protection(trade)
+        if trade.trailing_replace_phase or trade.trailing_pending_algo_client_id:
+            if not await self._resolve_pending_trailing_stop(trade):
+                return
+        if trade.exchange_adopted:
+            return
+
         # The exact side is confirmed open. Only now may we install protection or
         # warn that the confirmed live position has an invalid Supertrend risk level.
         if trade.protection_state == "INVALID_RISK":
@@ -9402,7 +9471,7 @@ class TradingEngine:
                     f"Fill: {fmt_price(trade.fill_price)} • Supertrend SL: {fmt_price(trade.reference_sl)}\n"
                     "Exposure masih aktif di Binance, tetapi SL tidak membentuk jarak risiko valid. Amankan posisi LIVE segera."
                 )
-        elif trade.protection_state not in {"ACTIVE", "ERROR_REJECTED"}:
+        elif trade.protection_state not in {"ACTIVE", "ERROR_REJECTED", "TRAILING_REPLACE_PENDING"} and not trade.trailing_replace_phase:
             try:
                 # Give the first exchange SL/TP installation attempt priority.
                 # EMA history warm-up is scheduled in finally, never ahead of it.
@@ -10013,88 +10082,500 @@ class TradingEngine:
             ):
                 await self._trail_trade_on_m15_close(trade, close_ms, kline)
 
-    async def _resolve_pending_trailing_stop(self, trade: Trade) -> bool:
-        """Resolve a previously submitted trailing SL by its durable clientAlgoId.
-
-        Returns True only after Binance confirms that the pending stop is active.
-        A missing/ambiguous lookup is deliberately NOT permission to POST again.
-        """
-        client_id = str(trade.trailing_pending_algo_client_id or "").strip()
-        if not client_id:
-            return True
-        if self._binance_cooldown_remaining() > 0:
-            trade.trailing_last_reason = "PENDING_TRAILING_SL_LOOKUP_WAITING_REST_COOLDOWN"
-            await self._save_active_state()
-            return False
-        try:
-            existing = await self.real.get_algo_order(
-                symbol=trade.pair, client_algo_id=client_id
-            )
-        except BinanceRateLimitError:
-            trade.trailing_last_reason = "PENDING_TRAILING_SL_LOOKUP_RATE_LIMIT"
-            await self._save_active_state()
-            return False
-        except Exception as exc:
-            # -2011/-2013 are still ambiguous here: the POST may have landed but
-            # Binance's lookup endpoint may not expose it yet. Never make a new POST.
-            trade.trailing_last_reason = f"PENDING_TRAILING_SL_ACK_UNKNOWN: {str(exc)[:100]}"
-            await self._save_active_state()
-            log.warning(
-                "[TRAIL SL] %s pending clientAlgoId=%s unresolved; no duplicate POST: %s",
-                trade.pair, client_id, exc,
-            )
-            return False
-
-        found_id = existing.get("algoId", existing.get("ai"))
-        status = str(existing.get("algoStatus") or existing.get("status") or "UNKNOWN").upper()
-        terminal = {"CANCELED", "FINISHED", "REJECTED", "EXPIRED", "TRIGGERED"}
-        if status in terminal:
-            if status in {"TRIGGERED", "FINISHED"}:
-                trade.protection_exit_reason = "STOP_LOSS"
-                trade.trailing_last_reason = f"PENDING_TRAILING_SL_{status}"
-            else:
-                trade.trailing_last_reason = f"PENDING_TRAILING_SL_NOT_ACTIVE: {status}"
-            # A terminal exchange status is definitive; a later candle may retry
-            # after a rejected/canceled stop. The old confirmed SL remains active.
-            trade.trailing_pending_algo_client_id = None
-            trade.trailing_pending_algo_trigger = None
-            await self._save_active_state()
-            return False
-        if found_id is None or status not in {"NEW", "WORKING"}:
-            trade.trailing_last_reason = f"PENDING_TRAILING_SL_ACK_UNKNOWN: {status}"
-            await self._save_active_state()
-            return False
-
-        previous_id = trade.sl_algo_id
-        previous_client = trade.sl_client_algo_id
-        if previous_id is not None or previous_client:
-            already_retired = any(
-                (previous_id is not None and item.get("algo_id") == previous_id)
-                or (previous_client and str(item.get("client_id") or "") == previous_client)
-                for item in trade.retired_sl_algo_orders
-            )
-            if not already_retired:
-                trade.retired_sl_algo_orders.append({"algo_id": previous_id, "client_id": previous_client})
-
-        trade.sl_algo_id = int(found_id)
-        trade.sl_client_algo_id = client_id
-        trade.sl_algo_status = status
-        if trade.trailing_pending_algo_trigger is not None:
-            trade.stop_loss = trade.trailing_pending_algo_trigger
+    def _clear_trailing_replace_state(self, trade: Trade) -> None:
+        trade.trailing_replace_phase = None
+        trade.trailing_replace_old_algo_id = None
+        trade.trailing_replace_old_client_id = None
+        trade.trailing_replace_old_trigger = None
+        trade.trailing_replace_submit_ambiguous = False
+        trade.trailing_conflict_warning_sent = False
         trade.trailing_pending_algo_client_id = None
         trade.trailing_pending_algo_trigger = None
-        trade.protection_state = "ACTIVE"
-        trade.protection_error = None
-        trade.trailing_last_reason = "PENDING_TRAILING_SL_CONFIRMED_BY_LOOKUP"
+
+    async def _start_trailing_sl_replacement(
+        self, trade: Trade, *, new_stop: Decimal, latest_st: Decimal,
+        close_ms: int, processed_close_ms: int,
+    ) -> bool:
+        """Persist a cancel-confirm-replace intent and advance it once immediately."""
+        old_id = trade.sl_algo_id
+        old_client = trade.sl_client_algo_id
+        old_stop = trade.stop_loss or trade.reference_sl
+        trade.trailing_replace_old_algo_id = old_id
+        trade.trailing_replace_old_client_id = old_client
+        trade.trailing_replace_old_trigger = old_stop
+        trade.trailing_pending_algo_client_id = f"VTSL{uuid4().hex[:28]}"[:36]
+        trade.trailing_pending_algo_trigger = new_stop
+        trade.trailing_replace_submit_ambiguous = False
+        trade.trailing_replace_phase = (
+            "CANCEL_OLD" if (old_id is not None or old_client) else "SUBMIT_NEW"
+        )
+        trade.protection_state = "TRAILING_REPLACE_PENDING"
+        trade.trailing_last_st = latest_st
+        trade.trailing_last_reason = "TRAILING_SL_CANCEL_OLD_FIRST" if trade.trailing_replace_phase == "CANCEL_OLD" else "TRAILING_SL_FIRST_PROTECTION_SUBMIT"
+        trade.trailing_last_close_ms = int(processed_close_ms)
         await self._save_active_state()
-        if trade.retired_sl_algo_orders:
-            if not await self._cleanup_retired_trailing_stops(trade):
-                trade.trailing_last_reason = "PENDING_TRAILING_SL_ACTIVE_OLD_SL_CLEANUP_PENDING"
+        log.warning(
+            "[TRAIL SL] %s begin cancel-confirm-replace | old=%s/%s | new=%s | phase=%s",
+            trade.pair, old_id or "-", old_stop or "-", new_stop, trade.trailing_replace_phase,
+        )
+        return await self._resolve_pending_trailing_stop(trade)
+
+    async def _resolve_pending_trailing_stop(self, trade: Trade) -> bool:
+        """Advance a durable Binance SL replacement without ever overlapping closePosition stops.
+
+        Binance error -4130 is a definitive rejection, not an ambiguous ACK. The
+        old stop is canceled and confirmed first; on a definitive replacement
+        rejection the old trigger is immediately restored under a new client ID.
+        """
+        phase = str(trade.trailing_replace_phase or "").upper()
+        client_id = str(trade.trailing_pending_algo_client_id or "").strip()
+        if not phase and not client_id:
+            return True
+        if self._binance_cooldown_remaining() > 0:
+            trade.trailing_last_reason = "TRAILING_REPLACE_WAITING_REST_COOLDOWN"
+            await self._save_active_state()
+            return False
+
+        terminal = {"CANCELED", "FINISHED", "REJECTED", "EXPIRED", "TRIGGERED"}
+
+        # Compatibility with a v4 state saved by the previous install-before-
+        # cancel implementation. Resolve the new clientAlgoId first; if it is
+        # definitively absent, move to cancel-old-first before any retry.
+        if not phase and client_id:
+            try:
+                existing = await self.real.get_algo_order(symbol=trade.pair, client_algo_id=client_id)
+            except BinanceRateLimitError:
+                trade.trailing_last_reason = "PENDING_TRAILING_SL_LOOKUP_RATE_LIMIT"
                 await self._save_active_state()
                 return False
+            except BinanceAPIError as exc:
+                if exc.code not in {-2011, -2013}:
+                    trade.trailing_last_reason = f"PENDING_TRAILING_SL_LOOKUP_ERROR: {str(exc)[:90]}"
+                    await self._save_active_state()
+                    return False
+                existing = None
+            except Exception as exc:
+                trade.trailing_last_reason = f"PENDING_TRAILING_SL_ACK_UNKNOWN: {str(exc)[:90]}"
+                await self._save_active_state()
+                return False
+            if existing is not None:
+                found_id = existing.get("algoId", existing.get("ai"))
+                status = str(existing.get("algoStatus") or existing.get("status") or "UNKNOWN").upper()
+                if found_id is not None and status in {"NEW", "WORKING"}:
+                    trade.trailing_replace_old_algo_id = trade.sl_algo_id
+                    trade.trailing_replace_old_client_id = trade.sl_client_algo_id
+                    trade.trailing_replace_old_trigger = trade.stop_loss or trade.reference_sl
+                    trade.trailing_replace_phase = "ADOPT_CONFIRMED_NEW"
+                    phase = "ADOPT_CONFIRMED_NEW"
+                else:
+                    trade.trailing_last_reason = f"PENDING_TRAILING_SL_NOT_ACTIVE: {status}"
+                    await self._save_active_state()
+                    return False
+            else:
+                trade.trailing_replace_old_algo_id = trade.sl_algo_id
+                trade.trailing_replace_old_client_id = trade.sl_client_algo_id
+                trade.trailing_replace_old_trigger = trade.stop_loss or trade.reference_sl
+                trade.trailing_replace_phase = "CANCEL_OLD" if (trade.sl_algo_id is not None or trade.sl_client_algo_id) else "SUBMIT_NEW"
+                phase = trade.trailing_replace_phase
+                trade.trailing_replace_submit_ambiguous = False
+                await self._save_active_state()
+
+        if phase == "CANCEL_OLD":
+            old_id = trade.trailing_replace_old_algo_id
+            old_client = str(trade.trailing_replace_old_client_id or "").strip()
+            old_status = str(trade.sl_algo_status or "").upper()
+            canceled = old_id is None and not old_client or old_status in terminal
+            if not canceled:
+                try:
+                    response = await self.real.cancel_algo_order(
+                        symbol=trade.pair, algo_id=old_id,
+                        client_algo_id=(old_client if old_id is None else None),
+                    )
+                    old_status = str(response.get("algoStatus") or response.get("status") or "CANCELED").upper()
+                    canceled = old_status in terminal
+                except BinanceRateLimitError:
+                    trade.trailing_last_reason = "WAITING_OLD_SL_CANCEL_RATE_LIMIT"
+                    await self._save_active_state()
+                    return False
+                except BinanceAPIError as cancel_exc:
+                    if cancel_exc.code not in {-2011, -2013}:
+                        trade.trailing_last_reason = f"OLD_SL_CANCEL_ERROR: {str(cancel_exc)[:100]}"
+                        await self._save_active_state()
+                        return False
+                    # -2011/-2013 on cancel is only accepted after a query proves
+                    # the previous Algo Order is no longer open.
+                    try:
+                        existing_old = await self.real.get_algo_order(
+                            symbol=trade.pair, algo_id=old_id,
+                            client_algo_id=(old_client if old_id is None else None),
+                        )
+                        old_status = str(existing_old.get("algoStatus") or existing_old.get("status") or "UNKNOWN").upper()
+                        canceled = old_status in terminal
+                    except BinanceAPIError as lookup_exc:
+                        canceled = lookup_exc.code in {-2011, -2013}
+                    except Exception:
+                        canceled = False
+                except Exception as cancel_exc:
+                    trade.trailing_last_reason = f"OLD_SL_CANCEL_ACK_UNKNOWN: {str(cancel_exc)[:100]}"
+                    await self._save_active_state()
+                    return False
+            if not canceled:
+                trade.trailing_last_reason = f"WAITING_OLD_SL_CANCEL_CONFIRMATION: {old_status}"
+                await self._save_active_state()
+                return False
+            if old_status in {"TRIGGERED", "FINISHED"}:
+                trade.sl_algo_status = old_status
+                trade.protection_exit_reason = "STOP_LOSS"
+                trade.trailing_last_reason = f"OLD_SL_{old_status}_DURING_TRAIL_REPLACE"
+                self._clear_trailing_replace_state(trade)
+                await self._save_active_state()
+                return False
+            trade.sl_algo_status = "CANCELED"
+            trade.trailing_replace_phase = "SUBMIT_NEW"
+            trade.protection_state = "TRAILING_REPLACE_PENDING"
+            trade.trailing_last_reason = "OLD_SL_CANCEL_CONFIRMED_SUBMITTING_NEW"
+            await self._save_active_state()
+            phase = "SUBMIT_NEW"
+
+        if phase == "WAIT_EXISTING_CLOSEPOSITION_ORDER":
+            # A definitive -4130 means Binance still sees another GTE/closePosition
+            # conditional order in this position direction. Never hammer POST or
+            # cancel an independently managed TP automatically. Re-inventory first.
+            if not await self._sync_exchange_algo_protection(trade, force=True):
+                trade.trailing_last_reason = "WAIT_4130_CONFLICT_OPEN_ALGO_SYNC_UNAVAILABLE"
+                await self._save_active_state()
+                return False
+            if trade.sl_algo_id is not None and trade.stop_loss is not None:
+                self._clear_trailing_replace_state(trade)
+                trade.protection_state = "ACTIVE" if trade.tp_algo_id is not None else "PARTIAL"
+                trade.trailing_last_reason = "EXISTING_BINANCE_SL_ADOPTED_AFTER_4130"
+                trade.trailing_conflict_warning_sent = False
+                await self._save_active_state()
+                return True
+            if trade.tp_algo_id is not None:
+                trade.protection_state = "MISSING_SL"
+                trade.protection_error = (
+                    "Binance -4130: a closePosition TP remains active and no SL is visible. "
+                    "The TP is preserved; trailing is paused until the conflict is resolved."
+                )
+                trade.trailing_last_reason = "WAITING_EXISTING_CLOSEPOSITION_TP_CONFLICT_NO_SL"
+                await self._save_active_state()
+                return False
+
+            # No conflicting conditional order remains. Restore the previous SL
+            # before trying another tighter level; a first-stop install has no
+            # previous trigger and can safely retry its original candidate.
+            if trade.trailing_replace_old_trigger is not None:
+                trade.trailing_pending_algo_trigger = trade.trailing_replace_old_trigger
+                trade.trailing_replace_phase = "RESTORE_OLD"
+            else:
+                trade.trailing_replace_phase = "SUBMIT_NEW"
+            trade.trailing_pending_algo_client_id = f"VTSL{uuid4().hex[:28]}"[:36]
+            trade.trailing_replace_submit_ambiguous = False
+            trade.trailing_last_reason = "4130_CONFLICT_CLEARED_RETRYING_PROTECTION"
+            await self._save_active_state()
+            phase = str(trade.trailing_replace_phase or "SUBMIT_NEW").upper()
+
+        if phase == "ADOPT_CONFIRMED_NEW":
+            # A previous release may have persisted this intermediate phase.
+            # Re-query by clientAlgoId after restart; never rely on a local variable
+            # that only existed in the pre-restart compatibility path.
+            try:
+                existing = await self.real.get_algo_order(symbol=trade.pair, client_algo_id=client_id)
+            except BinanceRateLimitError:
+                trade.trailing_last_reason = "PENDING_TRAILING_SL_LOOKUP_RATE_LIMIT"
+                await self._save_active_state()
+                return False
+            except BinanceAPIError as lookup_exc:
+                if lookup_exc.code not in {-2011, -2013}:
+                    trade.trailing_last_reason = f"PENDING_TRAILING_SL_LOOKUP_ERROR: {str(lookup_exc)[:90]}"
+                    await self._save_active_state()
+                    return False
+                existing = None
+            except Exception as lookup_exc:
+                trade.trailing_last_reason = f"PENDING_TRAILING_SL_LOOKUP_UNKNOWN: {str(lookup_exc)[:90]}"
+                await self._save_active_state()
+                return False
+
+            found_id = existing.get("algoId", existing.get("ai")) if isinstance(existing, dict) else None
+            found_status = str((existing or {}).get("algoStatus") or (existing or {}).get("status") or "UNKNOWN").upper()
+            if found_id is not None and found_status in {"NEW", "WORKING"}:
+                old_id = trade.trailing_replace_old_algo_id
+                old_client = trade.trailing_replace_old_client_id
+                trade.sl_algo_id = int(found_id)
+                trade.sl_client_algo_id = client_id
+                trade.sl_algo_status = found_status
+                if trade.trailing_pending_algo_trigger is not None:
+                    trade.stop_loss = trade.trailing_pending_algo_trigger
+                    trade.reference_sl = trade.trailing_pending_algo_trigger
+                if old_id is not None or old_client:
+                    if not any(
+                        (old_id is not None and item.get("algo_id") == old_id)
+                        or (old_client and str(item.get("client_id") or "") == old_client)
+                        for item in trade.retired_sl_algo_orders
+                    ):
+                        trade.retired_sl_algo_orders.append({"algo_id": old_id, "client_id": old_client})
+                self._clear_trailing_replace_state(trade)
+                trade.protection_state = "ACTIVE" if trade.tp_algo_id is not None else "PARTIAL"
+                trade.trailing_last_reason = "PENDING_TRAILING_SL_CONFIRMED_BY_LOOKUP"
+                await self._save_active_state()
+                return await self._cleanup_retired_trailing_stops(trade)
+
+            # The pending new stop is definitively absent/terminal. Check whether
+            # the previous stop survived; if yes, adopt it. Otherwise restore it.
+            old_id = trade.trailing_replace_old_algo_id
+            old_client = str(trade.trailing_replace_old_client_id or "").strip()
+            old_exists = None
+            if old_id is not None or old_client:
+                try:
+                    old_exists = await self.real.get_algo_order(
+                        symbol=trade.pair, algo_id=old_id,
+                        client_algo_id=(old_client if old_id is None else None),
+                    )
+                except BinanceAPIError as old_exc:
+                    if old_exc.code not in {-2011, -2013}:
+                        trade.trailing_last_reason = f"PREVIOUS_SL_LOOKUP_ERROR: {str(old_exc)[:90]}"
+                        await self._save_active_state()
+                        return False
+                except Exception as old_exc:
+                    trade.trailing_last_reason = f"PREVIOUS_SL_LOOKUP_UNKNOWN: {str(old_exc)[:90]}"
+                    await self._save_active_state()
+                    return False
+            old_status = str((old_exists or {}).get("algoStatus") or (old_exists or {}).get("status") or "UNKNOWN").upper()
+            if old_exists and old_status in {"NEW", "WORKING"}:
+                trade.sl_algo_id = int(old_exists.get("algoId", old_exists.get("ai", old_id)) or 0) or old_id
+                trade.sl_client_algo_id = old_client or None
+                trade.sl_algo_status = old_status
+                if trade.trailing_replace_old_trigger is not None:
+                    trade.stop_loss = trade.trailing_replace_old_trigger
+                    trade.reference_sl = trade.trailing_replace_old_trigger
+                self._clear_trailing_replace_state(trade)
+                trade.protection_state = "ACTIVE" if trade.tp_algo_id is not None else "PARTIAL"
+                trade.trailing_last_reason = "PREVIOUS_SL_STILL_ACTIVE_AFTER_PENDING_REPLACEMENT_ABSENT"
+                await self._save_active_state()
+                return True
+            await self._begin_trailing_sl_restore(trade, "PENDING_REPLACEMENT_NOT_FOUND_AFTER_RESTART")
+            return False
+
+        phase = str(trade.trailing_replace_phase or phase).upper()
+        if phase not in {"SUBMIT_NEW", "LOOKUP_NEW", "RESTORE_OLD", "LOOKUP_RESTORE"}:
+            trade.trailing_last_reason = f"UNKNOWN_TRAILING_REPLACE_PHASE: {phase}"
+            await self._save_active_state()
+            return False
+
+        restoring = phase in {"RESTORE_OLD", "LOOKUP_RESTORE"}
+        client_id = str(trade.trailing_pending_algo_client_id or "").strip()
+        trigger = trade.trailing_pending_algo_trigger
+        if not client_id or trigger is None or trigger <= 0:
+            trade.trailing_last_reason = "TRAILING_REPLACE_INTENT_INCOMPLETE"
+            await self._save_active_state()
+            return False
+
+        if phase in {"LOOKUP_NEW", "LOOKUP_RESTORE"} or trade.trailing_replace_submit_ambiguous:
+            try:
+                existing = await self.real.get_algo_order(symbol=trade.pair, client_algo_id=client_id)
+            except BinanceRateLimitError:
+                trade.trailing_last_reason = "TRAILING_REPLACE_LOOKUP_RATE_LIMIT"
+                await self._save_active_state()
+                return False
+            except BinanceAPIError as lookup_exc:
+                # A missing ID after a transport-ambiguous POST remains ambiguous.
+                # We never send a second POST with a different client ID.
+                trade.trailing_last_reason = f"TRAILING_REPLACE_LOOKUP_UNKNOWN: {str(lookup_exc)[:100]}"
+                await self._save_active_state()
+                return False
+            except Exception as lookup_exc:
+                trade.trailing_last_reason = f"TRAILING_REPLACE_LOOKUP_UNKNOWN: {str(lookup_exc)[:100]}"
+                await self._save_active_state()
+                return False
+            found_id = existing.get("algoId", existing.get("ai"))
+            found_status = str(existing.get("algoStatus") or existing.get("status") or "UNKNOWN").upper()
+            if found_id is None or found_status not in {"NEW", "WORKING"}:
+                if found_status in terminal:
+                    if restoring:
+                        # The restoration order was definitively rejected/ended.
+                        # Retain the phase and use a fresh client ID on next pass.
+                        trade.trailing_pending_algo_client_id = f"VTSL{uuid4().hex[:28]}"[:36]
+                        trade.trailing_replace_submit_ambiguous = False
+                        trade.trailing_replace_phase = "RESTORE_OLD"
+                        trade.trailing_last_reason = f"OLD_SL_RESTORE_NOT_ACTIVE: {found_status}"
+                    else:
+                        await self._begin_trailing_sl_restore(trade, f"NEW_SL_TERMINAL_{found_status}")
+                else:
+                    trade.trailing_last_reason = f"TRAILING_REPLACE_STATUS_UNKNOWN: {found_status}"
+                await self._save_active_state()
+                return False
+            return await self._confirm_trailing_sl_replacement(
+                trade, int(found_id), found_status, client_id, trigger, restoring=restoring
+            )
+
+        # Persist the client ID and ambiguity marker BEFORE POST. If the process
+        # stops or transport fails, subsequent passes only query this same ID.
+        trade.trailing_replace_submit_ambiguous = True
+        await self._save_active_state()
+        close_side = "SELL" if trade.direction == "LONG" else "BUY"
+        try:
+            response = await self.real.place_algo_order(
+                symbol=trade.pair, side=close_side, order_type="STOP_MARKET",
+                trigger_price=trigger, position_side=trade.position_side or "BOTH",
+                client_algo_id=client_id, working_type="CONTRACT_PRICE",
+            )
+            found_id = response.get("algoId", response.get("ai"))
+            found_status = str(response.get("algoStatus") or response.get("status") or "NEW").upper()
+            if found_id is None or found_status not in {"NEW", "WORKING"}:
+                trade.trailing_replace_phase = "LOOKUP_RESTORE" if restoring else "LOOKUP_NEW"
+                trade.trailing_last_reason = f"TRAILING_REPLACE_ACK_NOT_FINAL: {found_status}"
+                await self._save_active_state()
+                return False
+            return await self._confirm_trailing_sl_replacement(
+                trade, int(found_id), found_status, client_id, trigger, restoring=restoring
+            )
+        except BinanceRateLimitError:
+            # The exchange explicitly rate-limited the request; after cooldown we
+            # can safely retry the same persisted clientAlgoId.
+            trade.trailing_replace_submit_ambiguous = False
+            trade.trailing_last_reason = "TRAILING_REPLACE_RATE_LIMIT_RETRY_SAME_CLIENT_ID"
+            await self._save_active_state()
+            return False
+        except BinanceAPIError as submit_exc:
+            if submit_exc.status_code == 400 and submit_exc.code == -4130:
+                trade.trailing_replace_submit_ambiguous = False
+                sync_ok = await self._sync_exchange_algo_protection(trade, force=True)
+                if sync_ok and trade.sl_algo_id is not None and trade.stop_loss is not None:
+                    # The snapshot found a stop that survived or was installed by
+                    # another controller. Adopt it instead of posting duplicates.
+                    self._clear_trailing_replace_state(trade)
+                    trade.protection_state = "ACTIVE" if trade.tp_algo_id is not None else "PARTIAL"
+                    trade.trailing_last_reason = "EXISTING_BINANCE_SL_ADOPTED_AFTER_4130"
+                    trade.trailing_conflict_warning_sent = False
+                    await self._save_active_state()
+                    return False
+
+                if sync_ok and trade.tp_algo_id is not None:
+                    # Do not cancel an independently active TP to make room for a
+                    # stop. Binance's -4130 explicitly reports a same-direction
+                    # closePosition conflict; pause and surface the missing SL.
+                    trade.trailing_replace_phase = "WAIT_EXISTING_CLOSEPOSITION_ORDER"
+                    trade.protection_state = "MISSING_SL"
+                    trade.trailing_last_reason = "WAITING_EXISTING_CLOSEPOSITION_TP_CONFLICT_NO_SL"
+                    trade.protection_error = "Binance -4130: an existing closePosition TP/SL conflicts with this stop. Existing TP was left untouched; check open Algo Orders."
+                    await self._save_active_state()
+                    if not trade.trailing_conflict_warning_sent:
+                        trade.trailing_conflict_warning_sent = True
+                        await self.reply(
+                            f"🚨 TRAILING SL TERHALANG • {trade.pair} {trade.direction}\n"
+                            "Binance menolak SL baru (-4130). TP aktif yang ditemukan tidak dibatalkan otomatis. "
+                            "Bot akan memeriksa ulang Algo Orders; pastikan tidak ada TP/SL duplikat di Binance."
+                        )
+                    log.error("[TRAIL SL] %s -4130 conflict; no live SL found, TP was preserved and replacement paused.", trade.pair)
+                    return False
+
+                if not sync_ok:
+                    # The POST was explicitly rejected, but the openAlgoOrders
+                    # snapshot failed. Do not classify as ACK_UNKNOWN or repeat
+                    # with another client ID until the inventory can be checked.
+                    trade.trailing_replace_phase = "WAIT_EXISTING_CLOSEPOSITION_ORDER"
+                    trade.protection_state = "TRAILING_REPLACE_PENDING"
+                    trade.trailing_last_reason = "BINANCE_4130_OPEN_ALGO_SNAPSHOT_UNAVAILABLE"
+                    await self._save_active_state()
+                    return False
+
+                if restoring:
+                    trade.trailing_pending_algo_client_id = f"VTSL{uuid4().hex[:28]}"[:36]
+                    trade.trailing_replace_submit_ambiguous = False
+                    trade.trailing_replace_phase = "RESTORE_OLD"
+                    trade.trailing_last_reason = "BINANCE_REJECTED_RESTORE_SL_4130_RETRY_AFTER_EMPTY_SNAPSHOT"
+                    await self._save_active_state()
+                else:
+                    await self._begin_trailing_sl_restore(trade, "BINANCE_REJECTED_NEW_SL_4130")
+                return False
+            if submit_exc.status_code is not None and 400 <= int(submit_exc.status_code) < 500 and submit_exc.status_code not in {418, 429}:
+                trade.trailing_replace_submit_ambiguous = False
+                if not restoring:
+                    await self._begin_trailing_sl_restore(trade, f"NEW_SL_REJECTED_{submit_exc.code or submit_exc.status_code}")
+                else:
+                    trade.trailing_pending_algo_client_id = f"VTSL{uuid4().hex[:28]}"[:36]
+                    trade.trailing_replace_phase = "RESTORE_OLD"
+                    trade.trailing_replace_submit_ambiguous = False
+                    trade.trailing_last_reason = f"OLD_SL_RESTORE_REJECTED: {str(submit_exc)[:100]}"
+                    await self._save_active_state()
+                return False
+            trade.trailing_replace_phase = "LOOKUP_RESTORE" if restoring else "LOOKUP_NEW"
+            trade.trailing_last_reason = f"TRAILING_REPLACE_ACK_UNKNOWN: {str(submit_exc)[:100]}"
+            await self._save_active_state()
+            log.warning("[TRAIL SL] %s Algo SL POST ambiguous; lookup-only recovery: %s", trade.pair, submit_exc)
+            return False
+        except Exception as submit_exc:
+            trade.trailing_replace_phase = "LOOKUP_RESTORE" if restoring else "LOOKUP_NEW"
+            trade.trailing_last_reason = f"TRAILING_REPLACE_ACK_UNKNOWN: {str(submit_exc)[:100]}"
+            await self._save_active_state()
+            log.warning("[TRAIL SL] %s Algo SL POST ambiguous; lookup-only recovery: %s", trade.pair, submit_exc)
+            return False
+
+    async def _begin_trailing_sl_restore(self, trade: Trade, reason: str) -> None:
+        old_trigger = trade.trailing_replace_old_trigger
+        if old_trigger is None or old_trigger <= 0:
+            trade.trailing_last_reason = f"NEW_SL_FAILED_NO_PREVIOUS_SL_TO_RESTORE: {reason}"[:160]
+            trade.protection_state = "MISSING_SL"
+            trade.protection_error = "No active SL after rejected trailing replacement; manual intervention may be required."
+            trade.trailing_pending_algo_client_id = None
+            trade.trailing_pending_algo_trigger = None
+            trade.trailing_replace_phase = None
+            trade.trailing_replace_old_algo_id = None
+            trade.trailing_replace_old_client_id = None
+            trade.trailing_replace_submit_ambiguous = False
+            await self._save_active_state()
+            await self.reply(
+                f"🚨 TRAILING SL GAGAL • {trade.pair} {trade.direction}\n"
+                f"SL baru ditolak ({reason}) dan tidak ada SL lama yang bisa dipulihkan. Periksa posisi LIVE segera."
+            )
+            return
+        trade.trailing_pending_algo_client_id = f"VTSL{uuid4().hex[:28]}"[:36]
+        trade.trailing_pending_algo_trigger = old_trigger
+        trade.trailing_replace_phase = "RESTORE_OLD"
+        trade.protection_state = "TRAILING_REPLACE_PENDING"
+        trade.trailing_replace_submit_ambiguous = False
+        trade.trailing_last_reason = f"RESTORING_PREVIOUS_SL_AFTER_{reason}"[:160]
+        await self._save_active_state()
+        log.error("[TRAIL SL] %s restoring previous SL trigger=%s after replacement failure: %s", trade.pair, old_trigger, reason)
+
+    async def _confirm_trailing_sl_replacement(
+        self, trade: Trade, algo_id: int, status: str, client_id: str,
+        trigger: Decimal, *, restoring: bool,
+    ) -> bool:
+        old_trigger = trade.trailing_replace_old_trigger
+        old_id = trade.trailing_replace_old_algo_id
+        trade.sl_algo_id = int(algo_id)
+        trade.sl_client_algo_id = client_id
+        trade.sl_algo_status = str(status or "NEW").upper()
+        trade.stop_loss = trigger
+        trade.reference_sl = trigger
+        if restoring:
+            trade.trailing_last_reason = "PREVIOUS_SL_RESTORED_AFTER_REPLACEMENT_FAILURE"
+            trade.protection_error = None
+            trade.protection_state = "PARTIAL" if trade.tp_algo_id is None else "ACTIVE"
+            await self._record_event(
+                "REAL_TRAILING_SL_PREVIOUS_RESTORED", trade,
+                restored_sl=decimal_to_str(trigger), restored_algo_id=algo_id,
+                failed_replacement_reason=trade.trailing_last_reason,
+            )
+        else:
+            trade.trailing_last_reason = "UPDATED_REAL_FROM_LATEST_M15_ST"
+            trade.protection_error = None
+            trade.protection_state = "PARTIAL" if trade.exchange_adopted and trade.tp_algo_id is None else "ACTIVE"
+            await self._record_event(
+                "REAL_TRAILING_SL_UPDATED", trade,
+                previous_sl=decimal_to_str(old_trigger), new_sl=decimal_to_str(trigger),
+                latest_m15_st=decimal_to_str(trade.trailing_last_st),
+                previous_algo_id=old_id, new_algo_id=algo_id,
+                m15_close_time_ms=trade.trailing_last_close_ms,
+            )
+        self._clear_trailing_replace_state(trade)
+        await self._save_active_state()
         log.info(
-            "[TRAIL SL] %s pending trailing stop confirmed | algo=%s trigger=%s status=%s",
-            trade.pair, trade.sl_algo_id, trade.stop_loss, status,
+            "[TRAIL SL] %s REAL %s | SL=%s | algo=%s | status=%s",
+            trade.pair, "previous SL restored" if restoring else "updated",
+            trigger, algo_id, status,
         )
         return True
 
@@ -10221,35 +10702,45 @@ class TradingEngine:
             log.warning("[TRAIL SL] %s candle close %s tidak diproses: %s", trade.pair, close_ms, exc)
             return
 
-        old_stop = trade.stop_loss or trade.reference_sl
-        if old_stop is None:
-            trade.trailing_last_st = latest_st
-            trade.trailing_last_reason = "CURRENT_SL_NOT_AVAILABLE"
-            await self._save_active_state()
-            return
-        if trade.real_enabled and trade.trailing_pending_algo_client_id:
+        # An exchange-adopted position is eligible only after its current Binance
+        # Algo protections have been inventoried. Resolve any interrupted
+        # cancel/replace before considering a newer candle.
+        if trade.exchange_adopted and not trade.exchange_algo_sync_complete:
+            if not await self._sync_exchange_algo_protection(trade):
+                return
+        if trade.real_enabled and (trade.trailing_replace_phase or trade.trailing_pending_algo_client_id):
             if not await self._resolve_pending_trailing_stop(trade):
                 trade.trailing_last_st = latest_st
                 await self._save_active_state()
                 return
-            old_stop = trade.stop_loss or trade.reference_sl or old_stop
+
+        old_stop = trade.stop_loss or trade.reference_sl
         live = self._current_price(trade.pair) or latest_close
-        # The user's rule is exact: each close uses this candle's own ST line.
-        # Do not substitute an older, more aggressive ST from a missed candle.
+        # Each M15 close uses exactly this candle's own SuperTrend. For an
+        # adopted position with no existing SL, the first valid ST becomes its
+        # first protective stop; we never invent an initial risk/TP for it.
         if trade.direction == "LONG":
-            candidate = latest_st if old_stop < latest_st < live else None
-            no_move_reason = (
-                "LATEST_ST_NOT_TIGHTER_THAN_CURRENT_SL" if latest_st <= old_stop else
-                "LATEST_ST_NOT_BELOW_LIVE_PRICE" if latest_st >= live else
-                "LATEST_ST_INVALID_FOR_TRAILING"
-            )
+            if old_stop is None:
+                candidate = latest_st if latest_st < live else None
+                no_move_reason = "LATEST_ST_NOT_BELOW_LIVE_PRICE" if latest_st >= live else "LATEST_ST_INVALID_FOR_INITIAL_SL"
+            else:
+                candidate = latest_st if old_stop < latest_st < live else None
+                no_move_reason = (
+                    "LATEST_ST_NOT_TIGHTER_THAN_CURRENT_SL" if latest_st <= old_stop else
+                    "LATEST_ST_NOT_BELOW_LIVE_PRICE" if latest_st >= live else
+                    "LATEST_ST_INVALID_FOR_TRAILING"
+                )
         else:
-            candidate = latest_st if live < latest_st < old_stop else None
-            no_move_reason = (
-                "LATEST_ST_NOT_TIGHTER_THAN_CURRENT_SL" if latest_st >= old_stop else
-                "LATEST_ST_NOT_ABOVE_LIVE_PRICE" if latest_st <= live else
-                "LATEST_ST_INVALID_FOR_TRAILING"
-            )
+            if old_stop is None:
+                candidate = latest_st if latest_st > live else None
+                no_move_reason = "LATEST_ST_NOT_ABOVE_LIVE_PRICE" if latest_st <= live else "LATEST_ST_INVALID_FOR_INITIAL_SL"
+            else:
+                candidate = latest_st if live < latest_st < old_stop else None
+                no_move_reason = (
+                    "LATEST_ST_NOT_TIGHTER_THAN_CURRENT_SL" if latest_st >= old_stop else
+                    "LATEST_ST_NOT_ABOVE_LIVE_PRICE" if latest_st <= live else
+                    "LATEST_ST_INVALID_FOR_TRAILING"
+                )
 
         if candidate is None:
             trade.trailing_last_st = latest_st
@@ -10264,7 +10755,7 @@ class TradingEngine:
             )
             log.info(
                 "[TRAIL SL] %s %s unchanged | current=%s | latest M15 ST=%s | live=%s | reason=%s",
-                trade.pair, trade.direction, old_stop, latest_st, live, no_move_reason,
+                trade.pair, trade.direction, old_stop or "-", latest_st, live, no_move_reason,
             )
             await self._save_active_state()
             return
@@ -10297,18 +10788,31 @@ class TradingEngine:
             else quantized_price_ceiling(candidate, tick)
         )
         valid_new_stop = (
-            old_stop < new_stop < live if trade.direction == "LONG"
-            else live < new_stop < old_stop
+            (new_stop > 0 and new_stop < live and (old_stop is None or new_stop > old_stop))
+            if trade.direction == "LONG" else
+            (new_stop > live and (old_stop is None or new_stop < old_stop))
         )
         if not valid_new_stop:
             trade.trailing_last_st = latest_st
-            trade.trailing_last_reason = "CANDIDATE_INVALID_AFTER_TICKSIZE_ROUNDING"
+            trade.trailing_last_reason = (
+                "UNCHANGED_AFTER_TICKSIZE_ROUNDING"
+                if old_stop is not None and new_stop == old_stop
+                else "CANDIDATE_INVALID_AFTER_TICKSIZE_ROUNDING"
+            )
             trade.trailing_last_close_ms = processed_close_ms
+            await self._record_event(
+                "TRAILING_SL_NOT_MOVED", trade,
+                current_sl=decimal_to_str(old_stop), latest_m15_st=decimal_to_str(latest_st),
+                rounded_candidate=decimal_to_str(new_stop), tick_size=decimal_to_str(tick),
+                live_price=decimal_to_str(live), reason=trade.trailing_last_reason,
+                m15_close_time_ms=close_ms,
+            )
             await self._save_active_state()
             return
 
         if not trade.real_enabled:
             trade.stop_loss = new_stop
+            trade.reference_sl = new_stop
             trade.trailing_last_st = latest_st
             trade.trailing_last_reason = "UPDATED_PAPER_FROM_LATEST_M15_ST"
             trade.trailing_last_close_ms = processed_close_ms
@@ -10321,7 +10825,7 @@ class TradingEngine:
             await self._save_active_state()
             log.info(
                 "[TRAIL SL] %s PAPER updated %s -> %s | latest M15 ST=%s",
-                trade.pair, old_stop, new_stop, latest_st,
+                trade.pair, old_stop or "-", new_stop, latest_st,
             )
             return
 
@@ -10336,111 +10840,30 @@ class TradingEngine:
                 trade.trailing_last_reason = "WAITING_OLD_SL_CANCELLATION_CONFIRMATION"
                 await self._save_active_state()
                 return
-        if trade.protection_state != "ACTIVE" or trade.sl_algo_id is None:
+
+        has_working_sl = (
+            trade.sl_algo_id is not None
+            and str(trade.sl_algo_status or "").upper() in {"NEW", "WORKING"}
+        )
+        can_install_first_adopted_sl = (
+            trade.exchange_adopted and trade.exchange_algo_sync_complete
+            and trade.sl_algo_id is None and old_stop is None
+        )
+        if not has_working_sl and not can_install_first_adopted_sl:
             trade.trailing_last_st = latest_st
-            trade.trailing_last_reason = f"BINANCE_PROTECTION_NOT_ACTIVE: {trade.protection_state}"
+            trade.trailing_last_reason = f"BINANCE_SL_NOT_READY: {trade.protection_state}"
             await self._save_active_state()
             log.warning(
-                "[TRAIL SL] %s skip update; protection=%s sl_algo_id=%s",
+                "[TRAIL SL] %s skip update; protection=%s sl_algo_id=%s adopted=%s algo_sync=%s",
                 trade.pair, trade.protection_state, trade.sl_algo_id,
+                trade.exchange_adopted, trade.exchange_algo_sync_complete,
             )
             return
 
-        # Install the tighter stop FIRST. Only after Binance acknowledges it do
-        # we cancel the older wider stop, avoiding an unprotected replacement gap.
-        previous_id = trade.sl_algo_id
-        previous_client = trade.sl_client_algo_id
-        new_client = f"VTSL{uuid4().hex[:28]}"[:36]
-        # Durable intent before POST: if the response is lost or process restarts,
-        # the same clientAlgoId is looked up rather than sending a duplicate SL.
-        trade.trailing_pending_algo_client_id = new_client
-        trade.trailing_pending_algo_trigger = new_stop
-        trade.trailing_last_reason = "TRAILING_SL_SUBMITTING"
-        await self._save_active_state()
-        close_side = "SELL" if trade.direction == "LONG" else "BUY"
-        try:
-            response = await self.real.place_algo_order(
-                symbol=trade.pair, side=close_side, order_type="STOP_MARKET",
-                trigger_price=new_stop, position_side=trade.position_side or "BOTH",
-                client_algo_id=new_client, working_type="CONTRACT_PRICE",
-            )
-            new_id = response.get("algoId", response.get("ai"))
-            new_status = str(response.get("algoStatus") or response.get("status") or "NEW").upper()
-        except BinanceRateLimitError:
-            trade.trailing_last_st = latest_st
-            trade.trailing_last_reason = "BINANCE_RATE_LIMIT_WHILE_UPDATING_SL_PENDING_LOOKUP_REQUIRED"
-            await self._save_active_state()
-            return
-        except Exception as submit_exc:
-            try:
-                found = await self.real.get_algo_order(
-                    symbol=trade.pair, client_algo_id=new_client
-                )
-                new_id = found.get("algoId", found.get("ai"))
-                new_status = str(found.get("algoStatus") or found.get("status") or "UNKNOWN").upper()
-            except Exception as lookup_exc:
-                trade.trailing_last_st = latest_st
-                trade.trailing_last_reason = f"NEW_SL_ACK_UNKNOWN: {str(lookup_exc)[:90]}"
-                await self._save_active_state()
-                log.warning("[TRAIL SL] %s new SL acknowledgement unknown; old SL kept: %s", trade.pair, submit_exc)
-                return
-
-        terminal_sl_statuses = {"REJECTED", "CANCELED", "EXPIRED", "FINISHED", "TRIGGERED"}
-        if new_id is None or new_status not in {"NEW", "WORKING"}:
-            trade.trailing_last_st = latest_st
-            trade.trailing_last_reason = f"NEW_SL_NOT_CONFIRMED: {new_status}"
-            if new_status in terminal_sl_statuses:
-                trade.trailing_pending_algo_client_id = None
-                trade.trailing_pending_algo_trigger = None
-                trade.trailing_last_close_ms = processed_close_ms
-                if new_status in {"FINISHED", "TRIGGERED"}:
-                    trade.protection_exit_reason = "STOP_LOSS"
-            await self._save_active_state()
-            log.warning("[TRAIL SL] %s new SL not confirmed (%s); old SL kept.", trade.pair, new_status)
-            return
-
-        if previous_id is not None or previous_client:
-            already_retired = any(
-                (previous_id is not None and item.get("algo_id") == previous_id)
-                or (previous_client and str(item.get("client_id") or "") == previous_client)
-                for item in trade.retired_sl_algo_orders
-            )
-            if not already_retired:
-                trade.retired_sl_algo_orders.append({"algo_id": previous_id, "client_id": previous_client})
-
-        trade.sl_algo_id = int(new_id)
-        trade.sl_client_algo_id = new_client
-        trade.sl_algo_status = new_status
-        trade.trailing_pending_algo_client_id = None
-        trade.trailing_pending_algo_trigger = None
-        trade.stop_loss = new_stop
-        trade.trailing_last_st = latest_st
-        trade.trailing_last_reason = "UPDATED_REAL_FROM_LATEST_M15_ST"
-        trade.trailing_last_close_ms = processed_close_ms
-        trade.protection_state = "ACTIVE"
-        trade.protection_error = None
-        await self._record_event(
-            "REAL_TRAILING_SL_UPDATED", trade,
-            previous_sl=decimal_to_str(old_stop), new_sl=decimal_to_str(new_stop),
-            latest_m15_st=decimal_to_str(latest_st), candidate_st=decimal_to_str(candidate),
-            previous_algo_id=previous_id, new_algo_id=trade.sl_algo_id,
-            m15_close_time_ms=close_ms,
+        await self._start_trailing_sl_replacement(
+            trade, new_stop=new_stop, latest_st=latest_st,
+            close_ms=close_ms, processed_close_ms=processed_close_ms,
         )
-        await self._save_active_state()
-        log.info(
-            "[TRAIL SL] %s REAL updated %s -> %s | latest M15 ST=%s | new algo=%s",
-            trade.pair, old_stop, new_stop, latest_st, trade.sl_algo_id,
-        )
-
-        if trade.retired_sl_algo_orders:
-            cleaned = await self._cleanup_retired_trailing_stops(trade)
-            if not cleaned:
-                trade.trailing_last_reason = "UPDATED_REAL_OLD_SL_CLEANUP_PENDING"
-                await self._save_active_state()
-                log.warning(
-                    "[TRAIL SL] %s new SL active at %s; old SL cleanup remains pending and will be retried.",
-                    trade.pair, new_stop,
-                )
 
     async def _backfill_m5_position_history(self, pair: str, before_open_ms: int, after_open_ms: int | None) -> bool:
         """Recover missing closed M5 candles for PAPER SL/TP before processing a gap."""
@@ -11302,8 +11725,11 @@ class TradingEngine:
             session_id=self.session_id,
             pair=symbol,
             direction=direction,
-            timeframe="EXCHANGE",
-            trend_length=self.trend_length,
+            # Adopted live positions join the same M15 trailing-SL monitor as
+            # current v4 positions. Their pre-existing Binance exits are first
+            # discovered via openAlgoOrders; no unknown TP is fabricated.
+            timeframe="M15",
+            trend_length=9,
             signal="BLUE" if direction == "LONG" else "RED",
             signal_time=stamp,
             bubble_price=entry,
@@ -11323,6 +11749,8 @@ class TradingEngine:
             created_at=stamp,
             filled_at=(stamp if status == "FILLED" else None),
             fill_price=(entry if status == "FILLED" else None),
+            rr_target=Decimal("2"), rr_min=Decimal("2"), rr_max=Decimal("2"),
+            take_profit_rr=Decimal("2"), take_profit_source="EXCHANGE_ADOPTED_UNKNOWN",
             quantity=quantity if quantity > 0 else None,
             margin_usdt=margin_value,
             leverage=lev,
@@ -11341,6 +11769,7 @@ class TradingEngine:
             preserve_gtc_after_cooldown=preserve_gtc,
             exchange_adopted=True,
             exchange_adoption_source=source,
+            exchange_algo_sync_complete=False,
         )
 
     def _recover_terminal_local_order_trade(
@@ -11399,6 +11828,165 @@ class TradingEngine:
             )
             return trade
         return None
+
+    async def _sync_exchange_algo_protection(
+        self, trade: Trade, *, force: bool = False,
+    ) -> bool:
+        """Adopt actual Binance closePosition SL/TP orders for an exchange position.
+
+        This is intentionally read-only: unknown/external protective orders are
+        never canceled here. A single per-symbol openAlgoOrders snapshot is reused
+        for both hedge-mode sides and for subsequent position reconciliation.
+        """
+        if not trade.real_enabled or trade.status != "FILLED":
+            return False
+        if self._real_ip_permission_blocked_for_current_route():
+            trade.trailing_last_reason = "WAITING_EXCHANGE_ALGO_SYNC_IP_PERMISSION"
+            return False
+        if self._binance_cooldown_remaining() > 0:
+            trade.trailing_last_reason = "WAITING_EXCHANGE_ALGO_SYNC_REST_COOLDOWN"
+            return False
+
+        pair = normalize_symbol(trade.pair)
+        now_mono = time.monotonic()
+        cached_at = float(self._exchange_algo_sync_at.get(pair, 0.0))
+        cached_rows = self._exchange_algo_orders_by_symbol.get(pair)
+        if (
+            not force and trade.exchange_algo_sync_complete
+            and cached_rows is not None and now_mono - cached_at < 30.0
+        ):
+            return True
+        if force or cached_rows is None or now_mono - cached_at >= 30.0:
+            try:
+                rows = await self.real.get_open_algo_orders(pair)
+            except BinanceRateLimitError:
+                trade.trailing_last_reason = "WAITING_EXCHANGE_ALGO_SYNC_RATE_LIMIT"
+                return False
+            except Exception as exc:
+                trade.trailing_last_reason = f"EXCHANGE_ALGO_SYNC_ERROR: {str(exc)[:110]}"
+                log.warning("[REAL/ALGO SYNC] %s openAlgoOrders failed: %s", pair, exc)
+                return False
+            self._exchange_algo_orders_by_symbol[pair] = rows
+            self._exchange_algo_sync_at[pair] = now_mono
+        else:
+            rows = cached_rows
+
+        close_side = "SELL" if trade.direction == "LONG" else "BUY"
+        wanted_position_side = str(trade.position_side or "BOTH").upper()
+        live = self._current_price(pair)
+        if live is None or live <= 0:
+            try:
+                position = self.exchange_positions.get((pair, wanted_position_side))
+                if position:
+                    live = Decimal(str(position.get("markPrice") or "0"))
+            except (InvalidOperation, ValueError, TypeError):
+                live = None
+
+        stop_candidates: list[tuple[Decimal, dict[str, Any]]] = []
+        tp_candidates: list[tuple[Decimal, dict[str, Any]]] = []
+        for item in rows:
+            order_status = str(item.get("algoStatus") or item.get("status") or "NEW").upper()
+            if order_status not in {"NEW", "WORKING"}:
+                continue
+            order_type = str(item.get("orderType") or item.get("type") or "").upper()
+            order_side = str(item.get("side") or item.get("orderSide") or "").upper()
+            order_position_side = str(item.get("positionSide") or "BOTH").upper()
+            raw_close_position = item.get("closePosition")
+            if raw_close_position is None:
+                try:
+                    raw_quantity = Decimal(str(item.get("quantity") or "0"))
+                except (InvalidOperation, TypeError, ValueError):
+                    raw_quantity = Decimal("-1")
+                close_position = raw_quantity == 0
+            else:
+                close_position = str(raw_close_position).strip().lower() in {"true", "1"}
+            if not close_position or order_side != close_side:
+                continue
+            if order_position_side not in {"BOTH", wanted_position_side}:
+                continue
+            try:
+                trigger = Decimal(str(item.get("triggerPrice") or item.get("stopPrice") or "0"))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if not trigger.is_finite() or trigger <= 0:
+                continue
+            normalized = dict(item)
+            normalized["_trigger_decimal"] = trigger
+            if order_type in {"STOP_MARKET", "STOP"}:
+                stop_candidates.append((trigger, normalized))
+            elif order_type in {"TAKE_PROFIT_MARKET", "TAKE_PROFIT"}:
+                tp_candidates.append((trigger, normalized))
+
+        # Choose the tightest currently protective stop/target. Any other
+        # exchange orders are left untouched; Binance remains their authority.
+        valid_stops = [
+            pair_item for pair_item in stop_candidates
+            if live is None or (
+                pair_item[0] < live if trade.direction == "LONG" else pair_item[0] > live
+            )
+        ]
+        if valid_stops:
+            selected_stop = (
+                max(valid_stops, key=lambda x: x[0]) if trade.direction == "LONG"
+                else min(valid_stops, key=lambda x: x[0])
+            )[1]
+            raw_id = selected_stop.get("algoId", selected_stop.get("ai"))
+            trade.sl_algo_id = int(raw_id) if raw_id not in (None, "") else None
+            trade.sl_client_algo_id = str(selected_stop.get("clientAlgoId") or "").strip() or None
+            trade.sl_algo_status = str(selected_stop.get("algoStatus") or "NEW").upper()
+            trade.stop_loss = selected_stop["_trigger_decimal"]
+            trade.reference_sl = selected_stop["_trigger_decimal"]
+        else:
+            # The snapshot is authoritative for open Algo Orders. If it contains
+            # no protective SL, allow the next M15 close to create the first one.
+            trade.sl_algo_id = None
+            trade.sl_client_algo_id = None
+            trade.sl_algo_status = "NOT_PLACED"
+            trade.stop_loss = None
+            trade.reference_sl = None
+
+        valid_tps = [
+            pair_item for pair_item in tp_candidates
+            if live is None or (
+                pair_item[0] > live if trade.direction == "LONG" else pair_item[0] < live
+            )
+        ]
+        if valid_tps:
+            selected_tp = (
+                min(valid_tps, key=lambda x: x[0]) if trade.direction == "LONG"
+                else max(valid_tps, key=lambda x: x[0])
+            )[1]
+            raw_id = selected_tp.get("algoId", selected_tp.get("ai"))
+            trade.tp_algo_id = int(raw_id) if raw_id not in (None, "") else None
+            trade.tp_client_algo_id = str(selected_tp.get("clientAlgoId") or "").strip() or None
+            trade.tp_algo_status = str(selected_tp.get("algoStatus") or "NEW").upper()
+            trade.take_profit = selected_tp["_trigger_decimal"]
+        else:
+            trade.tp_algo_id = None
+            trade.tp_client_algo_id = None
+            trade.tp_algo_status = "NOT_PLACED"
+            trade.take_profit = None
+
+        trade.exchange_algo_sync_complete = True
+        if trade.sl_algo_id is not None and trade.tp_algo_id is not None:
+            trade.protection_state = "ACTIVE"
+            trade.protection_error = None
+            trade.trailing_last_reason = "EXCHANGE_SL_TP_ADOPTED_FROM_OPEN_ALGO_ORDERS"
+        elif trade.sl_algo_id is not None:
+            trade.protection_state = "PARTIAL"
+            trade.protection_error = "Exchange SL adopted; TP state is not present in openAlgoOrders."
+            trade.trailing_last_reason = "EXCHANGE_SL_ADOPTED_TP_NOT_FOUND"
+        else:
+            trade.protection_state = "MISSING_SL"
+            trade.protection_error = "No live closePosition STOP Algo Order found; first valid M15 ST close may install SL."
+            trade.trailing_last_reason = "EXCHANGE_POSITION_NO_ACTIVE_SL_WAITING_M15_ST"
+        await self._save_active_state()
+        log.info(
+            "[REAL/ALGO SYNC] %s %s adopted | SL=%s (%s) | TP=%s (%s) | rows=%s",
+            pair, trade.direction, trade.stop_loss, trade.sl_algo_id,
+            trade.take_profit, trade.tp_algo_id, len(rows),
+        )
+        return True
 
     async def _upsert_exchange_position(
         self, row: dict[str, Any], *, source: str, finalize_on_flat: bool = True
@@ -11508,7 +12096,12 @@ class TradingEngine:
                 trade.real_state = "REAL_EXCHANGE_ADOPTED"
         await self.ws.add_symbol(symbol)
         if trade.status == "FILLED":
-            self._schedule_ema_exit_initialization(trade)
+            if trade.exchange_adopted:
+                # Inventory Binance's existing STOP/TP Algo Orders before
+                # starting the M15 trailing monitor for an adopted position.
+                await self._sync_exchange_algo_protection(trade)
+            else:
+                self._schedule_ema_exit_initialization(trade)
             await self._sync_ws_symbols()
         return trade
 
@@ -12095,6 +12688,7 @@ class TradingEngine:
         else:
             await self.reply(f"REAL: {'ON' if self.real_mode else 'OFF'}\nGunakan /real on atau /real off.")
 
+    @staticmethod
     def _symbols_from_command(text: str) -> list[str]:
         parts = str(text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
