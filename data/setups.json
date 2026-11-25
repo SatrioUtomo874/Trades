@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T17:04:07.799760+00:00",
+  "updated_at": "2026-11-25T17:04:11.999865+00:00",
   "active_trades": [
     {
       "trade_id": "ZKPUSDT-20261125-234403-CE18BD",
@@ -554,12 +554,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.00015261359084662",
       "realized_r": null,
-      "quantity": "148",
-      "margin_usdt": "0.551004",
+      "quantity": "95",
+      "margin_usdt": "0.353685",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5",
-      "actual_notional": "5.51004",
+      "actual_notional": "3.53685",
       "real_enabled": true,
       "real_state": "REAL_FILLED",
       "position_side": "BOTH",
@@ -567,7 +567,7 @@
       "entry_client_order_id": "VTe1f24e126eaaa3dffda4eb526cc0",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "148",
+      "entry_executed_qty": "95",
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
