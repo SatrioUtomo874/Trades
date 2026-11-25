@@ -393,12 +393,17 @@
     "M15:RLCUSDT": 1795624200000,
     "M15:ROBOUSDT": 1795624200000,
     "M15:RONINUSDT": 1795624200000,
-    "M15:ROSEUSDT": 1795624200000
+    "M15:ROSEUSDT": 1795624200000,
+    "M15:RPLUSDT": 1795624200000,
+    "M15:RSRUSDT": 1795624200000,
+    "M15:RUNEUSDT": 1795624200000,
+    "M15:RVNUSDT": 1795624200000,
+    "M15:SAFEUSDT": 1795624200000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 382,
+  "scan_resume_cursor": 387,
   "scan_resume_boundary_ms": 1795625100000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-25T16:50:37.369247+00:00"
+  "updated_at": "2026-11-25T16:50:48.337481+00:00"
 }
