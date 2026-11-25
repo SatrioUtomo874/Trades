@@ -324,3 +324,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:15:19.705826+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## 1000CHEEMSUSDT SHORT — EXPIRED
+- Trade ID: `1000CHEEMSUSDT-20261125-204652-643E25`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:15:32.692277+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
