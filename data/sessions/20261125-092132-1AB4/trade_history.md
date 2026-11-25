@@ -90,3 +90,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T04:09:59.019793+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## LUNA2USDT SHORT — CANCELED
+- Trade ID: `LUNA2USDT-20261125-110622-D1FF27`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T04:10:14.971654+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
