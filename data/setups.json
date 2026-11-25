@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T15:35:08.443985+00:00",
+  "updated_at": "2026-11-25T15:35:09.628419+00:00",
   "active_trades": [
     {
       "trade_id": "VVVUSDT-20261125-220907-F59A89",
@@ -577,8 +577,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-25T15:35:09.619077+00:00",
+      "entry_trigger_price": "0.003709",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
