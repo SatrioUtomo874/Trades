@@ -216,3 +216,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:45:37.650157+00:00 | Reason: SCANNER_OFF
+## SEIUSDT SHORT — CANCELED
+- Trade ID: `SEIUSDT-20261125-143506-D8B9A1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:46:04.054289+00:00 | Reason: SCANNER_OFF
