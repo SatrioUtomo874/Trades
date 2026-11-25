@@ -3,7 +3,7 @@
   "timeframe": "M15",
   "trend_length": 9,
   "ema_filter_length": null,
-  "btc_filter_enabled": true,
+  "btc_filter_enabled": false,
   "h1_enabled": false,
   "supertrend_atr_length": 14,
   "supertrend_factor": 2.5,
@@ -266,8 +266,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 250,
-  "scan_resume_boundary_ms": 1795572900000,
+  "scan_resume_cursor": 0,
+  "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-25T02:27:39.122416+00:00"
+  "updated_at": "2026-11-25T02:27:42.404654+00:00"
 }
