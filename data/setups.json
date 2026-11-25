@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T02:46:26.451471+00:00",
+  "updated_at": "2026-11-25T02:46:33.668516+00:00",
   "active_trades": [
     {
       "trade_id": "FETUSDT-20261125-092151-A5C89C",
@@ -1042,7 +1042,7 @@
       "tp_client_algo_id": "VTTPSDT-20261125-093818-19A760",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
