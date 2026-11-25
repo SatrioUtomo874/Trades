@@ -414,3 +414,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:19:38.751258+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ETHWUSDT SHORT — EXPIRED
+- Trade ID: `ETHWUSDT-20261125-205117-E56CB3`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:20:00.279747+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
