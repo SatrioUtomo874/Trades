@@ -204,3 +204,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:47:54.152618+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PYTHUSDT SHORT — EXPIRED
+- Trade ID: `PYTHUSDT-20261125-162441-CE18DD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:48:04.091887+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
