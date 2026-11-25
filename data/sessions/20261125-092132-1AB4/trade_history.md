@@ -138,3 +138,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T04:17:14.042174+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## HYPEUSDT SHORT — CANCELED
+- Trade ID: `HYPEUSDT-20261125-113435-753E8C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T04:41:53.376365+00:00 | Reason: SCANNER_OFF
