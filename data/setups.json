@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T06:14:59.824965+00:00",
+  "updated_at": "2026-11-25T06:15:02.373865+00:00",
   "active_trades": [
     {
       "trade_id": "ROSEUSDT-20261125-130126-C0ECD7",
@@ -391,8 +391,8 @@
       "tp_client_algo_id": null,
       "sl_algo_status": "NOT_PLACED",
       "tp_algo_status": "NOT_PLACED",
-      "protection_state": "INVALID_RISK",
-      "protection_error": "Actual fill price and M15 Supertrend SL do not form a positive risk distance.",
+      "protection_state": "MISSING_SL",
+      "protection_error": "No live closePosition STOP Algo Order found; first valid M15 ST close may install SL.",
       "protection_warning_sent": false,
       "protection_exit_reason": null,
       "sl_submit_ambiguous": false,
@@ -466,7 +466,7 @@
       "entry_touch_missed": false,
       "trailing_last_close_ms": 0,
       "trailing_last_st": null,
-      "trailing_last_reason": null,
+      "trailing_last_reason": "EXCHANGE_POSITION_NO_ACTIVE_SL_WAITING_M15_ST",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "trailing_replace_phase": null,
@@ -475,7 +475,7 @@
       "trailing_replace_old_trigger": null,
       "trailing_replace_submit_ambiguous": false,
       "trailing_conflict_warning_sent": false,
-      "exchange_algo_sync_complete": false,
+      "exchange_algo_sync_complete": true,
       "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; fixed 2R TP; M15 close trailing SL",
       "price_exp_reason": "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
     }
