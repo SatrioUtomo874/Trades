@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T00:29:36.097132+00:00",
+  "updated_at": "2026-11-25T00:29:40.884338+00:00",
   "active_trades": [
     {
       "trade_id": "SOPHUSDT-20261125-004613-4ED906",
@@ -1042,8 +1042,8 @@
       "tp_client_algo_id": null,
       "sl_algo_status": "NOT_PLACED",
       "tp_algo_status": "NOT_PLACED",
-      "protection_state": "INVALID_RISK",
-      "protection_error": "Actual fill price and M15 Supertrend SL do not form a positive risk distance.",
+      "protection_state": "CANCELED",
+      "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
       "sl_submit_ambiguous": false,
