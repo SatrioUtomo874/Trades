@@ -210,3 +210,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:48:04.091887+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## STRKUSDT SHORT — EXPIRED
+- Trade ID: `STRKUSDT-20261125-162554-A2A0B9`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:48:14.660060+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
