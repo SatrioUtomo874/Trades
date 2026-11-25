@@ -12,3 +12,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T08:15:01.334280+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ARPAUSDT SHORT — EXPIRED
+- Trade ID: `ARPAUSDT-20261125-145730-540CE4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T08:15:15.146869+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
