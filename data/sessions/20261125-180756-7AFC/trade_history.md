@@ -462,3 +462,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:21:18.321536+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## IDUSDT SHORT — EXPIRED
+- Trade ID: `IDUSDT-20261125-205232-2C3037`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:21:32.824568+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
