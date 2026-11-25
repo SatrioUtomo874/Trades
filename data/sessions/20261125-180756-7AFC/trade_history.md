@@ -570,3 +570,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:32:06.488851+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MOCAUSDT SHORT — EXPIRED
+- Trade ID: `MOCAUSDT-20261125-210645-DF8C00`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:32:17.039484+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
