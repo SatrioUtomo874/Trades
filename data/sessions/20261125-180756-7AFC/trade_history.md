@@ -66,3 +66,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T11:54:22.640461+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MINAUSDT SHORT — EXPIRED
+- Trade ID: `MINAUSDT-20261125-183320-149A47`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T12:00:00.863162+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
