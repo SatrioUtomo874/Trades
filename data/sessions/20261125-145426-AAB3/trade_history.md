@@ -54,3 +54,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:00:00.084642+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## DOSUSDT SHORT — EXPIRED
+- Trade ID: `DOSUSDT-20261125-153153-75BB52`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:00:01.270441+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
