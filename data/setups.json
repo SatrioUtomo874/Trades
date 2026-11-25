@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T15:14:45.584277+00:00",
+  "updated_at": "2026-11-25T15:15:03.936895+00:00",
   "active_trades": [
     {
       "trade_id": "BLURUSDT-20261125-220301-41DCE1",
@@ -226,9 +226,9 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795618800000,
-      "trailing_last_st": null,
-      "trailing_last_reason": null,
+      "trailing_last_close_ms": 1795619700000,
+      "trailing_last_st": "24.103580254798974",
+      "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "trailing_replace_phase": null,
