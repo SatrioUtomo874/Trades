@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T07:45:26.645276+00:00",
+  "updated_at": "2026-11-25T07:45:28.986342+00:00",
   "active_trades": [
     {
       "trade_id": "ROSEUSDT-20261125-130126-C0ECD7",
@@ -466,7 +466,7 @@
       "entry_touch_missed": false,
       "trailing_last_close_ms": 1795592700000,
       "trailing_last_st": "0.07501314278604654",
-      "trailing_last_reason": "OLD_SL_CANCEL_CONFIRMED_SUBMITTING_NEW",
+      "trailing_last_reason": "TRAILING_REPLACE_LOOKUP_UNKNOWN: HTTP 400 | code -2013 | /fapi/v1/algoOrder: Order does not exist.",
       "trailing_pending_algo_client_id": "VTSLb519d9fdf0cb46a7b2ddda642a39",
       "trailing_pending_algo_trigger": "0.07502",
       "trailing_replace_phase": "SUBMIT_NEW",
