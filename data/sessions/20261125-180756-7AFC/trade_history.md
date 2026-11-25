@@ -354,3 +354,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:16:38.544162+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ARCUSDT SHORT — EXPIRED
+- Trade ID: `ARCUSDT-20261125-204827-65BB28`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:16:49.672275+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
