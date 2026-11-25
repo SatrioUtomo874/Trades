@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T21:45:56.704100+00:00",
+  "updated_at": "2026-11-25T21:46:07.099493+00:00",
   "active_trades": [
     {
       "trade_id": "ATUSDT-20261126-020013-DDA073",
@@ -316,12 +316,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.0000256303435713917",
       "realized_r": null,
-      "quantity": "5900",
-      "margin_usdt": "1.00005",
+      "quantity": "58",
+      "margin_usdt": "0.009831",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10",
-      "actual_notional": "10.0005",
+      "actual_notional": "0.09831",
       "real_enabled": true,
       "real_state": "REAL_FILLED",
       "position_side": "BOTH",
@@ -329,7 +329,7 @@
       "entry_client_order_id": "VTad23d0efaa4326d4b0ea3f2a8db4",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "5900",
+      "entry_executed_qty": "58",
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
