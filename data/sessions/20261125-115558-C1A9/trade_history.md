@@ -132,3 +132,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:42:55.746067+00:00 | Reason: SCANNER_OFF
+## BREVUSDT SHORT — CANCELED
+- Trade ID: `BREVUSDT-20261125-141717-2D8F4A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:43:06.268046+00:00 | Reason: SCANNER_OFF
