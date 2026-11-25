@@ -420,3 +420,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:20:00.279747+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## RSRUSDT SHORT — EXPIRED
+- Trade ID: `RSRUSDT-20261125-205642-54F718`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:20:11.996760+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
