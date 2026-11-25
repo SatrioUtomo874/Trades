@@ -288,3 +288,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T13:45:00.144311+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ATUSDT SHORT — EXPIRED
+- Trade ID: `ATUSDT-20261125-201725-81C936`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T13:45:00.561487+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
