@@ -138,3 +138,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:43:06.268046+00:00 | Reason: SCANNER_OFF
+## ENAUSDT SHORT — CANCELED
+- Trade ID: `ENAUSDT-20261125-141820-8A3285`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:43:16.102666+00:00 | Reason: SCANNER_OFF
