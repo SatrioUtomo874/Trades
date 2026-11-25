@@ -582,3 +582,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:32:28.208400+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## NOMUSDT SHORT — EXPIRED
+- Trade ID: `NOMUSDT-20261125-210725-483B94`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:32:39.520530+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
