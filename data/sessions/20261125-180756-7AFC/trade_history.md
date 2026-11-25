@@ -396,3 +396,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:18:47.718454+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## CLANKERUSDT SHORT — EXPIRED
+- Trade ID: `CLANKERUSDT-20261125-205036-F46C48`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:19:15.491834+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
