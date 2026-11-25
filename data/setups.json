@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T05:00:00.136165+00:00",
+  "updated_at": "2026-11-25T05:00:09.089928+00:00",
   "active_trades": [
     {
       "trade_id": "XRPUSDT-20261125-115621-0C5F3F",
@@ -32,7 +32,7 @@
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSLSDT-20261125-025509-BDC57E",
       "tp_client_algo_id": "VTTPSDT-20261125-025509-BDC57E",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "CANCELED",
       "tp_algo_status": "NEW",
       "protection_state": "ACTIVE",
       "protection_error": null,
@@ -107,9 +107,9 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": false,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 0,
-      "trailing_last_st": null,
-      "trailing_last_reason": "EXCHANGE_SL_TP_ADOPTED_FROM_OPEN_ALGO_ORDERS",
+      "trailing_last_close_ms": 1795582800000,
+      "trailing_last_st": "0.912241729174816",
+      "trailing_last_reason": "LATEST_ST_NOT_ABOVE_LIVE_PRICE",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "trailing_replace_phase": null,
