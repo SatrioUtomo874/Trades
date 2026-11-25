@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T20:40:01.511570+00:00",
+  "updated_at": "2026-11-25T20:45:00.598693+00:00",
   "active_trades": [
     {
       "trade_id": "ATUSDT-20261126-020013-DDA073",
@@ -107,7 +107,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795638600000,
+      "trailing_last_close_ms": 1795639500000,
       "trailing_last_st": "0.062352550974427046",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
@@ -226,7 +226,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795638600000,
+      "trailing_last_close_ms": 1795639500000,
       "trailing_last_st": "0.6895503941258174",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
@@ -345,7 +345,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795638600000,
+      "trailing_last_close_ms": 1795639500000,
       "trailing_last_st": "0.0017206303435713917",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
