@@ -30,3 +30,39 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T16:51:25.004712+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MAGICUSDT SHORT — CANCELED
+- Trade ID: `MAGICUSDT-20261125-234855-D92BB4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T16:51:30.911904+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## GASUSDT SHORT — CANCELED
+- Trade ID: `GASUSDT-20261125-234733-61B009`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T16:51:32.618073+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SAFEUSDT SHORT — CANCELED
+- Trade ID: `SAFEUSDT-20261125-235046-F73D42`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T16:51:34.323982+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MOCAUSDT SHORT — CANCELED
+- Trade ID: `MOCAUSDT-20261125-234913-AC4FE2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T16:51:37.668531+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AAVEUSDT SHORT — CANCELED
+- Trade ID: `AAVEUSDT-20261125-234741-48D8BE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T16:51:39.363242+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## POLUSDT SHORT — CLOSED
+- Trade ID: `POLUSDT-20261125-234402-09BB58`
+- Timeframe: M15 | Signal: RED
+- Entry: 0.07361 | Exit: 0.07444
+- PnL: -0.06723 USDT (-1.127564189648145632386903953%) | R: None
+- Closed: 2026-11-25T16:51:39.648162+00:00 | Reason: EXCHANGE_POSITION_FLAT_WS
