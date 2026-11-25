@@ -594,3 +594,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:32:50.380685+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## POWERUSDT SHORT — EXPIRED
+- Trade ID: `POWERUSDT-20261125-210828-197A48`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:33:07.181974+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
