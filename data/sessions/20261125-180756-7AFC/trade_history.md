@@ -522,3 +522,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:30:18.511843+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## INUSDT SHORT — EXPIRED
+- Trade ID: `INUSDT-20261125-210340-BCBFF6`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:30:42.489087+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
