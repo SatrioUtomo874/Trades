@@ -60,3 +60,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T11:51:48.477830+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## NMRUSDT SHORT — CANCELED
+- Trade ID: `NMRUSDT-20261125-185251-EFB2FF`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T11:54:22.640461+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
