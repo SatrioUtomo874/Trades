@@ -96,3 +96,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:30:01.001383+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## 1000SHIBUSDT SHORT — EXPIRED
+- Trade ID: `1000SHIBUSDT-20261125-161527-28B09E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:45:01.407560+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
