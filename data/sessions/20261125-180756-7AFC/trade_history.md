@@ -18,3 +18,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T11:45:00.120649+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SPXUSDT SHORT — EXPIRED
+- Trade ID: `SPXUSDT-20261125-181707-C974FA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T11:45:00.530421+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
