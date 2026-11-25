@@ -114,3 +114,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T12:15:09.634063+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ZAMAUSDT SHORT — EXPIRED
+- Trade ID: `ZAMAUSDT-20261125-185331-9E9676`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T12:15:25.352934+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
