@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T04:16:49.852177+00:00",
+  "updated_at": "2026-11-25T04:17:11.479432+00:00",
   "active_trades": [
     {
       "trade_id": "FETUSDT-20261125-092151-A5C89C",
@@ -1221,8 +1221,8 @@
       "exchange_adopted": false,
       "exchange_adoption_source": null,
       "real_intent": true,
-      "entry_triggered_at": null,
-      "entry_trigger_price": null,
+      "entry_triggered_at": "2026-11-25T04:17:02.081562+00:00",
+      "entry_trigger_price": "0.001116",
       "strategy_name": "VOLUMATIC_TREND",
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
