@@ -30,3 +30,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T03:14:28.498464+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## KMNOUSDT SHORT — EXPIRED
+- Trade ID: `KMNOUSDT-20261125-094854-F3885B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T03:15:00.137356+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
