@@ -102,3 +102,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T12:15:00.001420+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ASTERUSDT SHORT — EXPIRED
+- Trade ID: `ASTERUSDT-20261125-184821-5A5F3E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T12:15:00.878098+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
