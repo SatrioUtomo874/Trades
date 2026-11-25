@@ -6,8 +6,8 @@ from __future__ import annotations
 Analysis: H4 SuperTrend(10, 2.5) + EMA100 alignment; M15 Volumatic LEN9
 visual marker (Pine offset=-1) with a four-candle retest window at the visual
 marker candle's close. A valid retest sends one MARKET order. Initial SL and
-M15-close trailing use SuperTrend(14, 2.5); TP is fixed at 2R from actual fill
-and initial risk. Legacy filled positions retain their recorded v3 management.
+M15-close trailing uses SuperTrend(14, 2.5); TP uses the runtime-configured RR
+from actual fill and initial risk. Legacy filled positions retain v3 management.
 
 The main process owns Binance REST/private execution, WebSocket streams,
 Telegram, PAPER/REAL ledger, scanner, logging, safety controls and persistence.
@@ -891,7 +891,7 @@ class Trade:
             "trailing_replace_submit_ambiguous": bool(self.trailing_replace_submit_ambiguous),
             "trailing_conflict_warning_sent": bool(self.trailing_conflict_warning_sent),
             "exchange_algo_sync_complete": bool(self.exchange_algo_sync_complete),
-            "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; fixed 2R TP; M15 close trailing SL",
+            "entry_reason": "H4 SuperTrend10/2.5 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
             ),
@@ -5229,8 +5229,9 @@ class TradingEngine:
         self._h1_toggle_generation = 0
         self.supertrend_atr_length = 14
         self.supertrend_factor = 2.5
-        self.rr_min = Decimal("2")
-        self.rr_max = Decimal("2")
+        self.rr_target = Decimal("2")
+        self.rr_min = self.rr_target
+        self.rr_max = self.rr_target
         self.scan_enabled = False
         # Session-only delayed scanner activation. It is deliberately not
         # persisted: every fresh /try starts with scanner OFF and no schedule.
@@ -5481,8 +5482,17 @@ class TradingEngine:
             self.h1_enabled = False
             self.supertrend_atr_length = 14
             self.supertrend_factor = 2.5
-            self.rr_min = Decimal("2")
-            self.rr_max = Decimal("2")
+            raw_rr = payload.get("rr_target", payload.get("rr_min", "2"))
+            try:
+                restored_rr = Decimal(str(raw_rr))
+                if not restored_rr.is_finite() or restored_rr <= 0 or restored_rr > Decimal("1000"):
+                    raise ValueError("RR runtime di luar rentang")
+                self.rr_target = restored_rr
+            except (InvalidOperation, ValueError, TypeError):
+                self.rr_target = Decimal("2")
+                log.warning("[SETTINGS] RR tidak valid; default 2R digunakan.")
+            self.rr_min = self.rr_target
+            self.rr_max = self.rr_target
             # Scanner arming is intentionally SESSION-ONLY. A fresh /try (or
             # Render restart) must never resume a previous scan automatically.
             # The only way to arm scanning is an explicit Telegram `/scan on`.
@@ -5629,8 +5639,9 @@ class TradingEngine:
                 "h1_enabled": bool(self.h1_enabled),
                 "supertrend_atr_length": self.supertrend_atr_length,
                 "supertrend_factor": self.supertrend_factor,
-                "rr_min": decimal_to_str(self.rr_min),
-                "rr_max": decimal_to_str(self.rr_max),
+                "rr_target": decimal_to_str(self.rr_target),
+                "rr_min": decimal_to_str(self.rr_target),
+                "rr_max": decimal_to_str(self.rr_target),
                 # Deliberately do not persist scan_enabled. Scanner requires an
                 # explicit `/scan on` in every fresh engine session.
                 "max_active_trades": self.max_active_trades,
@@ -6455,8 +6466,9 @@ class TradingEngine:
         self._h1_toggle_generation = 0
         self.supertrend_atr_length = volumatic.SUPERTREND_ATR_LENGTH
         self.supertrend_factor = volumatic.SUPERTREND_FACTOR
-        self.rr_min = Decimal("2")
-        self.rr_max = Decimal("2")
+        self.rr_target = Decimal("2")
+        self.rr_min = self.rr_target
+        self.rr_max = self.rr_target
         self.margin_usdt = DEFAULT_MARGIN_USDT
         self.leverage = DEFAULT_LEVERAGE
         self.min_margin_enabled = False
@@ -6554,7 +6566,7 @@ class TradingEngine:
             "Entry         : close candle marker saat retest → MARKET\n"
             "Signal trace  : 4 candle M15 total termasuk candle marker\n"
             "Protection    : Initial SL M15 ST14×2.5 · trailing setiap close M15\n"
-            "Take profit   : fixed RR 1:2 dari fill aktual dan risiko awal\n"
+            f"Take profit   : fixed RR 1:{decimal_to_str(self.rr_target)} dari fill aktual dan risiko awal\n"
             f"Max positions : {self.max_active_trades}\n"
             "Scanner       : OFF — menunggu /scan on atau /scan schedule\n"
             "REAL          : OFF — menunggu /real on\n"
@@ -6745,7 +6757,7 @@ class TradingEngine:
             "╔══ VOL / SCAN BATCH REPORT ══╗",
             f"ENGINE    : M15 VOLUMATIC VISUAL MARKER LEN9 · H4 ST10×2.5 + EMA100 · M15 ST14×2.5",
             "ENTRY     : close candle visual bubble → retest → MARKET · trace 4 candles total",
-            "TP / SL    : fixed 2R from actual fill/initial SL · M15 SuperTrend trailing SL",
+            f"TP / SL    : fixed RR 1:{decimal_to_str(rr_min)} from actual fill/initial SL · M15 SuperTrend trailing SL",
             f"BATCH     : {batch_number:02d} / COIN #{batch_start:04d}–#{batch_end:04d}",
             f"UNIVERSE  : {universe_total} symbols",
             f"STATE     : {state}",
@@ -6944,7 +6956,7 @@ class TradingEngine:
             trend_length = 9
             m15_st_atr = 14
             st_factor = 2.5
-            rr = Decimal("2")
+            rr = self.rr_target
             universe = await self._universe()
             self._scanner_symbols = set(universe) if self.scan_enabled else set()
             if self.scan_enabled:
@@ -7116,7 +7128,7 @@ class TradingEngine:
                             f"#{absolute_index + 1:04d} {symbol} {bubble}/{direction} "
                             f"ALT-H4={signal.get('trend')} BTC-H4={signal.get('btc_trend', 'OFF')} "
                             f"entry={fmt_num(signal.get('entry_price'), 10)} "
-                            f"SL={fmt_num(signal.get('stop_loss'), 10)} TP=2R {outcome}"[:220]
+                            f"SL={fmt_num(signal.get('stop_loss'), 10)} TP=1:{decimal_to_str(rr)} {outcome}"[:220]
                         )
                         stats["processed"] += 1
                         processed_total += 1
@@ -7588,7 +7600,8 @@ class TradingEngine:
             risk = abs(entry - stop)
             if risk <= max(Decimal("1e-18"), entry * Decimal("1e-12")):
                 return "INVALID_SL"
-            target = entry + risk * Decimal("2") if direction == "LONG" else entry - risk * Decimal("2")
+            rr_target = self.rr_target
+            target = entry + risk * rr_target if direction == "LONG" else entry - risk * rr_target
             expires_at = datetime.fromtimestamp(int(expiry_ms) / 1000.0, tz=timezone.utc)
             bubble_time = datetime.fromtimestamp(bubble_open_ms / 1000.0, tz=timezone.utc)
             signal_time = datetime.fromtimestamp(
@@ -7652,11 +7665,11 @@ class TradingEngine:
                 expires_at=expires_at,
                 stop_loss=stop,
                 take_profit=target,
-                rr_target=Decimal("2"),
-                rr_min=Decimal("2"),
-                rr_max=Decimal("2"),
-                take_profit_source="FIXED_RR_2R",
-                take_profit_rr=Decimal("2"),
+                rr_target=rr_target,
+                rr_min=rr_target,
+                rr_max=rr_target,
+                take_profit_source=f"FIXED_RR_{decimal_to_str(rr_target)}R",
+                take_profit_rr=rr_target,
                 supertrend_atr_length=14,
                 supertrend_factor=2.5,
                 signal_close_price=entry,
@@ -7686,7 +7699,7 @@ class TradingEngine:
                 confirmation_close_time_ms=confirmation_close_ms,
                 entry_price=decimal_to_str(entry),
                 initial_sl=decimal_to_str(stop),
-                planned_tp_2r=decimal_to_str(target),
+                planned_tp_rr=decimal_to_str(rr_target),
                 expires_at=iso_utc(expires_at),
                 trace_candles=4,
                 touch_armed=touch_armed,
@@ -7702,7 +7715,7 @@ class TradingEngine:
                 f"TARGET ENTRY: {fmt_price(entry)} (close candle pembentuk bubble)\n"
                 f"Trigger: sentuh level dari sisi yang benar → MARKET segera\n"
                 f"Initial SL: M15 ST14×2.5 = {fmt_price(stop)}\n"
-                f"TP awal: RR 1:2 = {fmt_price(target)} (dari fill aktual)\n"
+                f"TP awal: RR 1:{decimal_to_str(rr_target)} = {fmt_price(target)} (akan dihitung ulang dari actual fill)\n"
                 f"Expiry: {format_wib(expires_at)} · 4 candle M15 termasuk candle bubble\n"
                 f"Mode: {'REAL' if trade.real_intent else 'PAPER'} · Margin {trade.margin_usdt} USDT · Leverage {trade.leverage}x"
             )
@@ -8609,8 +8622,8 @@ class TradingEngine:
             await self.reply(
                 f"🛡️ BINANCE TP/SL AKTIF • {trade.pair} {trade.direction}\n"
                 f"Entry avg: {fmt_price(trade.fill_price)}\nSL Supertrend M15: {fmt_price(trade.stop_loss)}\n"
-                f"TP RR 1:{fmt_num(trade.take_profit_rr, 2)} "
-                f"({'FIXED 2R' if trade.strategy_version == volumatic.STRATEGY_VERSION else ('Volume Liquidity Trend' if trade.take_profit_source == 'VOLUME_LIQUIDITY' else 'legacy RR')}): "
+                f"TP RR 1:{decimal_to_str(trade.take_profit_rr)} "
+                f"({('FIXED RR 1:' + (decimal_to_str(trade.rr_target) or '2')) if trade.strategy_version == volumatic.STRATEGY_VERSION else ('Volume Liquidity Trend' if trade.take_profit_source == 'VOLUME_LIQUIDITY' else 'legacy RR')}): "
                 f"{fmt_price(trade.take_profit)}\n"
                 f"Trigger: SL Last Price / TP Mark Price\n"
                 "Mode: closePosition Algo Orders"
@@ -12801,7 +12814,7 @@ class TradingEngine:
             "H4: SuperTrend ATR10 Factor2.5 + EMA100 close sebagai filter arah.\n"
             "M15: Volumatic LEN9 visual marker; entry pada close candle marker saat retest.\n"
             "M15: SuperTrend ATR14 Factor2.5 sebagai initial SL dan trailing SL.\n"
-            "TP tetap 2R dari fill aktual dan initial risk. Perintah /timeframe tidak mengubahnya."
+            f"TP tetap RR 1:{decimal_to_str(self.rr_target)} dari fill aktual dan initial risk. Gunakan /RR untuk mengubah RR entry baru."
         )
 
     async def _handle_scan(self, text: str) -> None:
@@ -12821,7 +12834,7 @@ class TradingEngine:
                 f"State: {state}\n"
                 "Strategy: ALT H4 ST10×2.5 + EMA100; BTC H4 filter " + ("ON" if self.btc_filter_enabled else "OFF") + "; M15 Volumatic LEN9\n"
                 "Entry: close candle marker → retest → MARKET; trace 4 candles total\n"
-                "SL: M15 ST14×2.5 trailing per candle close · TP: fixed 2R\n"
+                f"SL: M15 ST14×2.5 trailing per candle close · TP: fixed RR 1:{decimal_to_str(self.rr_target)}\n"
                 f"Active positions: {positions}/{self.max_active_trades}\n"
                 f"Pending retest traces: {pending_setups} · Legacy live LIMIT orders: {live_limits}\n"
                 "Rule: pending setup/order tidak memakai slot; scanner tetap mencari sinyal saat MAX penuh, tetapi entry baru diblokir.\n"
@@ -13039,6 +13052,45 @@ class TradingEngine:
             f"{'🟢' if enabled else '🟡'} BTC H4 TREND FILTER {'ON' if enabled else 'OFF'}.\n"
             + ("Pair ALT hanya lolos jika arah BTC H4 sejalan dengan trend ALT dan bubble M15." if enabled
                else "Filter BTC dilewati. Filter trend H4 ALT tetap wajib aktif.")
+        )
+
+    async def _handle_rr(self, text: str) -> None:
+        """Read or change the fixed reward multiple for newly created signal traces."""
+        parts = str(text or "").split()
+        if len(parts) == 1:
+            await self.reply(
+                f"TAKE PROFIT RR: 1:{decimal_to_str(self.rr_target)}\n"
+                "Berlaku untuk signal trace baru dan dihitung ulang dari actual average fill + initial SL.\n"
+                "Setup/posisi yang sudah dibuat mempertahankan RR tersimpannya.\n"
+                "Contoh: /RR 1.5 untuk TP RR 1:1.5. Rentang: lebih dari 0 sampai 1000."
+            )
+            return
+        if len(parts) != 2:
+            await self.reply("Gunakan /RR angka. Contoh: /RR 1.5")
+            return
+        try:
+            value = parse_decimal(parts[1])
+        except ValueError as exc:
+            await self.reply(f"❌ RR tidak valid: {exc}\nContoh: /RR 1.5")
+            return
+        if value > Decimal("1000"):
+            await self.reply("RR maksimal 1000. Contoh penggunaan: /RR 1.5")
+            return
+        if value == self.rr_target:
+            await self.reply(f"RR sudah 1:{decimal_to_str(value)}. Tidak ada perubahan.")
+            return
+        previous = self.rr_target
+        self.rr_target = value
+        # Keep compatibility fields aligned; v4 uses the fixed rr_target snapshot.
+        self.rr_min = value
+        self.rr_max = value
+        await self._save_runtime_settings()
+        await self.reply(
+            f"✅ TAKE PROFIT RR DIPERBARUI\n"
+            f"Sebelumnya: 1:{decimal_to_str(previous)}\n"
+            f"Sekarang: 1:{decimal_to_str(value)}\n"
+            "Berlaku untuk signal trace yang dibuat setelah perubahan ini. "
+            "Pending trace dan posisi yang sudah ada tidak diubah."
         )
 
     async def _handle_max(self, text: str) -> None:
@@ -13337,7 +13389,7 @@ class TradingEngine:
             f"PENDING SETUPS (NOT COUNTED): {pending_slots} • LIVE LIMITS (NOT COUNTED): {live_limits}\n"
             "Strategy: H4 ST10×2.5 + EMA100 | M15 Volumatic LEN9 visual marker\n"
             "Entry: marker-candle CLOSE retest → MARKET | SL: M15 ST14×2.5 trailing\n"
-            "TP: fixed 2R from actual fill and initial SL\n"
+            f"TP: fixed RR 1:{decimal_to_str(self.rr_target)} from actual fill and initial SL\n"
             f"Permanent bans: {len(self.banned_symbols)}\n"
             + (f"{snapshot_note}\n" if snapshot_note else "")
         ]
@@ -13373,7 +13425,7 @@ class TradingEngine:
                     f"⏳ {t.pair} • PENDING {t.direction} ({t.timeframe} • LEN {t.trend_length})\n"
                     f"Bubble candle close / ENTRY TARGET: {fmt_price(t.entry)}\n"
                     f"Trace status: {'ARMED' if t.entry_touch_armed else 'WAITING APPROACH'} | expires: {format_wib(t.expires_at)}\n"
-                    f"Initial SL: M15 ST14×2.5 = {fmt_price(t.reference_sl)} | Planned TP: 2R = {fmt_price(t.take_profit)}\n"
+                    f"Initial SL: M15 ST14×2.5 = {fmt_price(t.reference_sl)} | Planned TP: 1:{decimal_to_str(t.rr_target)} = {fmt_price(t.take_profit)}\n"
                     f"Qty: {format_qty(t.quantity or Decimal('0'))} | Margin: {t.margin_usdt} USDT | Lev: {t.leverage}x\n"
                     f"Sizing: {'MINIMUM AUTO' if t.min_margin_mode else 'FIXED TARGET'}\n"
                     + (
@@ -13417,7 +13469,7 @@ class TradingEngine:
                     f"{'🟢' if t.direction == 'LONG' else '🔴'} {t.pair} • {t.direction} FILLED ({t.timeframe} • LEN {t.trend_length})\n"
                     f"Entry: {fmt_price(entry)} | Live: {fmt_price(price)}\n"
                     f"SL M15 SuperTrend trailing: {fmt_price(t.stop_loss or t.reference_sl)} | "
-                    f"TP fixed {fmt_num(t.take_profit_rr, 2)}R: {fmt_price(t.take_profit)}\n"
+                    f"TP fixed 1:{decimal_to_str(t.take_profit_rr)}: {fmt_price(t.take_profit)}\n"
                     f"SuperTrend: ATR14 • Factor 2.5 | Strategy v{t.strategy_version}\n"
                     f"Protection: {t.protection_state} (SL {t.sl_algo_status} / TP {t.tp_algo_status})\n"
                     f"Algo IDs: SL {t.sl_algo_id or '-'} / TP {t.tp_algo_id or '-'}\n"
@@ -13492,7 +13544,7 @@ class TradingEngine:
             return
         await self.reply(
             "\n\n".join(lines)
-            + "\n\nSL: M15 SuperTrend ATR14×2.5 trailing setiap close M15 • TP tetap 2R dari initial risk • REAL: Binance closePosition Algo Orders"
+            + f"\n\nSL: M15 SuperTrend ATR14×2.5 trailing setiap close M15 • TP entry baru RR 1:{decimal_to_str(self.rr_target)} • REAL: Binance closePosition Algo Orders"
         )
 
     def _autostop_source_name(self) -> str:
@@ -13945,7 +13997,7 @@ class TradingEngine:
             f"SCANNER      {self._scanner_state_label()}",
             f"SCAN SCHEDULE {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}",
             "────────────────────────────────",
-            "PnL belum termasuk seluruh fee/funding aktual. R awal dihitung dari average fill ke initial M15 SuperTrend SL; TP tetap 2R dan SL trailing mengikuti close M15.",
+            f"PnL belum termasuk seluruh fee/funding aktual. R awal dihitung dari average fill ke initial M15 SuperTrend SL; TP entry baru RR 1:{decimal_to_str(self.rr_target)} dan SL trailing mengikuti close M15.",
         ]
         await self.reply("\n".join(lines))
 
@@ -13958,7 +14010,7 @@ class TradingEngine:
             f"Strategy: {volumatic.STRATEGY_NAME} {volumatic.STRATEGY_VERSION}\n"
             "ALT trend filter: H4 SuperTrend ATR10×2.5 + EMA100 close\n"
             f"BTC H4 trend filter: {'ON' if self.btc_filter_enabled else 'OFF'} (/BTC ON|OFF)\n"
-            "Volumatic: M15 LEN9 visual marker (Pine offset -1)\nEntry: close candle marker ketika retest; MARKET segera; trace 4 candle total\nSL: M15 SuperTrend ATR14×2.5, trailing setiap close M15\nTP: fixed 2R dari actual fill dan initial risk\nScanner: " + ('ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')) + "\n"
+            f"Volumatic: M15 LEN9 visual marker (Pine offset -1)\nEntry: close candle marker ketika retest; MARKET segera; trace 4 candle total\nSL: M15 SuperTrend ATR14×2.5, trailing setiap close M15\nTP: fixed RR 1:{decimal_to_str(self.rr_target)} dari actual fill dan initial risk\nScanner: " + ('ON' if self.scan_enabled else ('WAITING' if self.scan_schedule_waiting else 'OFF')) + "\n"
             f"Scan schedule: {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}\n"
             f"Universe: {len(self.symbols)} | Market WS: {self.ws.status} | User WS: {self.user_ws.status} | Fresh prices: {fresh}\n"
             f"Pending setups (not counted): {pending} | Active positions: {filled}/{self.max_active_trades} | Live LIMITs: {live_limits}\n"
@@ -14059,6 +14111,7 @@ class TradingEngine:
             "/scan schedule - jadwal scanner WIB; pilih dengan /scan schedule 1,3,6\n"
             "/BTC ON|OFF|status - aktif/nonaktif filter trend BTC H4\n"
             "/timeframe - lihat timeframe dan parameter strategi yang dikunci\n"
+            "/RR [angka] - atur risk:reward TP; contoh /RR 1.5\n"
             "/max [angka] - batas posisi aktif Binance/PAPER\n"
             "/trade - lihat retest trace, posisi, TP/SL, dan trailing stop\n"
             "/banned [PAIR ...] - tambah ban permanen; tanpa argumen tampilkan daftar\n"
@@ -14082,11 +14135,12 @@ class TradingEngine:
             "/reset CONFIRM - reset history/event/catatan (tanpa mengubah posisi)\n"
             "/status - status sistem\n/help - bantuan\n\n"
             f"BTC H4 FILTER: {'ON' if self.btc_filter_enabled else 'OFF'} (/BTC ON|OFF). Jika ON, arah BTC harus sama dengan ALT.\n"
+            f"TAKE PROFIT RR: 1:{decimal_to_str(self.rr_target)} (/RR angka; contoh /RR 1.5).\n"
             "STRATEGI TERKUNCI: SHORT jika Close H4 < ST10×2.5 < EMA100; LONG jika EMA100 < ST10×2.5 < Close H4. "
             "H4 selain kondisi tersebut dianggap konsolidasi. Pada M15, bubble Volumatic LEN9 harus searah trend. "
             "Entry adalah close candle visual marker (Pine offset -1), hanya ketika harga retest dari sisi pendekatan yang benar. "
             "Signal trace berlaku 4 candle M15 total termasuk candle marker; gap melewati target dianggap terlewat. "
-            "Initial SL memakai M15 ST14×2.5 dari candle terakhir yang sudah close; TP tetap 2R dari actual fill dan initial risk. "
+            f"Initial SL memakai M15 ST14×2.5 dari candle terakhir yang sudah close; TP RR 1:{decimal_to_str(self.rr_target)} dari actual fill dan initial risk. "
             "SL hanya bergerak memperketat mengikuti ST pada setiap close M15. Bubble lawan membatalkan trace yang belum entry, bukan menutup posisi."
         )
 
@@ -14101,6 +14155,7 @@ class TradingEngine:
         if command == "/timeframe": await self._handle_timeframe(text)
         elif command == "/scan": await self._handle_scan(text)
         elif command == "/btc": await self._handle_btc_filter(text)
+        elif command == "/rr": await self._handle_rr(text)
         elif command == "/max": await self._handle_max(text)
         elif command == "/margin": await self._handle_margin(text)
         elif command == "/min": await self._handle_min(text)
