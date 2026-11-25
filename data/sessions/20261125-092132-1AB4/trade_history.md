@@ -24,3 +24,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T03:02:51.666360+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MINAUSDT SHORT — CANCELED
+- Trade ID: `MINAUSDT-20261125-100108-2557B9`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T03:14:28.498464+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
