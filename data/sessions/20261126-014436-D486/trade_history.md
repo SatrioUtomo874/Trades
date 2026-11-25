@@ -42,3 +42,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T22:23:16.128144+00:00 | Reason: SIZE_REJECTED
+## KAVAUSDT SHORT — EXPIRED
+- Trade ID: `KAVAUSDT-20261126-050028-9AEADD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T22:30:00.059009+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
