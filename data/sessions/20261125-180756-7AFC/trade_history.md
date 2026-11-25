@@ -492,3 +492,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:22:29.244584+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## RENDERUSDT SHORT — EXPIRED
+- Trade ID: `RENDERUSDT-20261125-205622-63D9CD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:22:40.517294+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
