@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T13:09:01.636091+00:00",
+  "updated_at": "2026-11-25T13:09:09.367552+00:00",
   "active_trades": [
     {
       "trade_id": "SLXUSDT-20261125-180826-2DC309",
@@ -746,7 +746,7 @@
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSL2d336d1121e44ba0a5c0f5f857f9",
       "tp_client_algo_id": "VTTPSDT-20261125-184646-F0367B",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "EXPIRED",
       "tp_algo_status": "NEW",
       "protection_state": "ACTIVE",
       "protection_error": null,
