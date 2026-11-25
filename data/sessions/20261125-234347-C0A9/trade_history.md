@@ -84,3 +84,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T16:54:12.677351+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## WCTUSDT SHORT — CANCELED
+- Trade ID: `WCTUSDT-20261125-235229-F7DBB2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T16:55:37.516637+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
