@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T09:01:01.994374+00:00",
+  "updated_at": "2026-11-25T09:01:08.381886+00:00",
   "active_trades": [
     {
       "trade_id": "SLXUSDT-20261125-145458-0EF60B",
@@ -107,9 +107,9 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": false,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795596300000,
+      "trailing_last_close_ms": 1795597200000,
       "trailing_last_st": "0.03472556816401011",
-      "trailing_last_reason": "EXCHANGE_SL_TP_ADOPTED_FROM_OPEN_ALGO_ORDERS",
+      "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "trailing_replace_phase": null,
