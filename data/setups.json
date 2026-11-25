@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T14:36:18.825024+00:00",
+  "updated_at": "2026-11-25T14:36:21.903789+00:00",
   "active_trades": [
     {
       "trade_id": "SLXUSDT-20261125-180826-2DC309",
@@ -627,7 +627,7 @@
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSLb87ef7249c064f6c87f1b3453598",
       "tp_client_algo_id": "VTTPSDT-20261125-200246-09AA5B",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "CANCELED",
       "tp_algo_status": "NEW",
       "protection_state": "TRAILING_REPLACE_PENDING",
       "protection_error": null,
@@ -704,10 +704,10 @@
       "entry_touch_missed": false,
       "trailing_last_close_ms": 1795617000000,
       "trailing_last_st": "0.0030604029868287726",
-      "trailing_last_reason": "TRAILING_SL_CANCEL_OLD_FIRST",
+      "trailing_last_reason": "OLD_SL_CANCEL_CONFIRMED_SUBMITTING_NEW",
       "trailing_pending_algo_client_id": "VTSL5ca2370feeb04548a9297c7fefb4",
       "trailing_pending_algo_trigger": "0.003061",
-      "trailing_replace_phase": "CANCEL_OLD",
+      "trailing_replace_phase": "SUBMIT_NEW",
       "trailing_replace_old_algo_id": 4000002205435786,
       "trailing_replace_old_client_id": "VTSLb87ef7249c064f6c87f1b3453598",
       "trailing_replace_old_trigger": "0.003066",
