@@ -42,3 +42,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T11:45:20.020218+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## FOGOUSDT SHORT — EXPIRED
+- Trade ID: `FOGOUSDT-20261125-182059-690E51`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T11:45:29.522224+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
