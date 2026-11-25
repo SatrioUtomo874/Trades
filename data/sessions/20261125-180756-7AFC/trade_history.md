@@ -540,3 +540,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:31:03.351991+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## OGNUSDT SHORT — EXPIRED
+- Trade ID: `OGNUSDT-20261125-210745-2AAE01`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:31:16.998175+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
