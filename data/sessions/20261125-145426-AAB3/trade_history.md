@@ -18,3 +18,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T08:15:15.146869+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ALLUSDT SHORT — EXPIRED
+- Trade ID: `ALLUSDT-20261125-145701-AD1998`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T08:15:24.015216+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
