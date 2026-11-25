@@ -150,3 +150,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:46:25.333637+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SPELLUSDT SHORT — EXPIRED
+- Trade ID: `SPELLUSDT-20261125-162536-78740C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:46:34.984965+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
