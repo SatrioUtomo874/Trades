@@ -1,0 +1,1 @@
+{"event_id":"aac126a2f92a4e9697495feafd104e69","event":"POSITION_CLOSED","timestamp":"2026-11-25T04:59:30.517576+00:00","timestamp_wib":"25-11-2026 11:59 WIB","strategy":"VOLUMATIC_TREND","trade_id":"FETUSDT-20261125-115615-3298DB","pair":"FETUSDT","direction":"SHORT","timeframe":"M15","reason":"EXCHANGE_POSITION_FLAT_WS","exit_price":"0.1053"}
