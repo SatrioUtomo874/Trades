@@ -10,7 +10,7 @@
   "rr_target": "1",
   "rr_min": "1",
   "rr_max": "1",
-  "max_active_trades": 10,
+  "max_active_trades": 5,
   "margin_usdt": "1",
   "leverage": 10,
   "min_margin_enabled": false,
@@ -161,12 +161,14 @@
     "M15:CYBERUSDT": 1795630500000,
     "M15:CYSUSDT": 1795630500000,
     "M15:DASHUSDT": 1795630500000,
-    "M15:DATAIPUSDT": 1795630500000
+    "M15:DATAIPUSDT": 1795630500000,
+    "M15:DEEPUSDT": 1795630500000,
+    "M15:DEXEUSDT": 1795630500000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 150,
+  "scan_resume_cursor": 152,
   "scan_resume_boundary_ms": 1795630500000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-25T18:30:25.239226+00:00"
+  "updated_at": "2026-11-25T18:30:27.124832+00:00"
 }
