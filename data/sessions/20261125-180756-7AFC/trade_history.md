@@ -426,3 +426,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:20:11.996760+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## FLUIDUSDT SHORT — EXPIRED
+- Trade ID: `FLUIDUSDT-20261125-205133-62C7BE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:20:22.474434+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
