@@ -108,3 +108,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:15:00.130769+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AGTUSDT SHORT — EXPIRED
+- Trade ID: `AGTUSDT-20261125-140035-99EE13`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:30:00.131443+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
