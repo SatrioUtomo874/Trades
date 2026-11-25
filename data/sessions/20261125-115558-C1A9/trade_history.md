@@ -150,3 +150,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T07:43:27.856086+00:00 | Reason: SCANNER_OFF
+## GOATUSDT SHORT — CANCELED
+- Trade ID: `GOATUSDT-20261125-141925-FEB1E3`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T07:43:37.550709+00:00 | Reason: SCANNER_OFF
