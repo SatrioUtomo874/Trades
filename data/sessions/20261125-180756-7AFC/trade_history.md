@@ -336,3 +336,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T14:15:44.802022+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## 1MBABYDOGEUSDT SHORT — EXPIRED
+- Trade ID: `1MBABYDOGEUSDT-20261125-204733-EA17E7`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T14:15:56.950073+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
