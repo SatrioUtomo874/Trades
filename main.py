@@ -198,6 +198,7 @@ HISTORY_REFRESH_SECONDS = 30
 AUTOSTOP_CHECK_SECONDS = 5.0
 AUTOSTOP_BALANCE_REFRESH_SECONDS = 60.0
 AUTOSTOP_PERSIST_SECONDS = 60.0
+STATS_REFRESH_SECONDS = 15.0  # Telegram dashboard refresh; uses local caches only
 MEMORY_SOFT_LIMIT_MB = float(os.getenv("MEMORY_SOFT_LIMIT_MB", "360") or "360")
 
 DEFAULT_MARGIN_USDT = Decimal(os.getenv("DEFAULT_MARGIN_USDT", "0.5") or "0.5")
@@ -5202,6 +5203,12 @@ class TradingEngine:
         self.chat_id = int(context.get("chat_id") or ALLOWED_USER_ID)
         self.user_id = int(context.get("user_id") or ALLOWED_USER_ID)
         self.send_message = context["send_message"]
+        self.edit_message_text = context.get("edit_message_text")
+        self._stats_live_task: asyncio.Task | None = None
+        self._stats_live_message_id: int | None = None
+        self._stats_live_chat_id = self.chat_id
+        self._stats_last_update_monotonic = 0.0
+        self._started_monotonic: float | None = None
         self.session_id = generate_session_id()
         self.session_data_dir = f"data/sessions/{self.session_id}"
         self.session_history_trades_path = f"{self.session_data_dir}/trades.json"
@@ -6437,6 +6444,7 @@ class TradingEngine:
         if self._running:
             return
         self._running = True
+        self._started_monotonic = time.monotonic()
         self._real_egress_preflight_status.clear()
         log.info(
             "[BINANCE] outbound route configured | egress_id=%s | proxy=%s (REST + WebSocket)",
@@ -6601,13 +6609,13 @@ class TradingEngine:
         self.scan_schedule_armed_at = None
         self.scan_schedule_activated_at = None
         self._scan_schedule_last_fired_minute = None
-        self.real_mode = False
+        stopping_real_mode = self.real_mode
 
         # Signal every loop/socket worker and any legacy EMA-init worker
         # to stop. EMA initialization tasks remain tracked for older restored states so they cannot
         # outlive /end or a Render redeploy and mutate a fresh engine instance.
         ema_workers = list(self._ema_exit_init_tasks.values())
-        workers = [self._scan_task, self._maintenance_task, self.ws._task, self.user_ws._task, *ema_workers]
+        workers = [self._scan_task, self._maintenance_task, self.ws._task, self.user_ws._task, self._stats_live_task, *ema_workers]
         for component in (self.ws, self.user_ws):
             try:
                 component._stop.set()
@@ -6636,6 +6644,21 @@ class TradingEngine:
             done, pending = await asyncio.wait(live_workers, timeout=0.35)
             for task in pending:
                 task.cancel()
+
+        stats_message_id = self._stats_live_message_id
+        self._stats_live_task = None
+        self._stats_live_message_id = None
+        self.real_mode = stopping_real_mode
+        if stats_message_id is not None and callable(self.edit_message_text):
+            try:
+                frozen_dashboard = self._build_stats_dashboard(auto_refresh=False)
+                await asyncio.to_thread(
+                    self.edit_message_text, self._stats_live_chat_id,
+                    stats_message_id, frozen_dashboard,
+                )
+            except Exception as exc:
+                log.debug("[STATS] final dashboard freeze skipped during shutdown: %s", exc)
+        self.real_mode = False
 
         self._scan_task = None
         self._maintenance_task = None
@@ -10879,62 +10902,170 @@ class TradingEngine:
         )
 
     async def _backfill_m5_position_history(self, pair: str, before_open_ms: int, after_open_ms: int | None) -> bool:
-        """Recover missing closed M5 candles for PAPER SL/TP before processing a gap."""
+        """Recover only M5 bars required by PAPER exits or a queued REAL legacy exit.
+
+        REAL Binance SL/TP are authoritative Algo Orders and must not be
+        simulated from M5 OHLC. M5 history is still required for PAPER SL/TP
+        ordering and for REAL legacy forced exits waiting on their final M5 bar.
+        If neither dependency exists, safely fast-forward the M5 cursor: there
+        is no local M5 decision that could be lost by skipping old bars.
+
+        Backfill deliberately bypasses the general kline cache. That cache is
+        optimized for indicator windows and can contain a hole in the middle;
+        a gap-recovery request must fetch the exact missing interval from REST.
+        """
+        pair = normalize_symbol(pair)
+        span_ms = 300_000
+        before_open_ms = int(before_open_ms)
+        if not pair or before_open_ms <= 0:
+            return False
+
         paper_positions = [
             trade for trade in self.active_trades.values()
-            if trade.pair == pair and trade.timeframe == "M15" and trade.status == "FILLED"
-            and not trade.real_enabled and trade.fill_price is not None
+            if trade.pair == pair and trade.timeframe == "M15"
+            and trade.status == "FILLED" and not trade.real_enabled
+            and trade.fill_price is not None
         ]
-        if not paper_positions:
+        real_exit_states = {
+            "EXIT_PENDING", "CLOSE_SUBMITTING", "CLOSE_VERIFY",
+            "CLOSE_UNKNOWN", "CLEANUP_WAIT_API",
+        }
+        real_exit_positions = [
+            trade for trade in self.active_trades.values()
+            if trade.pair == pair and trade.timeframe == "M15"
+            and trade.status == "FILLED" and trade.real_enabled
+            and str(trade.ema_exit_state or "").upper() in real_exit_states
+            and trade.ema_exit_trigger_close_ms is not None
+        ]
+
+        required_starts: list[int] = []
+        for trade in paper_positions:
+            filled_at = trade.filled_at or trade.created_at
+            fill_ms = int(filled_at.timestamp() * 1000)
+            # First M5 candle whose OPEN is at/after the fill timestamp.
+            required_starts.append(((fill_ms + span_ms - 1) // span_ms) * span_ms)
+        for trade in real_exit_positions:
+            trigger_close_ms = int(trade.ema_exit_trigger_close_ms or 0)
+            if trigger_close_ms > 0:
+                # The M5 candle that closes at the forced-exit boundary.
+                required_starts.append(((trigger_close_ms + span_ms - 1) // span_ms) * span_ms - span_ms)
+
+        # With REAL positions protected directly by Binance, there is no reason
+        # to replay every M5 candle from entry. Move the cursor to the candle
+        # immediately before the incoming WS candle and keep the exit barrier
+        # current. A later queued legacy exit will backfill from its trigger.
+        if not required_starts:
+            baseline_open = before_open_ms - span_ms
+            current_open = self._m5_last_closed_open_ms.get(pair)
+            if current_open is None or current_open < baseline_open:
+                self._m5_last_closed_open_ms[pair] = baseline_open
+                self._m5_last_closed_end_ms[pair] = before_open_ms
             return True
-        fill_times = [int((trade.filled_at or trade.created_at).timestamp() * 1000) for trade in paper_positions]
-        oldest_fill = min(fill_times)
-        start_open = (oldest_fill // 300_000) * 300_000
+
+        start_open = min(required_starts)
         if after_open_ms is not None:
-            start_open = max(start_open, int(after_open_ms) + 300_000)
-        if start_open >= int(before_open_ms):
+            start_open = max(start_open, int(after_open_ms) + span_ms)
+        if start_open >= before_open_ms:
+            baseline_open = before_open_ms - span_ms
+            current_open = self._m5_last_closed_open_ms.get(pair)
+            if current_open is None or current_open < baseline_open:
+                self._m5_last_closed_open_ms[pair] = baseline_open
+                self._m5_last_closed_end_ms[pair] = before_open_ms
             return True
-        bars_needed = max(3, int((int(before_open_ms) - start_open + 299_999) // 300_000) + 2)
-        limit = min(1500, bars_needed)
+
+        expected_open = start_open
+        now_ms = int(time.time() * 1000)
+        pages = 0
+        max_pages = 24
+        processed_any = False
         try:
-            history = await self.rest.get_klines(pair, "5m", limit, 300_000, force_refresh=True)
+            while expected_open < before_open_ms and pages < max_pages:
+                pages += 1
+                remaining = max(1, (before_open_ms - expected_open + span_ms - 1) // span_ms)
+                page_limit = min(1000, int(remaining))
+                payload = await self.rest._get("/fapi/v1/klines", {
+                    "symbol": pair,
+                    "interval": "5m",
+                    "startTime": expected_open,
+                    "endTime": before_open_ms - 1,
+                    "limit": page_limit,
+                })
+                if not isinstance(payload, list) or not payload:
+                    raise RuntimeError(f"REST returned no M5 rows at expected open={expected_open}")
+                packed = self.rest._pack_kline_rows(payload, span_ms, now_ms)
+                if not packed.size:
+                    raise RuntimeError(f"REST returned no valid closed M5 rows at expected open={expected_open}")
+                if packed.size > 1 and (packed["t"][1:] < packed["t"][:-1]).any():
+                    packed = packed[np.argsort(packed["t"], kind="stable")]
+
+                page_progress = False
+                for row in packed:
+                    row_open = int(row["t"])
+                    if row_open < expected_open:
+                        continue
+                    if row_open >= before_open_ms:
+                        break
+                    if row_open != expected_open:
+                        raise RuntimeError(
+                            f"REST M5 history has a hole: received={row_open}, expected={expected_open}"
+                        )
+
+                    previous_open = self._m5_last_closed_open_ms.get(pair)
+                    previous_end = self._m5_last_closed_end_ms.get(pair)
+                    # Advance before applying the candle so a REAL legacy exit
+                    # sees this exact candle as the final M5 ordering barrier.
+                    self._m5_last_closed_open_ms[pair] = row_open
+                    self._m5_last_closed_end_ms[pair] = row_open + span_ms
+                    try:
+                        await self._apply_m5_position_ohlc(
+                            pair, row_open, Decimal(str(row["o"])),
+                            Decimal(str(row["h"])), Decimal(str(row["l"])),
+                            Decimal(str(row["c"])),
+                        )
+                    except Exception:
+                        if previous_open is None:
+                            self._m5_last_closed_open_ms.pop(pair, None)
+                        else:
+                            self._m5_last_closed_open_ms[pair] = previous_open
+                        if previous_end is None:
+                            self._m5_last_closed_end_ms.pop(pair, None)
+                        else:
+                            self._m5_last_closed_end_ms[pair] = previous_end
+                        raise
+
+                    expected_open += span_ms
+                    page_progress = True
+                    processed_any = True
+
+                if not page_progress:
+                    raise RuntimeError(f"REST M5 backfill made no progress at expected open={expected_open}")
+
+            if expected_open < before_open_ms:
+                raise RuntimeError(
+                    f"M5 backfill page cap reached before={before_open_ms}, next_expected={expected_open}"
+                )
         except BinanceRateLimitError:
             raise
         except Exception as exc:
-            log.warning("[M5 RECOVERY] %s REST backfill unavailable: %s", pair, str(exc)[:180])
-            return False
-        if history is None or not len(history):
-            return False
-        first_open = int(history["t"][0])
-        if first_open > start_open:
             now = time.monotonic()
             if now - self._m5_gap_warning_at.get(pair, 0.0) >= 300:
                 self._m5_gap_warning_at[pair] = now
                 log.error(
-                    "[M5 RECOVERY] %s incomplete history: first=%s expected=%s; PAPER exit processing paused",
-                    pair, first_open, start_open,
+                    "[M5 RECOVERY] %s exact REST backfill incomplete before open=%s: %s; "
+                    "cursor not advanced past the missing candle",
+                    pair, before_open_ms, str(exc)[:180],
                 )
             return False
-        expected_open = start_open
-        processed_any = False
-        for row in history:
-            row_open = int(row["t"])
-            if row_open < start_open or row_open >= int(before_open_ms):
-                continue
-            if row_open != expected_open:
-                return False
-            await self._apply_m5_position_ohlc(
-                pair, row_open, Decimal(str(row["o"])), Decimal(str(row["h"])),
-                Decimal(str(row["l"])), Decimal(str(row["c"])),
+
+        if processed_any:
+            await self._save_active_state()
+            log.info(
+                "[M5 RECOVERY] %s restored contiguous candles | from=%s | through=%s | rows=%s | "
+                "paper=%s real_exit_barriers=%s",
+                pair, start_open, before_open_ms - span_ms,
+                (before_open_ms - start_open) // span_ms,
+                len(paper_positions), len(real_exit_positions),
             )
-            self._m5_last_closed_open_ms[pair] = row_open
-            self._m5_last_closed_end_ms[pair] = row_open + 300_000
-            expected_open = row_open + 300_000
-            processed_any = True
-        # When a PAPER position predates this WS bar, do not advance across a
-        # hole: a missed M5 SL/TP could otherwise be overwritten by an M15 exit.
-        if expected_open < int(before_open_ms):
-            return False
         return True
 
     async def _apply_m5_position_ohlc(
@@ -11013,19 +11144,11 @@ class TradingEngine:
             return
 
         last_open = self._m5_last_closed_open_ms.get(pair)
-        if last_open is None:
-            try:
-                recovered = await self._backfill_m5_position_history(pair, open_ms, None)
-            except BinanceRateLimitError:
-                return
-            if not recovered:
-                return
-            last_open = self._m5_last_closed_open_ms.get(pair)
-        elif open_ms > last_open + 300_000:
+        if last_open is None or open_ms > last_open + 300_000:
             try:
                 recovered = await self._backfill_m5_position_history(pair, open_ms, last_open)
             except BinanceRateLimitError:
-                # Do not advance past the gap; the next M5 close can retry REST.
+                # Keep the cursor unchanged; the next closed M5 candle retries REST.
                 return
             if not recovered:
                 return
@@ -11037,13 +11160,31 @@ class TradingEngine:
             now = time.monotonic()
             if now - self._m5_gap_warning_at.get(pair, 0.0) >= 300:
                 self._m5_gap_warning_at[pair] = now
-                log.error("[M5] %s gap remains unresolved before open=%s; refusing to skip missing bars", pair, open_ms)
+                log.error(
+                    "[M5] %s gap remains unresolved before open=%s; refusing to skip missing bars",
+                    pair, open_ms,
+                )
             return
 
-        await self._apply_m5_position_ohlc(pair, open_ms, open_price, high, low, close_price)
+        previous_open = self._m5_last_closed_open_ms.get(pair)
+        previous_end = self._m5_last_closed_end_ms.get(pair)
+        # Mark this confirmed candle before applying it: pending REAL forced
+        # exits use _m5_last_closed_end_ms as their execution barrier.
         self._m5_last_closed_open_ms[pair] = open_ms
         self._m5_last_closed_end_ms[pair] = open_ms + 300_000
-        await self._save_active_state()
+        try:
+            await self._apply_m5_position_ohlc(pair, open_ms, open_price, high, low, close_price)
+            await self._save_active_state()
+        except Exception:
+            if previous_open is None:
+                self._m5_last_closed_open_ms.pop(pair, None)
+            else:
+                self._m5_last_closed_open_ms[pair] = previous_open
+            if previous_end is None:
+                self._m5_last_closed_end_ms.pop(pair, None)
+            else:
+                self._m5_last_closed_end_ms[pair] = previous_end
+            raise
 
     def _cache_live_signal_context(
         self, symbol: str, timeframe: str, candles: np.ndarray,
@@ -13907,99 +14048,389 @@ class TradingEngine:
             max_dd = max(max_dd, peak - equity)
         return max_dd
 
-    async def show_stats(self) -> None:
+    @staticmethod
+    def _stats_bar(value: float, width: int = 12) -> str:
+        try:
+            ratio = max(0.0, min(1.0, float(value) / 100.0))
+        except (TypeError, ValueError):
+            ratio = 0.0
+        filled = int(round(ratio * width))
+        return "▰" * filled + "▱" * (width - filled)
+
+    @staticmethod
+    def _stats_age_text(moment: datetime | None) -> str:
+        if moment is None:
+            return "N/A"
+        try:
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            age = max(0.0, (now_utc() - moment.astimezone(timezone.utc)).total_seconds())
+            if age < 60:
+                return f"{age:.0f}s"
+            if age < 3600:
+                return f"{age / 60:.1f}m"
+            return f"{age / 3600:.1f}h"
+        except Exception:
+            return "N/A"
+
+    @staticmethod
+    def _stats_decimal(value: Any, default: float = 0.0) -> float:
+        try:
+            result = float(Decimal(str(value if value not in (None, "") else default)))
+            return result if math.isfinite(result) else default
+        except (InvalidOperation, ValueError, TypeError, OverflowError):
+            return default
+
+    def _build_stats_dashboard(self, *, auto_refresh: bool = True) -> str:
+        """Render a live telemetry snapshot using in-memory caches only.
+
+        This method deliberately performs no Binance REST request. Prices come
+        from aggTrade WebSocket snapshots; account balance, positions, orders,
+        API weight and event history are read from their existing local caches.
+        """
+        now = now_local()
+        now_mono = time.monotonic()
+        mode = "REAL" if self.real_mode else "PAPER"
+        system_state = "ONLINE" if self._running else "OFFLINE"
+        uptime = duration_text(now_mono - self._started_monotonic) if self._started_monotonic else "N/A"
+
+        # Historical performance: include every closed ledger record so older
+        # trades remain visible after a strategy revision or process migration.
         closed = [
-            r for r in self.history_records
-            if r.get("strategy_name") == volumatic.STRATEGY_NAME and r.get("result") == "CLOSED"
+            row for row in self.history_records
+            if isinstance(row, dict) and str(row.get("result") or "").upper() == "CLOSED"
         ]
-        active = [t for t in self.active_trades.values() if t.status in {"PENDING", "FILLED"}]
-        slot_count, pending_slots, filled_slots, live_limits = self._active_slot_counts()
-        realized = [float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in closed]
-        wins = [x for x in realized if x > 0]
-        losses = [x for x in realized if x < 0]
-        be = len(realized) - len(wins) - len(losses)
-        gross_profit, gross_loss = sum(wins), abs(sum(losses))
-        win_rate = len(wins) / len(realized) * 100 if realized else 0.0
-        avg_win = sum(wins) / len(wins) if wins else 0.0
+        realized_values = [self._stats_decimal(row.get("pnl_usdt")) for row in closed]
+        wins = [value for value in realized_values if value > 0]
+        losses = [value for value in realized_values if value < 0]
+        breakeven = len(realized_values) - len(wins) - len(losses)
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        total_realized = sum(realized_values)
+        win_rate = (len(wins) / len(realized_values) * 100.0) if realized_values else 0.0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (math.inf if gross_profit > 0 else 0.0)
+        expectancy = total_realized / len(realized_values) if realized_values else 0.0
+        avg_win = gross_profit / len(wins) if wins else 0.0
         avg_loss = sum(losses) / len(losses) if losses else 0.0
-        floating = 0.0
-        for trade in active:
-            if trade.status != "FILLED" or trade.fill_price is None:
-                continue
-            price = self._current_price(trade.pair)
-            if price is None:
-                continue
-            move = price - trade.fill_price if trade.direction == "LONG" else trade.fill_price - price
-            floating += float(move * (trade.quantity or Decimal("0")))
+        total_r = sum(self._stats_decimal(row.get("realized_r")) for row in closed)
+        chronological = sorted(closed, key=lambda row: str(row.get("closed_at") or ""))
+        max_dd = self._max_drawdown([self._stats_decimal(row.get("pnl_usdt")) for row in chronological])
+        day_cutoff = now_utc() - timedelta(hours=24)
+        closed_24h = []
+        for row in closed:
+            stamp = parse_iso(row.get("closed_at"))
+            if stamp is not None and stamp >= day_cutoff:
+                closed_24h.append(row)
+        pnl_24h = sum(self._stats_decimal(row.get("pnl_usdt")) for row in closed_24h)
+        v4_closed = sum(1 for row in closed if str(row.get("strategy_version") or "") == volumatic.STRATEGY_VERSION)
 
-        chronological = sorted(closed, key=lambda r: str(r.get("closed_at") or ""))
-        dd = self._max_drawdown([float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in chronological])
-        pf_text = f"{gross_profit / gross_loss:.2f}" if gross_loss > 0 else ("∞" if gross_profit > 0 else "—")
-        total_pnl = sum(realized)
-        expectancy = total_pnl / len(realized) if realized else 0.0
-        total_r = sum(
-            float(Decimal(str(r.get("realized_r") or "0")))
-            for r in closed if r.get("realized_r") is not None
-        )
-        holding = []
-        for record in closed:
-            opened = parse_iso(record.get("filled_at"))
-            finished = parse_iso(record.get("closed_at"))
-            if opened and finished and finished >= opened:
-                holding.append((finished - opened).total_seconds())
-        avg_holding = duration_text(sum(holding) / len(holding)) if holding else "—"
+        # Active exposure is projected by symbol+direction to avoid double
+        # counting the local trade ledger and its corresponding exchange row.
+        slots = self._active_slot_projection()
+        pending_trades = [trade for trade in self.active_trades.values() if trade.status == "PENDING"]
+        positions_view: list[dict[str, Any]] = []
+        floating_total = 0.0
+        stale_position_prices = 0
+        for (pair, direction), slot in slots.items():
+            trade = next((item for item in slot.get("trades", []) if item.status == "FILLED"), None)
+            exchange_rows = slot.get("positions", [])
+            exchange_row = exchange_rows[0] if exchange_rows else None
+            snapshot = self.prices.get(pair)
+            price = self._current_price(pair)
+            if price is None and isinstance(exchange_row, dict):
+                mark = self._stats_decimal(exchange_row.get("markPrice"), 0.0)
+                price = Decimal(str(mark)) if mark > 0 else None
+            if snapshot is None or not snapshot.live:
+                stale_position_prices += 1
 
-        pending = pending_slots
-        filled = filled_slots
-        expired = sum(
-            r.get("result") == "EXPIRED"
-            for r in self.history_records
-            if r.get("strategy_name") == volumatic.STRATEGY_NAME
+            entry = None
+            quantity = None
+            if trade is not None:
+                entry = trade.fill_price or trade.entry
+                quantity = trade.quantity
+            if isinstance(exchange_row, dict):
+                row_entry = self._stats_decimal(exchange_row.get("entryPrice"), 0.0)
+                if row_entry > 0:
+                    entry = Decimal(str(row_entry))
+                row_qty = abs(self._stats_decimal(
+                    exchange_row.get("positionAmt", exchange_row.get("pa", "0")), 0.0
+                ))
+                if row_qty > 0:
+                    quantity = Decimal(str(row_qty))
+
+            pnl = None
+            if isinstance(exchange_row, dict):
+                raw_unrealized = exchange_row.get("unRealizedProfit", exchange_row.get("unrealizedProfit"))
+                if raw_unrealized not in (None, ""):
+                    pnl = self._stats_decimal(raw_unrealized)
+            if pnl is None and price is not None and entry is not None and quantity is not None:
+                move = price - entry if direction == "LONG" else entry - price
+                pnl = float(move * quantity)
+            if pnl is not None:
+                floating_total += pnl
+
+            pnl_pct = 0.0
+            if price is not None and entry is not None and entry > 0:
+                move_pct = (price - entry) / entry * Decimal("100")
+                pnl_pct = float(move_pct if direction == "LONG" else -move_pct)
+            positions_view.append({
+                "pair": pair, "direction": direction, "price": price,
+                "pnl": pnl, "pnl_pct": pnl_pct, "trade": trade,
+                "stale": snapshot is None or not snapshot.live,
+            })
+        positions_view.sort(key=lambda item: (item["pnl"] is None, -(item["pnl"] or 0.0)))
+
+        active_count = len(slots)
+        pending_count = len(pending_trades)
+        live_limits = sum(
+            1 for item in self.exchange_open_orders.values()
+            if isinstance(item, dict)
+            and str(item.get("status") or item.get("X") or "NEW").upper() in {"NEW", "PARTIALLY_FILLED"}
         )
-        lines = [
-            "╔════ VOLUMATIC / TELEMETRY ════╗",
-            f"SYS  {'ONLINE' if self._running else 'OFFLINE'}   TF  M15   VT LEN9   H4 EMA100/ST10   MODE  {'REAL' if self.real_mode else 'PAPER'}",
-            "────────────────────────────────",
-            "[ PERFORMANCE ]",
-            f"CLOSED       {len(closed):>5}     W/L/BE   {len(wins)}/{len(losses)}/{be}",
-            f"WIN RATE     {win_rate:>6.2f}%   PF       {pf_text}",
-            f"PNL REALIZED {total_pnl:+.4f} USDT",
-            f"PNL FLOATING {floating:+.4f} USDT",
-            f"EXPECTANCY   {expectancy:+.4f} USDT/trade",
-            f"AVG W/L      {avg_win:+.4f} / {avg_loss:+.4f} USDT",
-            f"MAX DD       {dd:.4f} USDT   TOTAL R  {total_r:+.3f}R",
-            f"AVG HOLD     {avg_holding}",
-            "────────────────────────────────",
-            "[ EXPOSURE ]",
-            f"POSITIONS    {slot_count:>3}/{self.max_active_trades:<3}  PENDING SETUPS {pending:<3}",
-            f"LIVE LIMITS  {live_limits} (not counted)",
-            f"EXPIRED      {expired}",
-        ]
-        for tf in ("M15",):
-            long_rows = [r for r in closed if r.get("timeframe") == tf and r.get("direction") == "LONG"]
-            short_rows = [r for r in closed if r.get("timeframe") == tf and r.get("direction") == "SHORT"]
-            long_pnl = sum(float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in long_rows)
-            short_pnl = sum(float(Decimal(str(r.get("pnl_usdt") or "0"))) for r in short_rows)
-            lines.append(
-                f"{tf:<2}  L {len(long_rows):>3} ({long_pnl:+.3f})  "
-                f"S {len(short_rows):>3} ({short_pnl:+.3f}) USDT"
+        remaining_slots = max(0, self.max_active_trades - active_count)
+        capacity_pct = (active_count / self.max_active_trades * 100.0) if self.max_active_trades else 0.0
+
+        # Balance is intentionally cache-only. /stats must never add REST weight
+        # or interrupt the scanner merely to make a dashboard look current.
+        balance = self.real.cached_usdt_balance() if hasattr(self.real, "cached_usdt_balance") else None
+        balance_age = (
+            max(0.0, now_mono - self.real.last_balance_at)
+            if getattr(self.real, "last_balance_at", None) is not None else None
+        )
+        if self.real_mode and balance:
+            wallet = self._stats_decimal(balance.get("balance"), 0.0)
+            available = self._stats_decimal(balance.get("availableBalance"), 0.0)
+            cross_unrealized = self._stats_decimal(balance.get("crossUnPnl"), 0.0)
+            balance_line = f"WALLET {wallet:.4f}  FREE {available:.4f}  CROSS uPnL {cross_unrealized:+.4f} USDT"
+            balance_freshness = f"cache {balance_age:.0f}s" if balance_age is not None else "cache age N/A"
+        elif self.real_mode:
+            balance_line = "WALLET N/A  •  menunggu snapshot Futures balance"
+            balance_freshness = "no cached snapshot"
+        else:
+            paper_realized = sum(
+                self._stats_decimal(row.get("pnl_usdt"))
+                for row in closed
+                if not bool(row.get("real_enabled"))
             )
-        guard_state = (
+            paper_equity = float(SIM_START_BALANCE) + paper_realized
+            balance_line = f"PAPER EQUITY EST. {paper_equity:.4f} USDT  •  START {float(SIM_START_BALANCE):.2f}"
+            balance_freshness = "ledger estimate"
+
+        fresh_prices = sum(1 for item in self.prices.values() if item.live)
+        market_age = self._stats_age_text(getattr(self.ws, "last_message_at", None))
+        user_age = self._stats_age_text(getattr(self.user_ws, "last_message_at", None))
+        market_symbols = len(self.ws.symbols()) if hasattr(self.ws, "symbols") else 0
+        api_calls = API_STATS.window(60.0)
+        api_count_60 = sum(api_calls.values())
+        api_weight_60 = API_STATS.window_weight(60.0)
+        weight_header = "N/A"
+        if API_STATS.used_weight is not None and API_STATS.used_weight_at is not None:
+            header_age = max(0.0, now_mono - API_STATS.used_weight_at)
+            if header_age <= 60.0:
+                weight_header = f"{API_STATS.used_weight}/{BINANCE_IP_WEIGHT_LIMIT}"
+            else:
+                weight_header = f"STALE {API_STATS.used_weight}"
+        cooldown = self._binance_cooldown_remaining()
+
+        scanner_state = self._scanner_state_label()
+        universe_count = len(self.symbols)
+        cursor = max(0, int(self._scan_resume_cursor))
+        if self.scan_enabled and universe_count:
+            scan_progress = min(100.0, cursor / universe_count * 100.0)
+            scan_line = f"{scanner_state}  [{cursor}/{universe_count}] {self._stats_bar(scan_progress, 10)}"
+        else:
+            scan_line = scanner_state
+        btc_state = "ON" if self.btc_filter_enabled else "OFF"
+        autostop_state = (
             "TRIGGERED" if self._autostop_triggered else
             (f"ARMED {decimal_to_str(self.autostop_percent)}%" if self.autostop_percent is not None else "OFF")
         )
-        lines += [
-            "────────────────────────────────",
-            "[ SAFETY ]",
-            f"AUTOSTOP     {guard_state}",
-            f"EQUITY       {fmt_num(self._equity_last, 4) if self._equity_last is not None else '—'} USDT",
-            f"PEAK / FLOOR {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '—'} / {fmt_num(self._autostop_floor(), 4) if self._autostop_floor() is not None else '—'} USDT",
-            f"SCANNER      {self._scanner_state_label()}",
-            f"SCAN SCHEDULE {', '.join(self.scan_schedule_slots) + ' WIB' if self.scan_schedule_slots else ('ACTIVATED ' + self.scan_schedule_activated_at if self.scan_schedule_activated_at else 'OFF')}",
-            "────────────────────────────────",
-            f"PnL belum termasuk seluruh fee/funding aktual. R awal dihitung dari average fill ke initial M15 SuperTrend SL; TP entry baru RR 1:{decimal_to_str(self.rr_target)} dan SL trailing mengikuti close M15.",
+        equity_peak = fmt_num(self._equity_peak, 4) if self._equity_peak is not None else "—"
+        equity_floor = fmt_num(self._autostop_floor(), 4) if self._autostop_floor() is not None else "—"
+        latest_event = self.history_events[-1] if self.history_events else None
+        if isinstance(latest_event, dict):
+            last_event_text = str(latest_event.get("event") or "EVENT")
+            if latest_event.get("pair"):
+                last_event_text += f" · {latest_event.get('pair')}"
+            event_time = str(latest_event.get("timestamp_wib") or "")
+            if event_time:
+                last_event_text += f" · {event_time.rsplit(' ', 2)[-2]} WIB" if " " in event_time else f" · {event_time}"
+        else:
+            last_event_text = "NO EVENT RECORDED"
+
+        lines = [
+            "╔════════ NEW WORLD // LIVE TELEMETRY ════════╗",
+            f"◆ CORE {system_state}   ◆ MODE {mode}   ◆ UP {uptime}",
+            (f"⏱ {now.strftime('%d-%m-%Y %H:%M:%S WIB')}   REFRESH {int(STATS_REFRESH_SECONDS)}s"
+             if auto_refresh else f"⏱ {now.strftime('%d-%m-%Y %H:%M:%S WIB')}   SNAPSHOT"),
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "[ ACCOUNT / EQUITY ]",
+            balance_line,
+            f"BALANCE DATA {balance_freshness}   •   AUTOSTOP {autostop_state}",
+            f"EQUITY GUARD PEAK {equity_peak}  /  FLOOR {equity_floor} USDT",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "[ PERFORMANCE / LEDGER ]",
+            f"CLOSED {len(closed)}  •  W {len(wins)} / L {len(losses)} / BE {breakeven}  •  V4 {v4_closed}",
+            f"WIN RATE {win_rate:5.1f}% {self._stats_bar(win_rate)}   PF {('∞' if math.isinf(profit_factor) else f'{profit_factor:.2f}' if profit_factor > 0 else '—')}",
+            f"REALIZED {total_realized:+.4f} USDT   •   FLOATING {floating_total:+.4f} USDT",
+            f"24H PNL {pnl_24h:+.4f} USDT ({len(closed_24h)} closes)   •   EXP {expectancy:+.4f}/trade",
+            f"AVG WIN {avg_win:+.4f}   •   AVG LOSS {avg_loss:+.4f}   •   MAX DD {max_dd:.4f} USDT",
+            f"TOTAL R {total_r:+.3f}R",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "[ EXPOSURE / EXECUTION ]",
+            f"POSITIONS {active_count}/{self.max_active_trades} {self._stats_bar(capacity_pct, 10)}   FREE SLOTS {remaining_slots}",
+            f"PENDING TRACE {pending_count}   •   LIVE ENTRY ORDERS {live_limits}   •   PRICE STALE {stale_position_prices}",
+            f"SCANNER {scan_line}",
+            f"ALT H4 ST10×2.5 + EMA100   •   BTC FILTER {btc_state}",
+            f"M15 VT LEN9   •   SL ST14×2.5 TRAIL   •   TP RR 1:{decimal_to_str(self.rr_target)}",
         ]
-        await self.reply("\n".join(lines))
+        if positions_view:
+            lines.append("── LIVE POSITIONS ───────────────────────────")
+            for item in positions_view[:6]:
+                arrow = "▲" if item["direction"] == "LONG" else "▼"
+                pnl = "uPnL N/A" if item["pnl"] is None else f"{item['pnl']:+.4f}U ({item['pnl_pct']:+.2f}%)"
+                px = fmt_price(item["price"]) if item["price"] is not None else "PRICE STALE"
+                trade = item["trade"]
+                trail = ""
+                if trade is not None and trade.trailing_last_reason:
+                    trail = f"  · {str(trade.trailing_last_reason)[:34]}"
+                lines.append(f"{arrow} {item['pair']} {item['direction']}  {pnl}  PX {px}{trail}")
+            if len(positions_view) > 6:
+                lines.append(f"… +{len(positions_view) - 6} posisi lainnya")
+        if pending_trades:
+            lines.append("── PENDING RETEST ───────────────────────────")
+            for trade in pending_trades[:4]:
+                remaining = max(0.0, (trade.expires_at - now_utc()).total_seconds())
+                remain_text = duration_text(remaining)
+                lines.append(f"◌ {trade.pair} {trade.direction}  TARGET {fmt_price(trade.entry)}  TTL {remain_text}")
+            if len(pending_trades) > 4:
+                lines.append(f"… +{len(pending_trades) - 4} setup lainnya")
+        lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "[ NETWORK / ENGINE ]",
+            f"MARKET WS {self.ws.status} ({market_age})  •  USER WS {self.user_ws.status} ({user_age})",
+            f"PRICES FRESH {fresh_prices}/{len(self.prices)}  •  WS SYMBOLS {market_symbols}  •  BANNED {len(self.banned_symbols)}",
+            f"BINANCE API 60s {api_count_60} req  •  WEIGHT {api_weight_60}/{BINANCE_IP_WEIGHT_LIMIT} (header {weight_header})",
+            f"RATE LIMIT HITS {API_STATS.limit_hits} lifetime  •  REST COOLDOWN {cooldown:.0f}s",
+            f"LAST EVENT {last_event_text[:110]}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "[ CONTROL ] /stats off = freeze  •  /stats refresh = update now",
+            "[ DATA ] Harga/uPnL dari cache; balance dari REST snapshot terakhir. PnL ledger dapat berbeda dari fee/funding aktual.",
+            "[ RESOURCE ] /stats tidak membuat request REST Binance tambahan.",
+            "╚══════════════════════════════════════════╝",
+        ]
+        output = "\n".join(lines)
+        # Leave a safety margin beneath Telegram's 4,096-character limit.
+        return output[:3900]
+
+    async def _stats_live_refresh_loop(self, chat_id: int, message_id: int) -> None:
+        """Edit one Telegram dashboard periodically without sending new messages."""
+        try:
+            while self._running and self._stats_live_message_id == message_id:
+                await asyncio.sleep(STATS_REFRESH_SECONDS)
+                if not self._running or self._stats_live_message_id != message_id:
+                    break
+                editor = self.edit_message_text
+                if not callable(editor):
+                    break
+                dashboard = self._build_stats_dashboard(auto_refresh=True)
+                try:
+                    await asyncio.to_thread(editor, chat_id, message_id, dashboard)
+                    self._stats_last_update_monotonic = time.monotonic()
+                except Exception as exc:
+                    # A deleted Telegram message cannot be edited; stop the loop
+                    # instead of retrying every 15 seconds forever.
+                    log.warning("[STATS] live dashboard update stopped: %s", str(exc)[:240])
+                    self._stats_live_message_id = None
+                    break
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._stats_live_task is asyncio.current_task():
+                self._stats_live_task = None
+
+    async def _stop_live_stats(self, *, freeze_message: bool = True) -> None:
+        task = self._stats_live_task
+        self._stats_live_task = None
+        message_id = self._stats_live_message_id
+        self._stats_live_message_id = None
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if freeze_message and message_id is not None and callable(self.edit_message_text):
+            try:
+                dashboard = self._build_stats_dashboard(auto_refresh=False)
+                await asyncio.to_thread(self.edit_message_text, self._stats_live_chat_id, message_id, dashboard)
+            except Exception as exc:
+                log.debug("[STATS] could not freeze Telegram dashboard: %s", exc)
+
+    @staticmethod
+    def _telegram_message_id(result: Any) -> int | None:
+        if isinstance(result, bool):
+            return None
+        if isinstance(result, int):
+            return result
+        if isinstance(result, dict):
+            value = result.get("message_id")
+            try:
+                return int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    async def show_stats(self, command_text: str = "/stats") -> None:
+        parts = str(command_text or "/stats").split()
+        action = parts[1].lower() if len(parts) > 1 else "on"
+        if len(parts) > 2:
+            raise ValueError("Gunakan /stats, /stats on, /stats refresh, /stats once, atau /stats off.")
+
+        if action == "off":
+            had_dashboard = self._stats_live_message_id is not None
+            await self._stop_live_stats(freeze_message=True)
+            await self.reply(
+                "◼ LIVE TELEMETRY PAUSED. Dashboard terakhir dibekukan; tidak ada background refresh."
+                if had_dashboard else "LIVE TELEMETRY sudah OFF. Gunakan /stats untuk membuka dashboard."
+            )
+            return
+
+        if action == "once":
+            await self.reply(self._build_stats_dashboard(auto_refresh=False))
+            return
+
+        if action not in {"on", "refresh"}:
+            raise ValueError("Gunakan /stats, /stats on, /stats refresh, /stats once, atau /stats off.")
+
+        editor = self.edit_message_text
+        if not callable(editor):
+            await self.reply(self._build_stats_dashboard(auto_refresh=False))
+            await self.reply("ℹ️ Runner ini belum menyediakan editMessageText; dashboard dikirim sebagai snapshot. Gunakan /stats once untuk snapshot berikutnya.")
+            return
+
+        if self._stats_live_message_id is not None and self._stats_live_task is not None and not self._stats_live_task.done():
+            dashboard = self._build_stats_dashboard(auto_refresh=True)
+            await asyncio.to_thread(editor, self._stats_live_chat_id, self._stats_live_message_id, dashboard)
+            self._stats_last_update_monotonic = time.monotonic()
+            if action == "on":
+                await self.reply(f"◈ LIVE TELEMETRY sudah berjalan. Auto-refresh setiap {int(STATS_REFRESH_SECONDS)} detik. /stats off untuk membekukan.")
+            return
+
+        dashboard = self._build_stats_dashboard(auto_refresh=True)
+        result = await asyncio.to_thread(self.send_message, self.chat_id, dashboard)
+        message_id = self._telegram_message_id(result)
+        if message_id is None:
+            await self.reply("⚠️ Dashboard terkirim sebagai snapshot, tetapi Telegram adapter tidak mengembalikan message_id sehingga auto-refresh tidak dapat dimulai.")
+            return
+
+        self._stats_live_chat_id = self.chat_id
+        self._stats_live_message_id = message_id
+        self._stats_last_update_monotonic = time.monotonic()
+        self._stats_live_task = asyncio.create_task(
+            self._stats_live_refresh_loop(self._stats_live_chat_id, message_id),
+            name="telegram-live-stats-dashboard",
+        )
 
     async def show_status(self) -> None:
         _slots, pending, filled, live_limits = self._active_slot_counts()
@@ -14116,7 +14547,8 @@ class TradingEngine:
             "/trade - lihat retest trace, posisi, TP/SL, dan trailing stop\n"
             "/banned [PAIR ...] - tambah ban permanen; tanpa argumen tampilkan daftar\n"
             "/unbanned PAIR ... - hapus ban permanen\n"
-            "/stats - statistik trade, PnL, win rate, DD, R\n"
+            "/stats - buka live dashboard robotik (auto-refresh 15 detik)\n"
+            "/stats off - bekukan dashboard | /stats once - snapshot\n"
             "/setup - simpan snapshot trade aktif ke GitHub\n"
             "/open - pulihkan snapshot secara manual\n"
             "/del PAIR|all - batalkan pending trace/order\n"
@@ -14169,7 +14601,7 @@ class TradingEngine:
         elif command == "/trade": await self.show_trades()
         elif command in {"/banned", "/ban"}: await self._handle_banned(text)
         elif command in {"/unbanned", "/unban"}: await self._handle_unbanned(text)
-        elif command == "/stats": await self.show_stats()
+        elif command == "/stats": await self.show_stats(text)
         elif command == "/status": await self.show_status()
         elif command in {"/help", "/start"}: await self.show_help()
         elif command == "/setup": await self.save_setups()
@@ -14379,16 +14811,42 @@ class LocalTelegramBot:
             chunks.append(text)
         return chunks
 
-    def send_message(self, chat_id: int, message: str) -> None:
+    def send_message(self, chat_id: int, message: str) -> int | None:
         # Telegram text messages are limited to 4,096 characters. Keep a margin
-        # below that limit and send plain text to preserve the engine's formatting.
+        # below that limit and return the final message ID for live dashboards.
+        last_message_id: int | None = None
         for chunk in self._split_message(str(message)):
             response = requests.post(
                 self._url("sendMessage"),
                 json={"chat_id": int(chat_id), "text": chunk},
                 timeout=(self.connect_timeout, self.request_timeout),
             )
-            self._result_or_raise(response, "sendMessage")
+            result = self._result_or_raise(response, "sendMessage")
+            if isinstance(result, dict) and result.get("message_id") is not None:
+                try:
+                    last_message_id = int(result["message_id"])
+                except (TypeError, ValueError):
+                    last_message_id = None
+        return last_message_id
+
+    def edit_message_text(self, chat_id: int, message_id: int, message: str) -> bool:
+        """Edit an existing Telegram message; used by the /stats live dashboard."""
+        response = requests.post(
+            self._url("editMessageText"),
+            json={
+                "chat_id": int(chat_id),
+                "message_id": int(message_id),
+                "text": str(message)[:4000],
+            },
+            timeout=(self.connect_timeout, self.request_timeout),
+        )
+        try:
+            self._result_or_raise(response, "editMessageText")
+            return True
+        except TelegramBotAPIError as exc:
+            if "message is not modified" in str(exc).lower():
+                return False
+            raise
 
     def load_offset(self) -> int | None:
         try:
@@ -14494,6 +14952,7 @@ async def _run_local_telegram() -> None:
         "chat_id": ALLOWED_USER_ID,
         "user_id": ALLOWED_USER_ID,
         "send_message": telegram.send_message,
+        "edit_message_text": telegram.edit_message_text,
     }
     stop_event = asyncio.Event()
     engine_started = False
