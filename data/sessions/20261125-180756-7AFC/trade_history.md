@@ -72,3 +72,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T12:00:00.863162+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## RIVERUSDT SHORT — EXPIRED
+- Trade ID: `RIVERUSDT-20261125-183345-B52EEF`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T12:00:01.278061+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
