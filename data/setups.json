@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T08:47:18.416731+00:00",
+  "updated_at": "2026-11-25T08:47:25.881737+00:00",
   "active_trades": [
     {
       "trade_id": "SLXUSDT-20261125-145458-0EF60B",
@@ -1224,7 +1224,7 @@
       "tp_client_algo_id": "VTTPSDT-20261125-153306-15FB7F",
       "sl_algo_status": "NEW",
       "tp_algo_status": "NEW",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
