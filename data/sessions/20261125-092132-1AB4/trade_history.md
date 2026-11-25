@@ -126,3 +126,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T04:16:00.642666+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AKTUSDT SHORT — CANCELED
+- Trade ID: `AKTUSDT-20261125-111607-6CDA7A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T04:16:38.424992+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
