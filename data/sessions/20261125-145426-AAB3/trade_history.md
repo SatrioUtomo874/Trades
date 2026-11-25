@@ -156,3 +156,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T09:46:34.984965+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## KAITOUSDT SHORT — EXPIRED
+- Trade ID: `KAITOUSDT-20261125-162245-6893FD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T09:46:45.310237+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
