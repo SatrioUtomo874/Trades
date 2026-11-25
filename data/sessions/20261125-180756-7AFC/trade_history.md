@@ -222,3 +222,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T13:15:13.939288+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## NILUSDT SHORT — EXPIRED
+- Trade ID: `NILUSDT-20261125-194814-F7D3EF`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T13:15:25.248317+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
