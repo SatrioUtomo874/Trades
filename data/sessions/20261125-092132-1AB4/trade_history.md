@@ -78,3 +78,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-25T04:00:00.161438+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## 2ZUSDT SHORT — EXPIRED
+- Trade ID: `2ZUSDT-20261125-103024-36CDF8`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-25T04:00:00.554848+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
