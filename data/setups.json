@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-25T08:17:22.443300+00:00",
+  "updated_at": "2026-11-25T08:17:24.146373+00:00",
   "active_trades": [
     {
       "trade_id": "SLXUSDT-20261125-145458-0EF60B",
@@ -627,9 +627,9 @@
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSL518ef24d06d14246a371653bdc01",
       "tp_client_algo_id": null,
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "CANCELED",
       "tp_algo_status": "NOT_PLACED",
-      "protection_state": "PARTIAL",
+      "protection_state": "TRAILING_REPLACE_PENDING",
       "protection_error": "Exchange SL adopted; TP state is not present in openAlgoOrders.",
       "protection_warning_sent": false,
       "protection_exit_reason": null,
@@ -704,10 +704,10 @@
       "entry_touch_missed": false,
       "trailing_last_close_ms": 1795594500000,
       "trailing_last_st": "0.004210094333653716",
-      "trailing_last_reason": "EXCHANGE_SL_ADOPTED_TP_NOT_FOUND",
+      "trailing_last_reason": "OLD_SL_CANCEL_CONFIRMED_SUBMITTING_NEW",
       "trailing_pending_algo_client_id": "VTSL724dc26b98f3444f82b160a46a11",
       "trailing_pending_algo_trigger": "0.004211",
-      "trailing_replace_phase": "CANCEL_OLD",
+      "trailing_replace_phase": "SUBMIT_NEW",
       "trailing_replace_old_algo_id": 4000002204099739,
       "trailing_replace_old_client_id": "VTSL518ef24d06d14246a371653bdc01",
       "trailing_replace_old_trigger": "0.004215",
