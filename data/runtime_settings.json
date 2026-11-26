@@ -309,12 +309,17 @@
     "M15:MELANIAUSDT": 1795692600000,
     "M15:MEMEUSDT": 1795692600000,
     "M15:MERLUSDT": 1795692600000,
-    "M15:METISUSDT": 1795692600000
+    "M15:METISUSDT": 1795692600000,
+    "M15:METUSDT": 1795692600000,
+    "M15:MEUSDT": 1795692600000,
+    "M15:MEWUSDT": 1795692600000,
+    "M15:MINAUSDT": 1795692600000,
+    "M15:MIRAUSDT": 1795692600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 295,
+  "scan_resume_cursor": 300,
   "scan_resume_boundary_ms": 1795693500000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-26T11:51:04.577225+00:00"
+  "updated_at": "2026-11-26T11:51:09.398185+00:00"
 }
