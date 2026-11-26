@@ -3,6 +3,7 @@
 
 H4 trend filter: strict three-price order: LONG EMA100 < ST10x3 < Close;
 SHORT Close < ST10x3 < EMA100. Any other order is consolidation.
+M15 entry gate: LONG needs last closed M15 close > EMA100, SHORT needs close < EMA100.
 M15 signal: Pine-compatible Volumatic LEN9 visual marker (plotshape offset=-1).
 Entry target: close of the candle carrying that visual marker; a live retest
 triggers MARKET execution within a four-candle M15 lifetime.
@@ -40,6 +41,7 @@ SUPERTREND_FACTOR = 2.5
 H4_SUPERTREND_ATR_LENGTH = 10
 H4_SUPERTREND_FACTOR = 3.0
 H4_EMA_LENGTH = 100
+ENTRY_EMA_LENGTH = 100  # M15 entry gate: LONG close > EMA100, SHORT close < EMA100
 ENTRY_RR = 2.0
 SIGNAL_TRACE_CANDLES = 4
 MIN_SUPERTREND_ATR_LENGTH = 1
@@ -2326,6 +2328,17 @@ def detect_new_strategy_signal(
     if confirmation_open_ms != bubble_open_ms + interval_ms:
         return None
 
+    # M15 entry gate: last closed candle must sit on the signal side of EMA100.
+    m15_ema = calculate_ema_tv(closed_c, ENTRY_EMA_LENGTH)
+    m15_ema_value = float(m15_ema[-1]) if len(m15_ema) else float("nan")
+    m15_close_value = float(closed_c[-1])
+    if len(closed_c) < ENTRY_EMA_LENGTH or not all(np.isfinite(x) and x > 0 for x in (m15_ema_value, m15_close_value)):
+        return None
+    if (direction == "LONG" and not m15_close_value > m15_ema_value) or (
+        direction == "SHORT" and not m15_close_value < m15_ema_value
+    ):
+        return None
+
     # Altcoin H4 reference must itself have closed by the time the confirming
     # M15 candle closed. Never use a forming H4 candle or future H4 values.
     confirmation_close_ms = confirmation_open_ms + interval_ms
@@ -2395,6 +2408,9 @@ def detect_new_strategy_signal(
         "trend_h4_supertrend_atr": H4_SUPERTREND_ATR_LENGTH,
         "trend_h4_supertrend_factor": H4_SUPERTREND_FACTOR,
         "trend_h4_ema_length": H4_EMA_LENGTH,
+        "m15_entry_ema_length": ENTRY_EMA_LENGTH,
+        "m15_entry_ema_value": m15_ema_value,
+        "m15_entry_close": m15_close_value,
         "btc_filter_enabled": bool(btc_filter_enabled),
         "btc_trend": (str(btc_trend_state["trend"]) if btc_trend_state is not None else "OFF"),
         "btc_h4_open_time_ms": (int(btc_trend_state["open_time_ms"]) if btc_trend_state is not None else None),
