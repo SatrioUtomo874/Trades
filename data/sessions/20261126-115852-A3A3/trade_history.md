@@ -168,3 +168,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T09:34:13.477583+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## PLUMEUSDT SHORT — CANCELED
+- Trade ID: `PLUMEUSDT-20261126-163518-7E2301`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T09:36:27.404486+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## STRKUSDT SHORT — CANCELED
+- Trade ID: `STRKUSDT-20261126-163630-B2615D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T09:36:31.589510+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
