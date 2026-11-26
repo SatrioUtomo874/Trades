@@ -264,3 +264,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T22:15:00.291412+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HYPERUSDT SHORT — CANCELED
+- Trade ID: `HYPERUSDT-20261127-051534-EBB942`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T22:18:23.863643+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
