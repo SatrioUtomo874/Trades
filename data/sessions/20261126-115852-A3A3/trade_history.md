@@ -318,3 +318,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T11:00:00.410781+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ALPINEUSDT SHORT — CANCELED
+- Trade ID: `ALPINEUSDT-20261126-180026-453365`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:00:27.790872+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
