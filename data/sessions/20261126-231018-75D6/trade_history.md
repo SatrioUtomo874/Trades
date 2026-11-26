@@ -240,3 +240,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T22:00:00.122502+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ROBOUSDT SHORT — CANCELED
+- Trade ID: `ROBOUSDT-20261127-050027-DB909C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T22:01:37.905272+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
