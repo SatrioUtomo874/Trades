@@ -216,3 +216,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T21:19:33.882078+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## RIFUSDT SHORT — EXPIRED
+- Trade ID: `RIFUSDT-20261127-040138-385D3A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T21:30:00.131187+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
