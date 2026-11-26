@@ -222,3 +222,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T04:15:00.059019+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PIPPINUSDT LONG — EXPIRED
+- Trade ID: `PIPPINUSDT-20261126-111544-77B3D4`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T04:45:00.123974+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PHAROSUSDT LONG — EXPIRED
+- Trade ID: `PHAROSUSDT-20261126-111543-17C1CB`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T04:45:00.430328+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
