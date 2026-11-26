@@ -17,7 +17,7 @@
   "min_margin_enabled": false,
   "last_processed_candles": {
     "M15:0GUSDT": 1795683600000,
-    "M15:1000000MOGUSDT": 1795682700000,
+    "M15:1000000MOGUSDT": 1795683600000,
     "M15:1000BONKUSDT": 1795683600000,
     "M15:1000CATUSDT": 1795683600000,
     "M15:1000CHEEMSUSDT": 1795683600000,
@@ -534,8 +534,8 @@
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 0,
-  "scan_resume_boundary_ms": 0,
+  "scan_resume_cursor": 200,
+  "scan_resume_boundary_ms": 1795684500000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-26T09:16:06.658232+00:00"
+  "updated_at": "2026-11-26T09:16:50.964721+00:00"
 }
