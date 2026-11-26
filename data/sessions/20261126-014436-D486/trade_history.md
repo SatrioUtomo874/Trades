@@ -204,3 +204,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T03:45:00.132858+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MEUSDT SHORT — EXPIRED
+- Trade ID: `MEUSDT-20261126-103249-0D1156`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T04:00:00.009957+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BEATUSDT SHORT — EXPIRED
+- Trade ID: `BEATUSDT-20261126-103020-A9EBDB`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T04:00:00.331342+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
