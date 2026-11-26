@@ -78,3 +78,21 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T07:45:00.368621+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SSVUSDT LONG — EXPIRED
+- Trade ID: `SSVUSDT-20261126-143031-4848C3`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T08:00:00.015947+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MONUSDT SHORT — EXPIRED
+- Trade ID: `MONUSDT-20261126-143025-A2A857`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T08:00:01.007541+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## OUSDT LONG — EXPIRED
+- Trade ID: `OUSDT-20261126-143026-FA10A9`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T08:00:01.299986+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
