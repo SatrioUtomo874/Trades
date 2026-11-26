@@ -330,3 +330,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T11:01:00.711842+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SLPUSDT SHORT — CANCELED
+- Trade ID: `SLPUSDT-20261126-174606-C34603`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:04:31.317044+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
