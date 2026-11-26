@@ -342,3 +342,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T11:06:35.187112+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ROSEUSDT SHORT — CANCELED
+- Trade ID: `ROSEUSDT-20261126-174601-418EEC`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:12:07.182533+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
