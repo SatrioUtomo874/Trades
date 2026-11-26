@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T04:25:02.161414+00:00",
+  "updated_at": "2026-11-26T04:30:03.126116+00:00",
   "active_trades": [
     {
       "trade_id": "DEEPUSDT-20261126-083154-00D95B",
@@ -107,7 +107,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795666500000,
+      "trailing_last_close_ms": 1795667400000,
       "trailing_last_st": "0.012045724754872887",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
@@ -226,9 +226,9 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795666500000,
+      "trailing_last_close_ms": 1795667400000,
       "trailing_last_st": "0.3324974354674174",
-      "trailing_last_reason": "UPDATED_REAL_FROM_LATEST_M15_ST",
+      "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "trailing_replace_phase": null,
