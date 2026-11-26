@@ -198,3 +198,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T20:00:00.125378+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HUMAUSDT SHORT — EXPIRED
+- Trade ID: `HUMAUSDT-20261127-030317-BA1C5E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T20:30:00.044366+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
