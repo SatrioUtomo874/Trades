@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T13:25:25.489665+00:00",
+  "updated_at": "2026-11-26T13:27:24.785221+00:00",
   "active_trades": [
     {
       "trade_id": "MOVRUSDT-20261126-184808-842702",
@@ -911,12 +911,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.000106621659262943",
       "realized_r": null,
-      "quantity": "356",
-      "margin_usdt": "0.551444",
+      "quantity": "165",
+      "margin_usdt": "0.255585",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5",
-      "actual_notional": "5.51444",
+      "actual_notional": "2.55585",
       "real_enabled": true,
       "real_state": "REAL_FILLED",
       "position_side": "BOTH",
@@ -924,7 +924,7 @@
       "entry_client_order_id": "VT1955f8ae0ea92ec583cb1edbf6f9",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "356",
+      "entry_executed_qty": "165",
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
