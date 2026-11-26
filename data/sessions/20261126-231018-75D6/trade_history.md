@@ -294,3 +294,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T22:48:18.075003+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## TOWNSUSDT SHORT — CANCELED
+- Trade ID: `TOWNSUSDT-20261127-060140-7E9FF1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T23:01:42.357661+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
