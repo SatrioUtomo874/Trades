@@ -162,3 +162,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T19:00:00.125904+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## LQTYUSDT SHORT — CANCELED
+- Trade ID: `LQTYUSDT-20261127-020028-18BF89`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T19:03:22.609970+00:00 | Reason: SIZE_REJECTED
+## AGTUSDT SHORT — CANCELED
+- Trade ID: `AGTUSDT-20261127-014518-778BF0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T19:03:24.343346+00:00 | Reason: SIZE_REJECTED
