@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T16:47:59.754658+00:00",
+  "updated_at": "2026-11-26T16:48:17.995795+00:00",
   "active_trades": [
     {
       "trade_id": "AIOUSDT-20261126-233010-560865",
@@ -385,13 +385,13 @@
       "supertrend_atr_length": 14,
       "supertrend_factor": 2.5,
       "sl_algo_id": 4000002211019972,
-      "tp_algo_id": null,
+      "tp_algo_id": 4000002211020211,
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSLSDT-20261126-234545-3B2D10",
       "tp_client_algo_id": "VTTPSDT-20261126-234545-3B2D10",
       "sl_algo_status": "NEW",
-      "tp_algo_status": "NOT_PLACED",
-      "protection_state": "WAITING_FOR_EXCHANGE",
+      "tp_algo_status": "NEW",
+      "protection_state": "ACTIVE",
       "protection_error": null,
       "protection_warning_sent": false,
       "protection_exit_reason": null,
