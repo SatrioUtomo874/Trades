@@ -3,7 +3,7 @@
   "timeframe": "M15",
   "trend_length": 9,
   "ema_filter_length": null,
-  "btc_filter_enabled": true,
+  "btc_filter_enabled": false,
   "forced_close_enabled": true,
   "h1_enabled": false,
   "supertrend_atr_length": 14,
@@ -12,7 +12,7 @@
   "rr_min": "2",
   "rr_max": "2",
   "max_active_trades": 100,
-  "margin_usdt": "0.5",
+  "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": false,
   "last_processed_candles": {},
@@ -21,5 +21,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-26T11:48:03.678597+00:00"
+  "updated_at": "2026-11-26T11:48:26.950885+00:00"
 }
