@@ -252,3 +252,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T22:02:38.836119+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## HUMAUSDT SHORT — EXPIRED
+- Trade ID: `HUMAUSDT-20261127-044544-9188C0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T22:15:00.127454+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## METUSDT SHORT — EXPIRED
+- Trade ID: `METUSDT-20261127-044547-7848E6`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T22:15:00.291412+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
