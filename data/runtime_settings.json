@@ -12,14 +12,16 @@
   "rr_min": "1",
   "rr_max": "1",
   "max_active_trades": 3,
-  "margin_usdt": "0.5",
+  "margin_usdt": "1.6",
   "leverage": 10,
   "min_margin_enabled": false,
-  "last_processed_candles": {},
+  "last_processed_candles": {
+    "M15:0GUSDT": 1795707900000
+  },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 0,
+  "scan_resume_cursor": 1,
   "scan_resume_boundary_ms": 1795708800000,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-26T16:11:53.434471+00:00"
+  "updated_at": "2026-11-26T16:11:55.180478+00:00"
 }
