@@ -294,3 +294,27 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T10:59:18.311274+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AAVEUSDT SHORT — EXPIRED
+- Trade ID: `AAVEUSDT-20261126-173012-A60DBF`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:00:00.025162+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ACEUSDT SHORT — EXPIRED
+- Trade ID: `ACEUSDT-20261126-173013-CBDF9C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:00:00.087744+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HUSDT SHORT — EXPIRED
+- Trade ID: `HUSDT-20261126-173050-43AA16`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:00:00.326976+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PAXGUSDT SHORT — EXPIRED
+- Trade ID: `PAXGUSDT-20261126-173056-87569D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:00:00.410781+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
