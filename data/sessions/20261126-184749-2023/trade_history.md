@@ -54,3 +54,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T12:37:23.362656+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SANTOSUSDT SHORT — CANCELED
+- Trade ID: `SANTOSUSDT-20261126-191551-FD6999`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T12:38:25.026142+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
