@@ -11,7 +11,7 @@
   "rr_target": "1",
   "rr_min": "1",
   "rr_max": "1",
-  "max_active_trades": 10,
+  "max_active_trades": 8,
   "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": false,
@@ -537,5 +537,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-26T05:07:43.442000+00:00"
+  "updated_at": "2026-11-26T05:07:53.947136+00:00"
 }
