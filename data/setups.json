@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T11:29:08.670826+00:00",
+  "updated_at": "2026-11-26T11:29:29.697678+00:00",
   "active_trades": [
     {
       "trade_id": "DEEPUSDT-20261126-115904-0C2840",
@@ -508,7 +508,7 @@
       "retired_sl_algo_orders": [],
       "sl_client_algo_id": "VTSLSDT-20261126-154548-A10E69",
       "tp_client_algo_id": "VTTPSDT-20261126-154548-A10E69",
-      "sl_algo_status": "NEW",
+      "sl_algo_status": "FINISHED",
       "tp_algo_status": "NEW",
       "protection_state": "ACTIVE",
       "protection_error": null,
