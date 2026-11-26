@@ -222,3 +222,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T21:30:00.131187+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## FLOWUSDT SHORT — CANCELED
+- Trade ID: `FLOWUSDT-20261127-043042-E86920`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T21:31:02.471607+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
