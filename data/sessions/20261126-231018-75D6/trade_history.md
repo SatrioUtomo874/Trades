@@ -18,3 +18,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T17:00:00.272805+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BULLAUSDT LONG — EXPIRED
+- Trade ID: `BULLAUSDT-20261126-234525-85F2A4`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T17:15:00.012460+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
