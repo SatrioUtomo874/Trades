@@ -42,3 +42,15 @@
 - Entry: 0.0715 | Exit: 0.0715
 - PnL: 0 USDT (0%) | R: None
 - Closed: 2026-11-26T06:52:39.190168+00:00 | Reason: EXTERNAL_CLOSE_RECONCILED
+## AGTUSDT SHORT — EXPIRED
+- Trade ID: `AGTUSDT-20261126-133014-4A18A5`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T07:00:00.139827+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BTRUSDT SHORT — EXPIRED
+- Trade ID: `BTRUSDT-20261126-133028-0B4BB2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T07:00:00.428629+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
