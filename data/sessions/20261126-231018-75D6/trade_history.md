@@ -102,3 +102,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T17:57:47.288939+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ALLOUSDT SHORT — EXPIRED
+- Trade ID: `ALLOUSDT-20261127-003016-1DF8B9`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T18:00:00.006668+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
