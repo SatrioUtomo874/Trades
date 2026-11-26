@@ -282,3 +282,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T10:50:55.851245+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## RLCUSDT SHORT — CANCELED
+- Trade ID: `RLCUSDT-20261126-174600-357A68`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:54:44.301040+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
