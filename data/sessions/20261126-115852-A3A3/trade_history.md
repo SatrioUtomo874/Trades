@@ -204,3 +204,33 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T10:04:57.529020+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SUNUSDT SHORT — EXPIRED
+- Trade ID: `SUNUSDT-20261126-170046-353ACE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:30:00.127257+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## KMNOUSDT SHORT — EXPIRED
+- Trade ID: `KMNOUSDT-20261126-170040-362BE9`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:30:00.437882+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HAEDALUSDT SHORT — EXPIRED
+- Trade ID: `HAEDALUSDT-20261126-170037-28CF01`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:30:00.744262+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BARDUSDT SHORT — EXPIRED
+- Trade ID: `BARDUSDT-20261126-170022-4A3B34`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:30:01.000170+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ZAMAUSDT SHORT — EXPIRED
+- Trade ID: `ZAMAUSDT-20261126-170051-8DC447`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:30:01.054507+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
