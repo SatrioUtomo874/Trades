@@ -348,3 +348,75 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T11:12:07.182533+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## YFIUSDT SHORT — EXPIRED
+- Trade ID: `YFIUSDT-20261126-174614-E4D7C0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:00.119355+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## EGLDUSDT SHORT — EXPIRED
+- Trade ID: `EGLDUSDT-20261126-174539-ED4466`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:00.428664+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AVAXUSDT SHORT — EXPIRED
+- Trade ID: `AVAXUSDT-20261126-174524-24BB28`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:00.731934+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## RVNUSDT SHORT — EXPIRED
+- Trade ID: `RVNUSDT-20261126-174604-5C6EE5`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:01.036260+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## GTCUSDT SHORT — EXPIRED
+- Trade ID: `GTCUSDT-20261126-174546-AFCD7E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:01.354316+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BEATUSDT SHORT — EXPIRED
+- Trade ID: `BEATUSDT-20261126-174526-EA4F27`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:01.451143+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## STRKUSDT SHORT — EXPIRED
+- Trade ID: `STRKUSDT-20261126-174608-2E9331`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:01.663595+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ESPUSDT SHORT — EXPIRED
+- Trade ID: `ESPUSDT-20261126-174542-4E3C25`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:01.758561+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HYPEUSDT SHORT — EXPIRED
+- Trade ID: `HYPEUSDT-20261126-174548-E46DA4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:01.858794+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## NILUSDT SHORT — EXPIRED
+- Trade ID: `NILUSDT-20261126-174555-00ED87`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:01.968219+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## OUSDT LONG — EXPIRED
+- Trade ID: `OUSDT-20261126-174556-51CBC0`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:02.064057+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## USELESSUSDT SHORT — EXPIRED
+- Trade ID: `USELESSUSDT-20261126-174612-1DF265`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:15:02.166351+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
