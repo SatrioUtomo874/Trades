@@ -336,3 +336,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T11:04:31.317044+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## 1000SATSUSDT SHORT — CANCELED
+- Trade ID: `1000SATSUSDT-20261126-174509-F46B5C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T11:06:35.187112+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
