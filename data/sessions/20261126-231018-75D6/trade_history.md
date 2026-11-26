@@ -36,3 +36,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T17:31:13.470293+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AVAUSDT SHORT — CANCELED
+- Trade ID: `AVAUSDT-20261127-003022-D3680C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T17:32:00.508398+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
