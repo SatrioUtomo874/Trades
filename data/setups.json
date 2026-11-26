@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T23:35:03.054061+00:00",
+  "updated_at": "2026-11-26T23:39:28.627351+00:00",
   "active_trades": [
     {
       "trade_id": "MONUSDT-20261126-234545-3B2D10",
@@ -197,12 +197,12 @@
       "pnl_usdt": null,
       "initial_risk": "0.1608094580760922",
       "realized_r": null,
-      "quantity": "5.71",
-      "margin_usdt": "1.60087800033",
+      "quantity": "0.21",
+      "margin_usdt": "0.05887642383",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "16",
-      "actual_notional": "16.0087800033",
+      "actual_notional": "0.5887642383",
       "real_enabled": true,
       "real_state": "REAL_FILLED",
       "position_side": "BOTH",
@@ -210,7 +210,7 @@
       "entry_client_order_id": "VTba75c420f645445d4a7dd6a3f2ca",
       "real_error": null,
       "real_submit_ambiguous": false,
-      "entry_executed_qty": "5.71",
+      "entry_executed_qty": "0.21",
       "entry_order_status": "FILLED",
       "entry_order_terminal": true,
       "pending_cancel_reason": null,
