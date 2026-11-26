@@ -276,3 +276,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T10:50:06.130629+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## BLUAIUSDT SHORT — CANCELED
+- Trade ID: `BLUAIUSDT-20261126-174530-989022`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:50:55.851245+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
