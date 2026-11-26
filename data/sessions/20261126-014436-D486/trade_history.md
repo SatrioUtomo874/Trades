@@ -96,3 +96,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T00:45:00.445595+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MANTRAUSDT LONG — CANCELED
+- Trade ID: `MANTRAUSDT-20261126-074526-A39839`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T00:46:30.326614+00:00 | Reason: SIZE_REJECTED
