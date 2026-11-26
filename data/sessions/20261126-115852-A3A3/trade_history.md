@@ -234,3 +234,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T10:30:01.054507+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BANANAUSDT SHORT — CANCELED
+- Trade ID: `BANANAUSDT-20261126-173033-D315B5`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:30:39.305565+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
