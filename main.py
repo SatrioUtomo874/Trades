@@ -929,7 +929,7 @@ class Trade:
             "trailing_replace_submit_ambiguous": bool(self.trailing_replace_submit_ambiguous),
             "trailing_conflict_warning_sent": bool(self.trailing_conflict_warning_sent),
             "exchange_algo_sync_complete": bool(self.exchange_algo_sync_complete),
-            "entry_reason": "H4 SuperTrend10/3 + EMA100 trend gate; M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
+            "entry_reason": "H4 SuperTrend10/3 + EMA100 trend gate; M15 close vs EMA100 gate (LONG close>EMA, SHORT close<EMA); M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
             ),
