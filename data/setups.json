@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T04:50:03.057987+00:00",
+  "updated_at": "2026-11-26T04:50:56.459571+00:00",
   "active_trades": [
     {
       "trade_id": "DEEPUSDT-20261126-083154-00D95B",
@@ -79,7 +79,7 @@
       "initial_risk": "0.00023805345556942",
       "realized_r": null,
       "quantity": "843",
-      "margin_usdt": "1.000641",
+      "margin_usdt": "0.998955",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "10",
@@ -198,7 +198,7 @@
       "initial_risk": "0.0090335617880266",
       "realized_r": null,
       "quantity": "16",
-      "margin_usdt": "0.542848",
+      "margin_usdt": "0.54666543",
       "leverage": 10,
       "min_margin_mode": false,
       "target_notional": "5.5",
