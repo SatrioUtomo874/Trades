@@ -192,3 +192,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T19:30:00.031467+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SPACEUSDT LONG — EXPIRED
+- Trade ID: `SPACEUSDT-20261127-023050-A3DF86`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T20:00:00.125378+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
