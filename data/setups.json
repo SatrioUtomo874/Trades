@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T08:29:40.395397+00:00",
+  "updated_at": "2026-11-26T08:30:01.556762+00:00",
   "active_trades": [
     {
       "trade_id": "DEEPUSDT-20261126-115904-0C2840",
@@ -226,7 +226,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795680900000,
+      "trailing_last_close_ms": 1795681800000,
       "trailing_last_st": "0.007417443480503919",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
@@ -345,7 +345,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795680900000,
+      "trailing_last_close_ms": 1795681800000,
       "trailing_last_st": "26.36530269511729",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
@@ -464,9 +464,9 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795680900000,
+      "trailing_last_close_ms": 1795681800000,
       "trailing_last_st": "0.08088954441782421",
-      "trailing_last_reason": "UPDATED_REAL_FROM_LATEST_M15_ST",
+      "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "trailing_replace_phase": null,
