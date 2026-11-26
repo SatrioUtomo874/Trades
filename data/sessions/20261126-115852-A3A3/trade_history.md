@@ -114,3 +114,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T08:45:00.866502+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BLUAIUSDT SHORT — CANCELED
+- Trade ID: `BLUAIUSDT-20261126-154528-98A89E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T08:48:53.438166+00:00 | Reason: SIZE_REJECTED
