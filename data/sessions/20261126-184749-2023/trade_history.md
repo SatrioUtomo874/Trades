@@ -132,3 +132,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T13:30:00.124871+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PENDLEUSDT SHORT — EXPIRED
+- Trade ID: `PENDLEUSDT-20261126-201552-8A5BF2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T13:45:00.143684+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
