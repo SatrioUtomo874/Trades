@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T12:18:53.137181+00:00",
+  "updated_at": "2026-11-26T12:18:56.114776+00:00",
   "active_trades": [
     {
       "trade_id": "DOSUSDT-20261126-184806-ED930F",
@@ -585,7 +585,7 @@
       "entry_touch_missed": false,
       "trailing_last_close_ms": 1795695300000,
       "trailing_last_st": "0.0766675524516998",
-      "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
+      "trailing_last_reason": "EXCHANGE_SL_TP_ADOPTED_FROM_OPEN_ALGO_ORDERS",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "trailing_replace_phase": null,
