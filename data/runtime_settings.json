@@ -8,10 +8,10 @@
   "h1_enabled": false,
   "supertrend_atr_length": 14,
   "supertrend_factor": 2.5,
-  "rr_target": "2",
-  "rr_min": "2",
-  "rr_max": "2",
-  "max_active_trades": 100,
+  "rr_target": "1",
+  "rr_min": "1",
+  "rr_max": "1",
+  "max_active_trades": 8,
   "margin_usdt": "0.55",
   "leverage": 10,
   "min_margin_enabled": false,
@@ -21,5 +21,5 @@
   "scan_resume_cursor": 0,
   "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-26T11:48:26.950885+00:00"
+  "updated_at": "2026-11-26T11:48:28.628646+00:00"
 }
