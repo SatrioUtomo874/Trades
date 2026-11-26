@@ -96,3 +96,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T17:54:59.738803+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CELRUSDT SHORT — CANCELED
+- Trade ID: `CELRUSDT-20261127-003027-118BD0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T17:57:47.288939+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
