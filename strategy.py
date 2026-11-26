@@ -3,7 +3,7 @@
 
 H4 trend filter: strict three-price order: LONG EMA100 < ST10x3 < Close;
 SHORT Close < ST10x3 < EMA100. Any other order is consolidation.
-M15 entry gate: LONG needs last closed M15 close > EMA100, SHORT needs close < EMA100.
+M15 entry gate: LONG needs last closed close and entry price (bubble close) > EMA100; SHORT needs both < EMA100.
 M15 signal: Pine-compatible Volumatic LEN9 visual marker (plotshape offset=-1).
 Entry target: close of the candle carrying that visual marker; a live retest
 triggers MARKET execution within a four-candle M15 lifetime.
@@ -2332,11 +2332,15 @@ def detect_new_strategy_signal(
     m15_ema = calculate_ema_tv(closed_c, ENTRY_EMA_LENGTH)
     m15_ema_value = float(m15_ema[-1]) if len(m15_ema) else float("nan")
     m15_close_value = float(closed_c[-1])
-    if len(closed_c) < ENTRY_EMA_LENGTH or not all(np.isfinite(x) and x > 0 for x in (m15_ema_value, m15_close_value)):
-        return None
-    if (direction == "LONG" and not m15_close_value > m15_ema_value) or (
-        direction == "SHORT" and not m15_close_value < m15_ema_value
+    m15_entry_value = float(closed_c[bubble_index])  # limit entry = close candle bubble
+    if len(closed_c) < ENTRY_EMA_LENGTH or not all(
+        np.isfinite(x) and x > 0 for x in (m15_ema_value, m15_close_value, m15_entry_value)
     ):
+        return None
+    if direction == "LONG":
+        if not (m15_close_value > m15_ema_value and m15_entry_value > m15_ema_value):
+            return None
+    elif not (m15_close_value < m15_ema_value and m15_entry_value < m15_ema_value):
         return None
 
     # Altcoin H4 reference must itself have closed by the time the confirming
