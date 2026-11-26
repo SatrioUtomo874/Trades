@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """VOLUMATIC TREND v4.0.0.
 
-H4 trend filter: strict three-price order: LONG EMA100 < ST10x3.0 < Close;
-SHORT Close < ST10x3.0 < EMA100. Any other order is consolidation.
+H4 trend filter: strict three-price order: LONG EMA100 < ST10x3 < Close;
+SHORT Close < ST10x3 < EMA100. Any other order is consolidation.
 M15 signal: Pine-compatible Volumatic LEN9 visual marker (plotshape offset=-1).
 Entry target: close of the candle carrying that visual marker; a live retest
 triggers MARKET execution within a four-candle M15 lifetime.
