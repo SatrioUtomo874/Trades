@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T20:55:00.420619+00:00",
+  "updated_at": "2026-11-26T21:00:03.123827+00:00",
   "active_trades": [
     {
       "trade_id": "MONUSDT-20261126-234545-3B2D10",
@@ -107,8 +107,8 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795725900000,
-      "trailing_last_st": "0.010623888920573735",
+      "trailing_last_close_ms": 1795726800000,
+      "trailing_last_st": "0.010621202244351492",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
@@ -345,9 +345,9 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795725900000,
-      "trailing_last_st": null,
-      "trailing_last_reason": null,
+      "trailing_last_close_ms": 1795726800000,
+      "trailing_last_st": "2.6428297719239078",
+      "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
       "trailing_replace_phase": null,
