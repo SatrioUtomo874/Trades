@@ -186,3 +186,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T09:45:03.194531+00:00 | Reason: SIGNAL_TRACE_OPPOSITE_BUBBLE
+## XLMUSDT SHORT — EXPIRED
+- Trade ID: `XLMUSDT-20261126-163730-2D37EB`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:00:00.161536+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BILLUSDT SHORT — EXPIRED
+- Trade ID: `BILLUSDT-20261126-163117-1F42FA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:00:00.475272+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
