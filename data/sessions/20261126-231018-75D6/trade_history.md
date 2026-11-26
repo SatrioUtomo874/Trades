@@ -204,3 +204,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T20:30:00.044366+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## OUSDT LONG — EXPIRED
+- Trade ID: `OUSDT-20261127-034654-DB3958`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T21:15:00.133748+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
