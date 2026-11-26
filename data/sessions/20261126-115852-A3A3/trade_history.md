@@ -126,3 +126,21 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T09:00:00.127365+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BTRUSDT SHORT — EXPIRED
+- Trade ID: `BTRUSDT-20261126-154533-BE18EA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T09:15:00.898651+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## POWRUSDT SHORT — EXPIRED
+- Trade ID: `POWRUSDT-20261126-154559-09ED2D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T09:15:01.238278+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ZORAUSDT SHORT — EXPIRED
+- Trade ID: `ZORAUSDT-20261126-154610-355FC0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T09:15:01.284583+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
