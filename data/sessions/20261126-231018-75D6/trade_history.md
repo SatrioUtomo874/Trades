@@ -246,3 +246,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T22:01:37.905272+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ZESTUSDT SHORT — CANCELED
+- Trade ID: `ZESTUSDT-20261127-044601-9F86ED`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T22:02:38.836119+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
