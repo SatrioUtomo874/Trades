@@ -78,3 +78,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T17:45:00.751333+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BILLUSDT SHORT — CANCELED
+- Trade ID: `BILLUSDT-20261127-004533-9C7B33`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T17:49:37.706903+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
