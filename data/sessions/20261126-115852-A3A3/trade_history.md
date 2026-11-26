@@ -150,3 +150,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T09:22:31.134626+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MONUSDT SHORT — EXPIRED
+- Trade ID: `MONUSDT-20261126-160028-741D6F`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T09:30:01.008605+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
