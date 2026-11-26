@@ -192,3 +192,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T02:45:00.137427+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## OUSDT LONG — CANCELED
+- Trade ID: `OUSDT-20261126-103323-157556`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T03:34:30.467562+00:00 | Reason: SIZE_REJECTED
