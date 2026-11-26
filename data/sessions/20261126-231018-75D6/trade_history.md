@@ -288,3 +288,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T22:45:00.149015+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SPORTFUNUSDT SHORT — CANCELED
+- Trade ID: `SPORTFUNUSDT-20261127-054816-9EE394`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T22:48:18.075003+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
