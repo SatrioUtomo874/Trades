@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-26T22:05:00.168930+00:00",
+  "updated_at": "2026-11-26T22:05:01.014011+00:00",
   "active_trades": [
     {
       "trade_id": "MONUSDT-20261126-234545-3B2D10",
