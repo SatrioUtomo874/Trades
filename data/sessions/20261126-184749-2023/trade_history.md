@@ -108,3 +108,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T13:16:26.454205+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ZKCUSDT SHORT — CANCELED
+- Trade ID: `ZKCUSDT-20261126-201608-534F29`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T13:20:34.290712+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
