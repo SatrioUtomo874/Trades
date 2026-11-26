@@ -270,3 +270,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T10:45:01.512354+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SSVUSDT LONG — CANCELED
+- Trade ID: `SSVUSDT-20261126-174607-BBB4DE`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:50:06.130629+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
