@@ -288,3 +288,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T10:54:44.301040+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## TAGUSDT SHORT — CANCELED
+- Trade ID: `TAGUSDT-20261126-174609-69BDDC`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T10:59:18.311274+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
