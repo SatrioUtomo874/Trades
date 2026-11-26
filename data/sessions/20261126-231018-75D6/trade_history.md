@@ -84,3 +84,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-26T17:49:37.706903+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ETHFIUSDT SHORT — CANCELED
+- Trade ID: `ETHFIUSDT-20261127-004544-F805F4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-26T17:50:05.441181+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
