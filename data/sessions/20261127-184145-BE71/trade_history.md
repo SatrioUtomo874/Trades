@@ -162,3 +162,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T17:50:13.216934+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## HMSTRUSDT SHORT — CANCELED
+- Trade ID: `HMSTRUSDT-20261128-003019-F6A2A3`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:50:46.364095+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
