@@ -60,3 +60,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T14:02:56.376958+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## METUSDT SHORT — EXPIRED
+- Trade ID: `METUSDT-20261127-204923-10F95E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T14:15:00.136676+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
