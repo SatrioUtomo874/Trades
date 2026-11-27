@@ -144,3 +144,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T15:45:00.137387+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ACEUSDT SHORT — CANCELED
+- Trade ID: `ACEUSDT-20261128-001511-1F5F19`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:18:03.304556+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
