@@ -390,3 +390,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T02:00:00.053005+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ARKMUSDT SHORT — CANCELED
+- Trade ID: `ARKMUSDT-20261127-090017-EE2CC0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T02:00:18.325515+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
