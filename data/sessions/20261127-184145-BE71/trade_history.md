@@ -24,3 +24,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T13:00:00.142635+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## VELVETUSDT LONG — CANCELED
+- Trade ID: `VELVETUSDT-20261127-201557-386776`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T13:40:00.208147+00:00 | Reason: FORCED_CLOSE_ALT_SPIKE
