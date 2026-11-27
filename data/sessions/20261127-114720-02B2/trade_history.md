@@ -102,3 +102,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T11:33:18.002461+00:00 | Reason: SIZE_REJECTED
+## OPGUSDT LONG — CANCELED
+- Trade ID: `OPGUSDT-20261127-183458-8022DC`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T11:37:14.546002+00:00 | Reason: SIZE_REJECTED
