@@ -280,8 +280,9 @@ class _FcPair:
         self.last_ratio: float | None = None
         self.need_calm = False
         self.idle_since: float | None = None
-        self.m5_ema: float | None = None
-        self.m5_last_t = 0
+        self.h1_fast: float | None = None
+        self.h1_slow: float | None = None
+        self.h1_last_t = 0
 
 
 _FC_NULL_LOCK = _NullAsyncLock()
@@ -931,7 +932,7 @@ class Trade:
             "trailing_replace_submit_ambiguous": bool(self.trailing_replace_submit_ambiguous),
             "trailing_conflict_warning_sent": bool(self.trailing_conflict_warning_sent),
             "exchange_algo_sync_complete": bool(self.exchange_algo_sync_complete),
-            "entry_reason": "H4 SuperTrend10/3 + EMA100 trend gate; M15 + M5 close vs EMA100 gate (LONG close>EMA, SHORT close<EMA); M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
+            "entry_reason": "H4 SuperTrend10/3 + EMA100 trend gate; M15 close vs EMA100 gate (LONG close>EMA, SHORT close<EMA); H1 alt EMA9/21 gate (LONG EMA9>EMA21, SHORT mirror); M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
             ),
@@ -7393,14 +7394,14 @@ class TradingEngine:
                             self._scan_resume_cursor = absolute_index + 1
                             continue
 
-                        m5_ok, m5_close, m5_ema = await self._m5_entry_gate(symbol, str(signal["direction"]).upper())
-                        if not m5_ok:
+                        h1_ok, h1_fast, h1_slow = await self._h1_entry_gate(symbol, str(signal["direction"]).upper())
+                        if not h1_ok:
                             stats["ema_blocked"] += 1
-                            log.info("[SCAN V4] %s %s ditolak EMA100 M5 | close=%s ema=%s", symbol, signal["direction"], m5_close, m5_ema)
+                            log.info("[SCAN V4] %s %s ditolak EMA9/21 H1 | ema9=%s ema21=%s", symbol, signal["direction"], h1_fast, h1_slow)
                             self._scan_resume_cursor = absolute_index + 1
                             continue
-                        signal["m5_entry_close"] = m5_close
-                        signal["m5_entry_ema100"] = m5_ema
+                        signal["h1_entry_ema9"] = h1_fast
+                        signal["h1_entry_ema21"] = h1_slow
                         bubble = str(signal["signal"]).upper()
                         direction = str(signal["direction"]).upper()
                         stats["blue" if bubble == "BLUE" else "red"] += 1
@@ -13631,11 +13632,11 @@ class TradingEngine:
         self._fc_flush_total = 0
         self._fc_last_event = 0.0
 
-    async def _m5_entry_gate(self, symbol: str, direction: str) -> tuple[bool, float, float]:
+    async def _h1_entry_gate(self, symbol: str, direction: str) -> tuple[bool, float, float]:
         now_ms = int(time.time() * 1000)
-        rows = await self.rest._get("/fapi/v1/klines", {"symbol": symbol, "interval": "5m", "limit": 300})
-        m5 = BinanceREST._pack_kline_rows(rows, 300_000, now_ms)
-        return volumatic.m5_ema_gate(direction, m5)
+        rows = await self.rest._get("/fapi/v1/klines", {"symbol": symbol, "interval": "1h", "limit": 150})
+        h1 = BinanceREST._pack_kline_rows(rows, 3_600_000, now_ms)
+        return volumatic.h1_ema_gate(direction, h1)
 
     async def _fc_bootstrap_pair(self, pair: str, st: _FcPair) -> None:
         now_ms = int(time.time() * 1000)
@@ -13650,12 +13651,14 @@ class TradingEngine:
         for v in valid[-(FC_ATR_BASE_CANDLES + 1):]:
             st.atr_hist.append(float(v))
         st.atr_closed = float(valid[-1])
-        rows5 = await self.rest._get("/fapi/v1/klines", {"symbol": pair, "interval": "5m", "limit": 300})
-        m5 = BinanceREST._pack_kline_rows(rows5, 300_000, int(time.time() * 1000))
-        if len(m5) < volumatic.M5_EMA_LENGTH + 20:
-            raise RuntimeError("candle M5 belum cukup")
-        st.m5_ema = float(volumatic.calculate_ema_tv(np.asarray(m5["c"], dtype=np.float64), volumatic.M5_EMA_LENGTH)[-1])
-        st.m5_last_t = int(m5["t"][-1])
+        rows1h = await self.rest._get("/fapi/v1/klines", {"symbol": pair, "interval": "1h", "limit": 150})
+        h1 = BinanceREST._pack_kline_rows(rows1h, 3_600_000, int(time.time() * 1000))
+        if len(h1) < volumatic.H1_EMA_SLOW + 30:
+            raise RuntimeError("candle H1 belum cukup")
+        h1c = np.asarray(h1["c"], dtype=np.float64)
+        st.h1_fast = float(volumatic.calculate_ema_tv(h1c, volumatic.H1_EMA_FAST)[-1])
+        st.h1_slow = float(volumatic.calculate_ema_tv(h1c, volumatic.H1_EMA_SLOW)[-1])
+        st.h1_last_t = int(h1["t"][-1])
 
     @staticmethod
     def _fc_atr_ratio(st: _FcPair, high: float, low: float) -> float | None:
@@ -13684,6 +13687,8 @@ class TradingEngine:
             self._fc_on_m1(pair, st, t, o, h, l, c, closed)
         elif interval == "5m":
             await self._fc_on_m5(pair, st, t, o, c, closed)
+        elif interval == "1h":
+            self._fc_on_h1(pair, st, t, c, closed)
 
     def _fc_on_m1(self, pair: str, st: _FcPair, t: int, o: float, h: float, l: float, c: float, closed: bool) -> None:
         if not st.m1 or st.atr_closed is None:
@@ -13724,25 +13729,6 @@ class TradingEngine:
         if not closed:
             st.m5_open = (t, open_)
             return
-        if st.m5_ema is not None and t > st.m5_last_t:
-            if t - st.m5_last_t > 300_000:
-                self._fc_pairs.pop(pair, None)  # gap: bootstrap ulang
-                return
-            st.m5_ema += (close - st.m5_ema) * (2.0 / (volumatic.M5_EMA_LENGTH + 1))
-            st.m5_last_t = t
-            if self.fc_enabled:
-                ema_victims = [
-                    x for x in self.active_trades.values() if x.pair == pair and (
-                        (x.direction == "LONG" and close < st.m5_ema) or (x.direction == "SHORT" and close > st.m5_ema)
-                    )
-                ]
-                if ema_victims:
-                    st.alert = False
-                    self._fc_launch(
-                        "FORCED_CLOSE_ALT_EMA", ema_victims,
-                        f"{pair} close M5 {close} menembus EMA100 M5 {st.m5_ema:.8g}",
-                    )
-                    return
         if not st.alert or t < st.m5_t or st.ref <= 0:
             return
         st.checks -= 1
@@ -13768,6 +13754,29 @@ class TradingEngine:
         if st.checks <= 0 or not self.active_trades:
             st.alert = False
 
+    def _fc_on_h1(self, pair: str, st: _FcPair, t: int, close: float, closed: bool) -> None:
+        if not closed or st.h1_fast is None or st.h1_slow is None or t <= st.h1_last_t:
+            return
+        if t - st.h1_last_t > 3_600_000:
+            self._fc_pairs.pop(pair, None)  # gap: bootstrap ulang
+            return
+        st.h1_fast += (close - st.h1_fast) * (2.0 / (volumatic.H1_EMA_FAST + 1))
+        st.h1_slow += (close - st.h1_slow) * (2.0 / (volumatic.H1_EMA_SLOW + 1))
+        st.h1_last_t = t
+        if not self.fc_enabled:
+            return
+        victims = [
+            x for x in self.active_trades.values() if x.pair == pair and (
+                (x.direction == "LONG" and st.h1_fast < st.h1_slow) or (x.direction == "SHORT" and st.h1_fast > st.h1_slow)
+            )
+        ]
+        if victims:
+            st.alert = False
+            self._fc_launch(
+                "FORCED_CLOSE_ALT_EMA", victims,
+                f"{pair} EMA9/21 H1 berbalik melawan posisi (EMA9 {st.h1_fast:.8g} vs EMA21 {st.h1_slow:.8g})",
+            )
+
     def _fc_launch(self, reason: str, victims: list[Trade], detail: str) -> None:
         task = asyncio.create_task(
             self._forced_close_all(reason, trades=victims, detail=detail),
@@ -13786,7 +13795,7 @@ class TradingEngine:
     async def _fc_sync_loop(self, ws: Any) -> None:
         def msg(method: str, pair: str) -> str:
             p = pair.lower()
-            return json.dumps({"method": method, "params": [f"{p}@kline_1m", f"{p}@kline_5m"], "id": int(time.time() * 1000) % 1_000_000_000})
+            return json.dumps({"method": method, "params": [f"{p}@kline_1m", f"{p}@kline_5m", f"{p}@kline_1h"], "id": int(time.time() * 1000) % 1_000_000_000})
 
         subscribed: set[str] = set()
         while self._running:
@@ -14037,7 +14046,7 @@ class TradingEngine:
             f"FORCED CLOSE: {'ON' if self.fc_enabled else 'OFF'} (per koin)\n"
             f"Waspada: ATR14 M1 ≥ {FC_ATR_MULTIPLIER}x rata-rata\n"
             f"Trigger: close M5 ≥ {FC_ADVERSE_MOVE_PCT}% melawan arah posisi\n"
-            f"Exit EMA: close M5 menembus EMA100 M5 melawan posisi (LONG close<EMA, SHORT close>EMA)\n"
+            f"Exit EMA: H1 alt, LONG saat EMA21 > EMA9, SHORT saat EMA9 > EMA21 (close H1)\n"
             f"Dipantau: {len(self._fc_pairs)} koin | Mode waspada: {', '.join(alerts) if alerts else '-'}\n"
             f"Forced close terjadi: {self._fc_flush_total}x"
         )
@@ -14414,6 +14423,30 @@ class TradingEngine:
                     return "REAL"
         return "PAPER"
 
+    def _real_wallet_balance(self) -> Decimal | None:
+        cached = self.real.cached_usdt_balance()
+        if not cached:
+            return None
+        try:
+            wallet = Decimal(str(cached.get("balance") or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        return wallet if wallet.is_finite() and wallet > 0 else None
+
+    async def _autostop_refresh_wallet(self) -> bool:
+        if self._autostop_source_name() != "REAL":
+            return False
+        try:
+            await self.real.get_futures_balance()
+        except Exception as exc:
+            log.warning("[AUTOSTOP] refresh wallet Binance gagal: %s", exc)
+            return False
+        wallet = self._real_wallet_balance()
+        if wallet is not None and self._real_equity_baseline is not None:
+            self._real_equity_baseline = wallet
+            self._realized_since_baseline = Decimal("0")
+        return wallet is not None
+
     def _autostop_equity(self) -> Decimal | None:
         """Return current account equity from cached data only; never calls REST.
 
@@ -14428,13 +14461,18 @@ class TradingEngine:
         source = self._autostop_source_name()
         equity: Decimal
         if source == "REAL":
-            if self._real_equity_baseline is None or not self._real_equity_baseline.is_finite() or self._real_equity_baseline <= 0:
-                return None
-            if not self._realized_since_baseline.is_finite():
-                return None
-            # Deliberately do not re-read walletBalance: Binance wallet balance
-            # already moves with realized PnL and would double count locally-added PnL.
-            equity = self._real_equity_baseline + self._realized_since_baseline
+            # Binance wallet balance (REST + ACCOUNT_UPDATE) already includes realized PnL,
+            # fees, funding and transfers; add only floating PnL below. The local ledger
+            # (baseline + realized) is a fallback when no wallet snapshot exists yet.
+            wallet = self._real_wallet_balance()
+            if wallet is not None:
+                equity = wallet
+            else:
+                if self._real_equity_baseline is None or not self._real_equity_baseline.is_finite() or self._real_equity_baseline <= 0:
+                    return None
+                if not self._realized_since_baseline.is_finite():
+                    return None
+                equity = self._real_equity_baseline + self._realized_since_baseline
             represented: set[tuple[str, str]] = set()
 
             for position in self.exchange_positions.values():
@@ -14542,6 +14580,7 @@ class TradingEngine:
             "╔══ ACCOUNT DRAWDOWN GUARD ══╗\n"
             f"STATE   : {state}\n"
             f"SOURCE  : {source}\n"
+            f"WALLET  : {fmt_num(self._real_wallet_balance(), 4) if self._real_wallet_balance() is not None else '—'} USDT (Binance)\n"
             f"EQUITY  : {fmt_num(self._equity_last, 4) if self._equity_last is not None else '—'} USDT\n"
             f"PEAK    : {fmt_num(self._equity_peak, 4) if self._equity_peak is not None else '—'} USDT\n"
             f"FLOOR   : {fmt_num(floor, 4) if floor is not None else '—'} USDT\n"
@@ -14557,6 +14596,14 @@ class TradingEngine:
         if not force and now_mono - self._autostop_last_check < AUTOSTOP_CHECK_SECONDS:
             return
         self._autostop_last_check = now_mono
+        balance_at = getattr(self.real, "last_balance_at", None)
+        if (
+            now_mono >= getattr(self, "_autostop_balance_next", 0.0)
+            and (balance_at is None or now_mono - balance_at > 300.0)
+            and self._autostop_source_name() == "REAL"
+        ):
+            self._autostop_balance_next = now_mono + 60.0
+            await self._autostop_refresh_wallet()
         equity = self._autostop_equity()
         if equity is None or not equity.is_finite() or equity <= 0:
             self._autostop_data_hold = True
@@ -14668,6 +14715,8 @@ class TradingEngine:
         await self._load_real_guard_checkpoint()
         parts = text.split()
         if len(parts) == 1:
+            if await self._autostop_refresh_wallet():
+                await self._autostop_check(force=True)
             await self.reply(self._autostop_status_text())
             return
         if len(parts) != 2:
@@ -14691,6 +14740,7 @@ class TradingEngine:
             return
 
         if arg == "reset":
+            await self._autostop_refresh_wallet()
             equity = self._autostop_equity()
             self._equity_peak = equity if equity is not None and equity > 0 else None
             self._equity_last = equity if equity is not None and equity > 0 else None
@@ -14719,6 +14769,7 @@ class TradingEngine:
         was_off = self.autostop_percent is None
         self.autostop_percent = value
         if was_off or self._autostop_triggered or self._equity_peak is None:
+            await self._autostop_refresh_wallet()
             equity = self._autostop_equity()
             self._equity_peak = equity if equity is not None and equity > 0 else None
             self._equity_last = equity if equity is not None and equity > 0 else None
@@ -15259,7 +15310,7 @@ class TradingEngine:
             "/open - pulihkan snapshot secara manual\n"
             "/del PAIR|all - batalkan pending trace/order\n"
             "/close PAIR|all - tutup posisi atau batalkan pending\n"
-            "/forced [on|off] - Forced Close per koin (ATR M1 ≥2.5x → waspada → close M5 ≥0.8% melawan posisi; atau close M5 tembus EMA100 M5)\n"
+            "/forced [on|off] - Forced Close per koin (ATR M1 ≥2.5x → waspada → close M5 ≥0.8% melawan posisi; atau EMA9/21 H1 berbalik)\n"
             "/remove TRADE_ID|PAIR - hapus record statistik (audit tetap)\n"
             "/real on|off - aktif/nonaktifkan entry baru REAL\n"
             "/autostop [persen|off|reset] - hentikan scanner saat equity turun dari peak\n"
