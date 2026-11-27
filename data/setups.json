@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-27T11:10:00.667053+00:00",
+  "updated_at": "2026-11-27T11:15:00.507953+00:00",
   "active_trades": [
     {
       "trade_id": "ZORAUSDT-20261127-174604-BA595F",
@@ -107,8 +107,8 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795777200000,
-      "trailing_last_st": "0.004320307762622677",
+      "trailing_last_close_ms": 1795778100000,
+      "trailing_last_st": "0.004320046897872572",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
       "trailing_pending_algo_trigger": null,
