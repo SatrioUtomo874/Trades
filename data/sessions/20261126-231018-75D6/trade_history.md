@@ -372,3 +372,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T01:47:07.144841+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## RIFUSDT SHORT — CANCELED
+- Trade ID: `RIFUSDT-20261127-084607-C21E64`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T01:48:03.473656+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
