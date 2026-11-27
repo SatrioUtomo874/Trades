@@ -41,7 +41,8 @@ SUPERTREND_FACTOR = 2.5
 H4_SUPERTREND_ATR_LENGTH = 10
 H4_SUPERTREND_FACTOR = 3.0
 H4_EMA_LENGTH = 100
-M5_EMA_LENGTH = 100  # M5 entry gate + forced close: LONG close > EMA100 M5, SHORT close < EMA100 M5
+H1_EMA_FAST = 9  # H1 alt entry gate + forced close: LONG EMA9 > EMA21, SHORT EMA9 < EMA21
+H1_EMA_SLOW = 21
 ENTRY_EMA_LENGTH = 100  # M15 entry gate: LONG close > EMA100, SHORT close < EMA100
 ENTRY_RR = 2.0
 SIGNAL_TRACE_CANDLES = 4
@@ -2271,20 +2272,19 @@ def _h4_trend_snapshot(
     }
 
 
-def m5_ema_gate(direction: str, m5_closed: Any) -> tuple[bool, float, float]:
-    """Last closed M5 close must sit on the signal side of EMA100 M5. Returns (ok, close, ema)."""
+def h1_ema_gate(direction: str, h1_closed: Any) -> tuple[bool, float, float]:
+    """Closed H1 EMA9 vs EMA21 of the alt: LONG needs fast > slow, SHORT fast < slow. Returns (ok, fast, slow)."""
     try:
-        close = np.asarray(_extract_columns(m5_closed)[4], dtype=np.float64)
+        close = np.asarray(_extract_columns(h1_closed)[4], dtype=np.float64)
     except Exception:
         return False, float("nan"), float("nan")
-    if len(close) < M5_EMA_LENGTH:
+    if len(close) < H1_EMA_SLOW + 30:
         return False, float("nan"), float("nan")
-    ema = float(calculate_ema_tv(close, M5_EMA_LENGTH)[-1])
-    last = float(close[-1])
-    if not (np.isfinite(ema) and np.isfinite(last) and ema > 0 and last > 0):
-        return False, last, ema
-    side = str(direction).upper()
-    return (last > ema if side == "LONG" else last < ema), last, ema
+    fast = float(calculate_ema_tv(close, H1_EMA_FAST)[-1])
+    slow = float(calculate_ema_tv(close, H1_EMA_SLOW)[-1])
+    if not (np.isfinite(fast) and np.isfinite(slow) and fast > 0 and slow > 0):
+        return False, fast, slow
+    return (fast > slow if str(direction).upper() == "LONG" else fast < slow), fast, slow
 
 
 def detect_new_strategy_signal(
