@@ -402,3 +402,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T02:01:07.778519+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SCRUSDT SHORT — CANCELED
+- Trade ID: `SCRUSDT-20261127-090032-325AEB`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T02:01:50.695363+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## BASUSDT SHORT — CANCELED
+- Trade ID: `BASUSDT-20261127-084528-A40709`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T02:01:51.571025+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
