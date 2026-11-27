@@ -150,3 +150,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T17:18:03.304556+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## USUSDT SHORT — CANCELED
+- Trade ID: `USUSDT-20261128-004603-19DC08`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:50:10.668377+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ARKMUSDT SHORT — CANCELED
+- Trade ID: `ARKMUSDT-20261128-004517-E10A7E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:50:13.216934+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
