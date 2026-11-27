@@ -72,3 +72,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T14:24:31.152773+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## TWTUSDT SHORT — EXPIRED
+- Trade ID: `TWTUSDT-20261127-210037-565923`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T14:30:00.142792+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
