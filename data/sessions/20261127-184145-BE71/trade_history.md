@@ -108,3 +108,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T14:45:00.639565+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HUSDT SHORT — EXPIRED
+- Trade ID: `HUSDT-20261127-213020-29D818`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T15:00:00.138574+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ZESTUSDT SHORT — EXPIRED
+- Trade ID: `ZESTUSDT-20261127-213031-39A83A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T15:00:00.432308+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
