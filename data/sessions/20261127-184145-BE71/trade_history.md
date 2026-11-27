@@ -126,3 +126,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T15:15:00.119290+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SUNUSDT SHORT — EXPIRED
+- Trade ID: `SUNUSDT-20261127-220024-3C3565`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T15:30:00.123567+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BREVUSDT SHORT — EXPIRED
+- Trade ID: `BREVUSDT-20261127-220011-6F1FDE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T15:30:00.421227+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
