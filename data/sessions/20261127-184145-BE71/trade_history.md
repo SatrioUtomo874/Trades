@@ -228,3 +228,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T17:56:37.452229+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AIOUSDT SHORT — CANCELED
+- Trade ID: `AIOUSDT-20261128-004512-4D37CA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:57:00.868502+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
