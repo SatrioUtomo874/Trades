@@ -280,6 +280,8 @@ class _FcPair:
         self.last_ratio: float | None = None
         self.need_calm = False
         self.idle_since: float | None = None
+        self.m5_ema: float | None = None
+        self.m5_last_t = 0
 
 
 _FC_NULL_LOCK = _NullAsyncLock()
@@ -929,7 +931,7 @@ class Trade:
             "trailing_replace_submit_ambiguous": bool(self.trailing_replace_submit_ambiguous),
             "trailing_conflict_warning_sent": bool(self.trailing_conflict_warning_sent),
             "exchange_algo_sync_complete": bool(self.exchange_algo_sync_complete),
-            "entry_reason": "H4 SuperTrend10/3 + EMA100 trend gate; M15 close vs EMA100 gate (LONG close>EMA, SHORT close<EMA); M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
+            "entry_reason": "H4 SuperTrend10/3 + EMA100 trend gate; M15 + M5 close vs EMA100 gate (LONG close>EMA, SHORT close<EMA); M15 Volumatic LEN9 visual marker close retest; initial ST14/2.5 SL; configured RR TP; M15 close trailing SL",
             "price_exp_reason": (
                 "Unfilled local entry watch expires 1 hour after the M15 bubble candle formed; an opposite bubble cancels the trace."
             ),
@@ -7391,6 +7393,14 @@ class TradingEngine:
                             self._scan_resume_cursor = absolute_index + 1
                             continue
 
+                        m5_ok, m5_close, m5_ema = await self._m5_entry_gate(symbol, str(signal["direction"]).upper())
+                        if not m5_ok:
+                            stats["ema_blocked"] += 1
+                            log.info("[SCAN V4] %s %s ditolak EMA100 M5 | close=%s ema=%s", symbol, signal["direction"], m5_close, m5_ema)
+                            self._scan_resume_cursor = absolute_index + 1
+                            continue
+                        signal["m5_entry_close"] = m5_close
+                        signal["m5_entry_ema100"] = m5_ema
                         bubble = str(signal["signal"]).upper()
                         direction = str(signal["direction"]).upper()
                         stats["blue" if bubble == "BLUE" else "red"] += 1
@@ -13621,6 +13631,12 @@ class TradingEngine:
         self._fc_flush_total = 0
         self._fc_last_event = 0.0
 
+    async def _m5_entry_gate(self, symbol: str, direction: str) -> tuple[bool, float, float]:
+        now_ms = int(time.time() * 1000)
+        rows = await self.rest._get("/fapi/v1/klines", {"symbol": symbol, "interval": "5m", "limit": 300})
+        m5 = BinanceREST._pack_kline_rows(rows, 300_000, now_ms)
+        return volumatic.m5_ema_gate(direction, m5)
+
     async def _fc_bootstrap_pair(self, pair: str, st: _FcPair) -> None:
         now_ms = int(time.time() * 1000)
         rows = await self.rest._get("/fapi/v1/klines", {"symbol": pair, "interval": "1m", "limit": 120})
@@ -13634,6 +13650,12 @@ class TradingEngine:
         for v in valid[-(FC_ATR_BASE_CANDLES + 1):]:
             st.atr_hist.append(float(v))
         st.atr_closed = float(valid[-1])
+        rows5 = await self.rest._get("/fapi/v1/klines", {"symbol": pair, "interval": "5m", "limit": 300})
+        m5 = BinanceREST._pack_kline_rows(rows5, 300_000, int(time.time() * 1000))
+        if len(m5) < volumatic.M5_EMA_LENGTH + 20:
+            raise RuntimeError("candle M5 belum cukup")
+        st.m5_ema = float(volumatic.calculate_ema_tv(np.asarray(m5["c"], dtype=np.float64), volumatic.M5_EMA_LENGTH)[-1])
+        st.m5_last_t = int(m5["t"][-1])
 
     @staticmethod
     def _fc_atr_ratio(st: _FcPair, high: float, low: float) -> float | None:
@@ -13702,6 +13724,25 @@ class TradingEngine:
         if not closed:
             st.m5_open = (t, open_)
             return
+        if st.m5_ema is not None and t > st.m5_last_t:
+            if t - st.m5_last_t > 300_000:
+                self._fc_pairs.pop(pair, None)  # gap: bootstrap ulang
+                return
+            st.m5_ema += (close - st.m5_ema) * (2.0 / (volumatic.M5_EMA_LENGTH + 1))
+            st.m5_last_t = t
+            if self.fc_enabled:
+                ema_victims = [
+                    x for x in self.active_trades.values() if x.pair == pair and (
+                        (x.direction == "LONG" and close < st.m5_ema) or (x.direction == "SHORT" and close > st.m5_ema)
+                    )
+                ]
+                if ema_victims:
+                    st.alert = False
+                    self._fc_launch(
+                        "FORCED_CLOSE_ALT_EMA", ema_victims,
+                        f"{pair} close M5 {close} menembus EMA100 M5 {st.m5_ema:.8g}",
+                    )
+                    return
         if not st.alert or t < st.m5_t or st.ref <= 0:
             return
         st.checks -= 1
@@ -13719,18 +13760,21 @@ class TradingEngine:
             st.alert = False
             st.need_calm = True
             move = down if victims[0].direction == "LONG" else up
-            task = asyncio.create_task(
-                self._forced_close_all(
-                    "FORCED_CLOSE_ALT_SPIKE", trades=victims,
-                    detail=f"{pair} {move:.2f}% melawan posisi (ATR M1 {st.peak_ratio:.2f}x)",
-                ),
-                name=f"forced-close-{pair}",
+            self._fc_launch(
+                "FORCED_CLOSE_ALT_SPIKE", victims,
+                f"{pair} {move:.2f}% melawan posisi (ATR M1 {st.peak_ratio:.2f}x)",
             )
-            self._entry_tasks.add(task)
-            task.add_done_callback(self._entry_tasks.discard)
             return
         if st.checks <= 0 or not self.active_trades:
             st.alert = False
+
+    def _fc_launch(self, reason: str, victims: list[Trade], detail: str) -> None:
+        task = asyncio.create_task(
+            self._forced_close_all(reason, trades=victims, detail=detail),
+            name=f"forced-close-{victims[0].pair}",
+        )
+        self._entry_tasks.add(task)
+        task.add_done_callback(self._entry_tasks.discard)
 
     def _fc_desired_pairs(self) -> list[str]:
         if not self.fc_enabled:
@@ -13955,7 +13999,7 @@ class TradingEngine:
         remaining = [t.pair for t in self.active_trades.values() if t.trade_id in ids]
         if remaining and not summary["failed"]:
             summary["failed"].append("masih aktif: " + ", ".join(remaining[:10]))
-        if reason == "FORCED_CLOSE_ALT_SPIKE":
+        if reason.startswith("FORCED_CLOSE_ALT"):
             self._fc_last_flush = now_utc()
             self._fc_flush_total += 1
         await self._record_event(
@@ -13993,6 +14037,7 @@ class TradingEngine:
             f"FORCED CLOSE: {'ON' if self.fc_enabled else 'OFF'} (per koin)\n"
             f"Waspada: ATR14 M1 ≥ {FC_ATR_MULTIPLIER}x rata-rata\n"
             f"Trigger: close M5 ≥ {FC_ADVERSE_MOVE_PCT}% melawan arah posisi\n"
+            f"Exit EMA: close M5 menembus EMA100 M5 melawan posisi (LONG close<EMA, SHORT close>EMA)\n"
             f"Dipantau: {len(self._fc_pairs)} koin | Mode waspada: {', '.join(alerts) if alerts else '-'}\n"
             f"Forced close terjadi: {self._fc_flush_total}x"
         )
@@ -15214,7 +15259,7 @@ class TradingEngine:
             "/open - pulihkan snapshot secara manual\n"
             "/del PAIR|all - batalkan pending trace/order\n"
             "/close PAIR|all - tutup posisi atau batalkan pending\n"
-            "/forced [on|off] - Forced Close per koin (ATR M1 ≥2.5x → waspada → close M5 ≥0.8% melawan posisi)\n"
+            "/forced [on|off] - Forced Close per koin (ATR M1 ≥2.5x → waspada → close M5 ≥0.8% melawan posisi; atau close M5 tembus EMA100 M5)\n"
             "/remove TRADE_ID|PAIR - hapus record statistik (audit tetap)\n"
             "/real on|off - aktif/nonaktifkan entry baru REAL\n"
             "/autostop [persen|off|reset] - hentikan scanner saat equity turun dari peak\n"
