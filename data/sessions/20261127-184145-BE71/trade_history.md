@@ -12,3 +12,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T12:45:00.135351+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SENTUSDT LONG — CANCELED
+- Trade ID: `SENTUSDT-20261127-194540-68110C`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T12:52:56.808134+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
