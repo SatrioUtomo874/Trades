@@ -54,3 +54,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T13:48:12.596905+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## ALLOUSDT SHORT — CANCELED
+- Trade ID: `ALLOUSDT-20261127-210014-DD1316`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T14:02:56.376958+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
