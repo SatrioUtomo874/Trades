@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-27T13:55:03.056176+00:00",
+  "updated_at": "2026-11-27T14:00:01.738817+00:00",
   "active_trades": [
     {
       "trade_id": "USUSDT-20261127-194547-D58038",
@@ -107,7 +107,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795787100000,
+      "trailing_last_close_ms": 1795788000000,
       "trailing_last_st": "0.0032330373251735806",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
