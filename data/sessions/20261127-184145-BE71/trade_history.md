@@ -168,3 +168,21 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T17:50:46.364095+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SNXUSDT SHORT — CANCELED
+- Trade ID: `SNXUSDT-20261128-004557-75AE47`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:52:22.580001+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## SANTOSUSDT SHORT — CANCELED
+- Trade ID: `SANTOSUSDT-20261128-004553-7E700F`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:52:25.337859+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## CELRUSDT SHORT — CANCELED
+- Trade ID: `CELRUSDT-20261128-004527-8F8B68`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:52:33.355094+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
