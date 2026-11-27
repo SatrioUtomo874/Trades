@@ -66,3 +66,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T14:15:00.136676+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## GMXUSDT LONG — CANCELED
+- Trade ID: `GMXUSDT-20261127-211534-D24E27`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T14:24:31.152773+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
