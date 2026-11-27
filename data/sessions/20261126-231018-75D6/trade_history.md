@@ -366,3 +366,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T01:46:39.162993+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## DIAUSDT SHORT — CANCELED
+- Trade ID: `DIAUSDT-20261127-084542-C1887B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T01:47:07.144841+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
