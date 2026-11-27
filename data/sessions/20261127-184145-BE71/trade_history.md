@@ -30,3 +30,21 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T13:40:00.208147+00:00 | Reason: FORCED_CLOSE_ALT_SPIKE
+## BATUSDT SHORT — EXPIRED
+- Trade ID: `BATUSDT-20261127-201528-738A08`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T13:45:00.131220+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MANTAUSDT SHORT — EXPIRED
+- Trade ID: `MANTAUSDT-20261127-201541-63E45B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T13:45:00.171714+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## OUSDT LONG — EXPIRED
+- Trade ID: `OUSDT-20261127-201546-549E17`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T13:45:00.423460+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
