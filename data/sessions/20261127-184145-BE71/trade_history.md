@@ -186,3 +186,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T17:52:33.355094+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## DOLOUSDT SHORT — CANCELED
+- Trade ID: `DOLOUSDT-20261128-004535-112C55`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:52:48.331259+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
