@@ -18,3 +18,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T12:52:56.808134+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## VVVUSDT LONG — EXPIRED
+- Trade ID: `VVVUSDT-20261127-193027-C8828A`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T13:00:00.142635+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
