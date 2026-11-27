@@ -198,3 +198,27 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T17:53:39.172069+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## DOODUSDT SHORT — CANCELED
+- Trade ID: `DOODUSDT-20261128-004538-9528D0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:54:00.374182+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## BANANAUSDT SHORT — CANCELED
+- Trade ID: `BANANAUSDT-20261128-004521-03BDF1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:54:07.412970+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## JASMYUSDT SHORT — CANCELED
+- Trade ID: `JASMYUSDT-20261128-004545-FF8248`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:54:08.705865+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## QNTUSDT SHORT — CANCELED
+- Trade ID: `QNTUSDT-20261128-003029-05B97D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:54:12.119378+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
