@@ -41,6 +41,7 @@ SUPERTREND_FACTOR = 2.5
 H4_SUPERTREND_ATR_LENGTH = 10
 H4_SUPERTREND_FACTOR = 3.0
 H4_EMA_LENGTH = 100
+M5_EMA_LENGTH = 100  # M5 entry gate + forced close: LONG close > EMA100 M5, SHORT close < EMA100 M5
 ENTRY_EMA_LENGTH = 100  # M15 entry gate: LONG close > EMA100, SHORT close < EMA100
 ENTRY_RR = 2.0
 SIGNAL_TRACE_CANDLES = 4
@@ -2268,6 +2269,22 @@ def _h4_trend_snapshot(
         "supertrend": st_value,
         "ema100": ema_value,
     }
+
+
+def m5_ema_gate(direction: str, m5_closed: Any) -> tuple[bool, float, float]:
+    """Last closed M5 close must sit on the signal side of EMA100 M5. Returns (ok, close, ema)."""
+    try:
+        close = np.asarray(_extract_columns(m5_closed)[4], dtype=np.float64)
+    except Exception:
+        return False, float("nan"), float("nan")
+    if len(close) < M5_EMA_LENGTH:
+        return False, float("nan"), float("nan")
+    ema = float(calculate_ema_tv(close, M5_EMA_LENGTH)[-1])
+    last = float(close[-1])
+    if not (np.isfinite(ema) and np.isfinite(last) and ema > 0 and last > 0):
+        return False, last, ema
+    side = str(direction).upper()
+    return (last > ema if side == "LONG" else last < ema), last, ema
 
 
 def detect_new_strategy_signal(
