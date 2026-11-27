@@ -192,3 +192,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T17:52:48.331259+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## XNYUSDT SHORT — CANCELED
+- Trade ID: `XNYUSDT-20261128-004606-42CF74`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T17:53:39.172069+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
