@@ -96,3 +96,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T11:30:00.393017+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BATUSDT SHORT — CANCELED
+- Trade ID: `BATUSDT-20261127-181527-A093BD`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T11:33:18.002461+00:00 | Reason: SIZE_REJECTED
