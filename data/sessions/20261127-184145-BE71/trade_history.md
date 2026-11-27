@@ -120,3 +120,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T15:00:00.432308+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ACEUSDT SHORT — EXPIRED
+- Trade ID: `ACEUSDT-20261127-214507-DB7A88`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-27T15:15:00.119290+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
