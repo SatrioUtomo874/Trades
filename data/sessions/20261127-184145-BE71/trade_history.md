@@ -678,3 +678,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T05:45:00.546705+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AKEUSDT SHORT — EXPIRED
+- Trade ID: `AKEUSDT-20261128-130007-18DB28`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T06:30:00.018940+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
