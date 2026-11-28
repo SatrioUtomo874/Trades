@@ -324,3 +324,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T01:33:21.099290+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## PORTALUSDT LONG — CANCELED
+- Trade ID: `PORTALUSDT-20261128-090142-6D780D`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T02:05:28.319113+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
