@@ -294,3 +294,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T00:34:56.222151+00:00 | Reason: SIZE_REJECTED
+## UAIUSDT SHORT — CANCELED
+- Trade ID: `UAIUSDT-20261128-073056-C08AEC`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T00:43:11.393658+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
