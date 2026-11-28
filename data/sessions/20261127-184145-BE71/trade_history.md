@@ -894,3 +894,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T10:32:09.974985+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## HUSDT SHORT — EXPIRED
+- Trade ID: `HUSDT-20261128-171532-EF5F94`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:45:00.054967+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SPXUSDT SHORT — EXPIRED
+- Trade ID: `SPXUSDT-20261128-171543-B3382E`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:45:00.157143+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
