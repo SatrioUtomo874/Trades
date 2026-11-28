@@ -525,18 +525,18 @@
     "M15:ZKCUSDT": 1795854600000,
     "M15:ZKPUSDT": 1795854600000,
     "M15:ZKUSDT": 1795854600000,
-    "M15:ZORAUSDT": 1795853700000,
-    "M15:ZROUSDT": 1795853700000,
-    "M15:ZRXUSDT": 1795853700000,
-    "M15:\u5e01\u5b89\u4eba\u751fUSDT": 1795853700000,
-    "M15:\u725b\u6765USDT": 1795853700000,
-    "M15:\u9f99\u867eUSDT": 1795853700000,
+    "M15:ZORAUSDT": 1795854600000,
+    "M15:ZROUSDT": 1795854600000,
+    "M15:ZRXUSDT": 1795854600000,
+    "M15:\u5e01\u5b89\u4eba\u751fUSDT": 1795854600000,
+    "M15:\u725b\u6765USDT": 1795854600000,
+    "M15:\u9f99\u867eUSDT": 1795854600000,
     "M15:PONSUSDT": 1795854600000
   },
   "last_position_candles": {},
   "signal_retries": {},
-  "scan_resume_cursor": 512,
-  "scan_resume_boundary_ms": 1795855500000,
+  "scan_resume_cursor": 0,
+  "scan_resume_boundary_ms": 0,
   "scan_resume_timeframe": "M15",
-  "updated_at": "2026-11-28T08:49:18.391394+00:00"
+  "updated_at": "2026-11-28T08:49:23.732490+00:00"
 }
