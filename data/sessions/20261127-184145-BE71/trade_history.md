@@ -288,3 +288,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T00:15:00.123613+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## XMRUSDT SHORT — CANCELED
+- Trade ID: `XMRUSDT-20261128-073057-71CE2B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T00:34:56.222151+00:00 | Reason: SIZE_REJECTED
