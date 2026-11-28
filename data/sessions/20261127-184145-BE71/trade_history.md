@@ -684,3 +684,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T06:30:00.018940+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## PENDLEUSDT SHORT — EXPIRED
+- Trade ID: `PENDLEUSDT-20261128-144533-38D04C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T08:15:00.114399+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HMSTRUSDT SHORT — EXPIRED
+- Trade ID: `HMSTRUSDT-20261128-144530-7ABEF0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T08:15:00.443767+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
