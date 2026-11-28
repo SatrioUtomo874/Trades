@@ -708,3 +708,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T08:25:30.597024+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MUBARAKUSDT SHORT — CANCELED
+- Trade ID: `MUBARAKUSDT-20261128-151538-9A08F0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T08:32:41.797646+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
