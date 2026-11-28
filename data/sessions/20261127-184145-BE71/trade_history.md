@@ -702,3 +702,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T08:21:16.596903+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## FOGOUSDT SHORT — CANCELED
+- Trade ID: `FOGOUSDT-20261128-151532-9A563C`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T08:25:30.597024+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
