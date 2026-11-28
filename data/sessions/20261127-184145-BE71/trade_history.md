@@ -714,3 +714,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T08:32:41.797646+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## BEATUSDT SHORT — CANCELED
+- Trade ID: `BEATUSDT-20261128-151521-6458BE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T08:36:04.747818+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
