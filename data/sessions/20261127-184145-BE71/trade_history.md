@@ -834,3 +834,27 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T10:00:44.587094+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## AAVEUSDT SHORT — EXPIRED
+- Trade ID: `AAVEUSDT-20261128-164511-B183E1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:15:00.005687+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BANANAUSDT SHORT — EXPIRED
+- Trade ID: `BANANAUSDT-20261128-164524-0CDC94`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:15:00.137832+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## DIAUSDT SHORT — EXPIRED
+- Trade ID: `DIAUSDT-20261128-164530-0218B4`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:15:00.360765+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## MONUSDT SHORT — EXPIRED
+- Trade ID: `MONUSDT-20261128-164542-C0975F`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:15:00.440570+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
