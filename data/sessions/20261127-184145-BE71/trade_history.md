@@ -468,3 +468,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T03:40:10.392256+00:00 | Reason: BINANCE_MARKET_REJECTED
+## WLFIUSDT SHORT — EXPIRED
+- Trade ID: `WLFIUSDT-20261128-104552-FF9157`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T04:15:00.140420+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## OPGUSDT LONG — EXPIRED
+- Trade ID: `OPGUSDT-20261128-104540-214CB1`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T04:15:00.469107+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
