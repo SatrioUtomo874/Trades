@@ -336,3 +336,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T02:07:52.778396+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MEMEUSDT SHORT — CANCELED
+- Trade ID: `MEMEUSDT-20261128-091544-5D265D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T02:16:07.880595+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
