@@ -330,3 +330,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T02:05:28.319113+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## MONUSDT SHORT — CANCELED
+- Trade ID: `MONUSDT-20261128-084855-BDF69B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T02:07:52.778396+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
