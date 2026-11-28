@@ -270,3 +270,15 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-27T18:00:02.738398+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ARCUSDT SHORT — EXPIRED
+- Trade ID: `ARCUSDT-20261128-063859-0B29C6`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T00:00:00.141175+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## AIOUSDT SHORT — EXPIRED
+- Trade ID: `AIOUSDT-20261128-063826-000BCE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T00:00:00.444259+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
