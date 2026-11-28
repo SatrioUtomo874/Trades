@@ -858,3 +858,27 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T10:15:00.440570+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SYRUPUSDT SHORT — EXPIRED
+- Trade ID: `SYRUPUSDT-20261128-170033-E2D4CA`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:30:00.130829+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## WLFIUSDT SHORT — EXPIRED
+- Trade ID: `WLFIUSDT-20261128-170038-1ADC60`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:30:00.475722+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## STARUSDT SHORT — EXPIRED
+- Trade ID: `STARUSDT-20261128-170031-F59458`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:30:00.703935+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## TRIAUSDT SHORT — EXPIRED
+- Trade ID: `TRIAUSDT-20261128-170036-DD120A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:30:00.847219+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
