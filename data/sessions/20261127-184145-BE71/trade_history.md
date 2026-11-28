@@ -804,3 +804,27 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T09:45:41.009140+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## DEXEUSDT SHORT — EXPIRED
+- Trade ID: `DEXEUSDT-20261128-163035-A1AEDE`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:00:00.238758+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BIRBUSDT SHORT — EXPIRED
+- Trade ID: `BIRBUSDT-20261128-163028-40415A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:00:00.340926+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## GIGGLEUSDT SHORT — EXPIRED
+- Trade ID: `GIGGLEUSDT-20261128-163039-0463ED`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:00:00.591561+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## UAIUSDT SHORT — EXPIRED
+- Trade ID: `UAIUSDT-20261128-163050-175178`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:00:00.673106+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
