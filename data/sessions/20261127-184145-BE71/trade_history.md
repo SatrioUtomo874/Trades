@@ -312,3 +312,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T01:00:00.134172+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## EVAAUSDT SHORT — EXPIRED
+- Trade ID: `EVAAUSDT-20261128-080021-ABF975`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T01:30:00.048297+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
