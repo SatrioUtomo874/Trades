@@ -918,3 +918,27 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T11:12:18.254824+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## YFIUSDT SHORT — EXPIRED
+- Trade ID: `YFIUSDT-20261128-174858-FEB352`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T11:15:00.125369+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## BANANAS31USDT SHORT — EXPIRED
+- Trade ID: `BANANAS31USDT-20261128-174610-DD7323`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T11:15:00.456858+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SKRUSDT SHORT — EXPIRED
+- Trade ID: `SKRUSDT-20261128-174855-D36AA2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T11:15:00.753720+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ZESTUSDT SHORT — EXPIRED
+- Trade ID: `ZESTUSDT-20261128-174901-4A0B61`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T11:15:00.839093+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
