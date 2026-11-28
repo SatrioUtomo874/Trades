@@ -1,7 +1,7 @@
 {
   "strategy": "VOLUMATIC_TREND",
   "version": "4.0.0",
-  "updated_at": "2026-11-28T04:58:08.741633+00:00",
+  "updated_at": "2026-11-28T05:00:00.564531+00:00",
   "active_trades": [
     {
       "trade_id": "HUSDT-20261128-073040-5FECF4",
@@ -107,7 +107,7 @@
       "strategy_version": "4.0.0",
       "entry_touch_armed": true,
       "entry_touch_missed": false,
-      "trailing_last_close_ms": 1795841100000,
+      "trailing_last_close_ms": 1795842000000,
       "trailing_last_st": "0.010542100797493525",
       "trailing_last_reason": "UNCHANGED_AFTER_TICKSIZE_ROUNDING",
       "trailing_pending_algo_client_id": null,
