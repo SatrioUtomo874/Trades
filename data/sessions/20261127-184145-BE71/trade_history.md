@@ -540,3 +540,39 @@
 - Entry: 0.014378 | Exit: 0.014378
 - PnL: 0 USDT (0%) | R: None
 - Closed: 2026-11-28T04:58:08.695391+00:00 | Reason: EXTERNAL_CLOSE_RECONCILED
+## DIAUSDT SHORT — EXPIRED
+- Trade ID: `DIAUSDT-20261128-114530-20823A`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T05:15:00.132840+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## NILUSDT SHORT — EXPIRED
+- Trade ID: `NILUSDT-20261128-114543-9D482B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T05:15:00.466949+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## ORDERUSDT SHORT — EXPIRED
+- Trade ID: `ORDERUSDT-20261128-114546-DAEBC0`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T05:15:00.790793+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## GIGGLEUSDT SHORT — EXPIRED
+- Trade ID: `GIGGLEUSDT-20261128-114537-B771C2`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T05:15:01.106466+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## REUSDT SHORT — EXPIRED
+- Trade ID: `REUSDT-20261128-114552-D79309`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T05:15:01.215787+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## RIVERUSDT SHORT — EXPIRED
+- Trade ID: `RIVERUSDT-20261128-114553-C4FC2D`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T05:15:01.432640+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
