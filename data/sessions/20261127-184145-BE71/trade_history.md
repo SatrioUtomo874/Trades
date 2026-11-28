@@ -798,3 +798,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T09:45:01.097145+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## HOMEUSDT SHORT — CANCELED
+- Trade ID: `HOMEUSDT-20261128-164536-5AB5F7`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T09:45:41.009140+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
