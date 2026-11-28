@@ -828,3 +828,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T10:00:00.673106+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## YFIUSDT SHORT — CANCELED
+- Trade ID: `YFIUSDT-20261128-170042-791407`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T10:00:44.587094+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
