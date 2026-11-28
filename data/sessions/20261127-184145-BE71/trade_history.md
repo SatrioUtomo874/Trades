@@ -942,3 +942,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T11:15:00.839093+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## SUNUSDT SHORT — EXPIRED
+- Trade ID: `SUNUSDT-20261128-180246-7E12B7`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T11:30:00.185786+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
