@@ -300,3 +300,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T00:43:11.393658+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## BREVUSDT SHORT — EXPIRED
+- Trade ID: `BREVUSDT-20261128-071527-F426C1`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T00:45:00.128768+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
