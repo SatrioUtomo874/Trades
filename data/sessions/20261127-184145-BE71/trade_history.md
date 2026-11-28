@@ -318,3 +318,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T01:30:00.048297+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
+## OPGUSDT LONG — CANCELED
+- Trade ID: `OPGUSDT-20261128-083045-56E85E`
+- Timeframe: M15 | Signal: BLUE
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T01:33:21.099290+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
