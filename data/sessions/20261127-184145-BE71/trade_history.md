@@ -726,3 +726,9 @@
 - Entry: None | Exit: None
 - PnL: None USDT (None%) | R: None
 - Closed: 2026-11-28T08:38:27.546682+00:00 | Reason: MAX_ACTIVE_POSITIONS_REACHED
+## 1000PEPEUSDT SHORT — EXPIRED
+- Trade ID: `1000PEPEUSDT-20261128-151513-C9971B`
+- Timeframe: M15 | Signal: RED
+- Entry: None | Exit: None
+- PnL: None USDT (None%) | R: None
+- Closed: 2026-11-28T08:45:00.113844+00:00 | Reason: SIGNAL_TRACE_EXPIRED_4_M15_CANDLES
